@@ -1,0 +1,163 @@
+"""Tests for configuration management."""
+
+import os
+import pytest
+
+from whisper_aloud.config import WhisperAloudConfig
+from whisper_aloud.exceptions import ConfigurationError
+
+
+def test_default_config():
+    """Test default configuration values."""
+    config = WhisperAloudConfig.load()
+    assert config.model.name == "base"
+    assert config.model.device == "auto"
+    assert config.model.compute_type == "int8"
+    assert config.model.download_root is None
+    assert config.transcription.language == "es"
+    assert config.transcription.beam_size == 5
+    assert config.transcription.vad_filter is True
+    assert config.transcription.task == "transcribe"
+
+
+def test_env_override():
+    """Test environment variable overrides."""
+    # Set environment variables
+    os.environ['WHISPER_ALOUD_MODEL_NAME'] = 'medium'
+    os.environ['WHISPER_ALOUD_MODEL_DEVICE'] = 'cpu'
+    os.environ['WHISPER_ALOUD_LANGUAGE'] = 'en'
+    os.environ['WHISPER_ALOUD_BEAM_SIZE'] = '3'
+    os.environ['WHISPER_ALOUD_VAD_FILTER'] = 'false'
+
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.model.name == "medium"
+        assert config.model.device == "cpu"
+        assert config.transcription.language == "en"
+        assert config.transcription.beam_size == 3
+        assert config.transcription.vad_filter is False
+    finally:
+        # Clean up environment
+        for key in ['WHISPER_ALOUD_MODEL_NAME', 'WHISPER_ALOUD_MODEL_DEVICE',
+                   'WHISPER_ALOUD_LANGUAGE', 'WHISPER_ALOUD_BEAM_SIZE',
+                   'WHISPER_ALOUD_VAD_FILTER']:
+            os.environ.pop(key, None)
+
+
+def test_invalid_model_name():
+    """Test validation catches invalid model name."""
+    os.environ['WHISPER_ALOUD_MODEL_NAME'] = 'invalid-model'
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid model name"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_MODEL_NAME', None)
+
+
+def test_invalid_device():
+    """Test validation catches invalid device."""
+    os.environ['WHISPER_ALOUD_MODEL_DEVICE'] = 'invalid-device'
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid device"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_MODEL_DEVICE', None)
+
+
+def test_invalid_compute_type():
+    """Test validation catches invalid compute type."""
+    os.environ['WHISPER_ALOUD_MODEL_COMPUTE_TYPE'] = 'invalid-type'
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid compute type"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_MODEL_COMPUTE_TYPE', None)
+
+
+def test_invalid_beam_size():
+    """Test validation catches invalid beam size."""
+    os.environ['WHISPER_ALOUD_BEAM_SIZE'] = '15'
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid beam size"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_BEAM_SIZE', None)
+
+
+def test_invalid_task():
+    """Test validation catches invalid task."""
+    os.environ['WHISPER_ALOUD_TASK'] = 'invalid-task'
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid task"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_TASK', None)
+
+
+def test_language_validation_edge_cases():
+    """Test language validation edge cases."""
+    # Test empty language
+    os.environ['WHISPER_ALOUD_LANGUAGE'] = ''
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid language"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
+
+    # Test single character language
+    os.environ['WHISPER_ALOUD_LANGUAGE'] = 'a'
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid language"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
+
+
+def test_beam_size_bounds():
+    """Test beam size validation at boundaries."""
+    # Test minimum valid beam size
+    os.environ['WHISPER_ALOUD_BEAM_SIZE'] = '1'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.beam_size == 1
+    finally:
+        os.environ.pop('WHISPER_ALOUD_BEAM_SIZE', None)
+
+    # Test maximum valid beam size
+    os.environ['WHISPER_ALOUD_BEAM_SIZE'] = '10'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.beam_size == 10
+    finally:
+        os.environ.pop('WHISPER_ALOUD_BEAM_SIZE', None)
+
+
+def test_env_var_type_conversion():
+    """Test environment variable type conversion."""
+    # Test boolean conversion
+    os.environ['WHISPER_ALOUD_VAD_FILTER'] = 'false'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.vad_filter is False
+    finally:
+        os.environ.pop('WHISPER_ALOUD_VAD_FILTER', None)
+
+    # Test integer conversion
+    os.environ['WHISPER_ALOUD_BEAM_SIZE'] = '7'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.beam_size == 7
+    finally:
+        os.environ.pop('WHISPER_ALOUD_BEAM_SIZE', None)
+
+
+def test_config_immutability():
+    """Test that loaded config is properly isolated."""
+    config1 = WhisperAloudConfig.load()
+    config2 = WhisperAloudConfig.load()
+
+    # Modify one config
+    config1.model.name = "small"
+
+    # Other config should be unchanged
+    assert config2.model.name == "base"
