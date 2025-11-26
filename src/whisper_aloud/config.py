@@ -40,11 +40,23 @@ class AudioConfig:
 
 
 @dataclass
+class ClipboardConfig:
+    """Configuration for clipboard integration."""
+    auto_copy: bool = True                # Auto-copy after transcription
+    auto_paste: bool = True               # Auto-paste if available (auto-detect permissions)
+    paste_delay_ms: int = 100             # Delay before paste simulation
+    timeout_seconds: float = 5.0          # Command timeout
+    fallback_to_file: bool = True         # ALWAYS write to temp file if clipboard fails
+    fallback_path: str = "/tmp/whisper_aloud_clipboard.txt"  # Fallback file location
+
+
+@dataclass
 class WhisperAloudConfig:
     """Main configuration for WhisperAloud."""
     model: ModelConfig
     transcription: TranscriptionConfig
     audio: AudioConfig
+    clipboard: ClipboardConfig
 
     @classmethod
     def load(cls) -> 'WhisperAloudConfig':
@@ -75,7 +87,16 @@ class WhisperAloudConfig:
             max_recording_duration=float(os.getenv('WHISPER_ALOUD_MAX_RECORDING_DURATION', '300.0')),
         )
 
-        config = cls(model=model_config, transcription=transcription_config, audio=audio_config)
+        clipboard_config = ClipboardConfig(
+            auto_copy=os.getenv('WHISPER_ALOUD_CLIPBOARD_AUTO_COPY', 'true').lower() == 'true',
+            auto_paste=os.getenv('WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE', 'true').lower() == 'true',
+            paste_delay_ms=int(os.getenv('WHISPER_ALOUD_CLIPBOARD_PASTE_DELAY_MS', '100')),
+            timeout_seconds=float(os.getenv('WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS', '5.0')),
+            fallback_to_file=os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE', 'true').lower() == 'true',
+            fallback_path=os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH', '/tmp/whisper_aloud_clipboard.txt'),
+        )
+
+        config = cls(model=model_config, transcription=transcription_config, audio=audio_config, clipboard=clipboard_config)
         config.validate()
         return config
 
@@ -150,4 +171,17 @@ class WhisperAloudConfig:
             raise ConfigurationError(
                 f"Invalid chunk duration {self.audio.chunk_duration}. "
                 "Must be between 0.01 and 1.0 seconds"
+            )
+
+        # Validate clipboard configuration
+        if self.clipboard.timeout_seconds <= 0:
+            raise ConfigurationError(
+                f"Invalid clipboard timeout {self.clipboard.timeout_seconds}. "
+                "Must be greater than 0"
+            )
+
+        if self.clipboard.paste_delay_ms < 0:
+            raise ConfigurationError(
+                f"Invalid paste delay {self.clipboard.paste_delay_ms}. "
+                "Must be >= 0"
             )

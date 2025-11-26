@@ -39,3 +39,18 @@ class AudioRecordingError(WhisperAloudError):
 class AudioProcessingError(WhisperAloudError):
     """Raised when audio processing fails."""
     pass
+
+
+class ClipboardError(WhisperAloudError):
+    """Base exception for clipboard operations."""
+    pass
+
+
+class ClipboardNotAvailableError(ClipboardError):
+    """Raised when clipboard tools are not available."""
+    pass
+
+
+class ClipboardPermissionError(ClipboardError):
+    """Raised when clipboard operations lack permissions."""
+    pass

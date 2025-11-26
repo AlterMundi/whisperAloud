@@ -10,6 +10,10 @@ This phase implements the foundational transcription capabilities with lazy mode
 
 This phase adds professional audio recording capabilities with real-time level monitoring, voice activity detection, and seamless integration with Phase 1 transcription.
 
+## Phase 3: Clipboard Integration ✅ COMPLETE
+
+This phase adds clipboard integration to make transcriptions immediately usable. Features include automatic clipboard copy, paste simulation (Wayland/X11), and reliable file fallback.
+
 ### Installation
 
 **Quick Start:**
@@ -138,6 +142,144 @@ print(f"📝 {result.text}")
 print(f"🎯 Confidence: {result.confidence:.1%}")
 ```
 
+## Clipboard Integration
+
+WhisperAloud includes clipboard integration for immediate text usage with automatic fallback.
+
+### Basic Usage
+
+```python
+from whisper_aloud import WhisperAloudConfig, ClipboardManager
+
+# Load configuration
+config = WhisperAloudConfig.load()
+clipboard = ClipboardManager(config.clipboard)
+
+# Copy text to clipboard
+clipboard.copy("Transcribed text here")
+```
+
+### Complete Workflow with Clipboard
+
+```python
+from whisper_aloud import WhisperAloudConfig, Transcriber, ClipboardManager
+from whisper_aloud.audio import AudioRecorder
+import time
+
+# Setup
+config = WhisperAloudConfig.load()
+recorder = AudioRecorder(config.audio)
+transcriber = Transcriber(config)
+clipboard = ClipboardManager(config.clipboard)
+
+# Record
+print("🎤 Speak now...")
+recorder.start()
+time.sleep(5)
+audio = recorder.stop()
+
+# Transcribe
+result = transcriber.transcribe_numpy(audio, sample_rate=16000)
+print(f"📝 {result.text}")
+
+# Copy to clipboard
+if clipboard.copy(result.text):
+    print("📋 Copied to clipboard!")
+```
+
+### Session Detection
+
+WhisperAloud automatically detects your display server:
+
+- **Wayland**: Uses `wl-copy` for clipboard, `ydotool` for paste simulation
+- **X11**: Uses `xclip` for clipboard, `xdotool` for paste simulation
+- **Fallback**: Always writes to `/tmp/whisper_aloud_clipboard.txt`
+
+### Paste Simulation
+
+Check if paste simulation is available:
+
+```python
+status = clipboard.check_paste_permissions()
+
+if status['available']:
+    print("✅ Paste simulation ready!")
+    # Simulate Ctrl+V paste
+    from whisper_aloud.clipboard import PasteSimulator
+    simulator = PasteSimulator(clipboard._session_type, config.clipboard)
+    simulator.simulate_paste()
+else:
+    print(f"❌ Not available: {status['reason']}")
+    print(f"💡 Fix: {status['fix']}")
+```
+
+### Setup for Auto-Paste (Wayland)
+
+For paste simulation on Wayland, install required tools and configure permissions:
+
+```bash
+# Install clipboard tools
+sudo apt install wl-clipboard ydotool
+
+# Enable ydotool service
+sudo systemctl enable --now ydotool.service
+
+# Add user to input group (required for ydotool)
+sudo usermod -aG input $USER
+
+# IMPORTANT: Logout and login for group changes to take effect
+```
+
+### Setup for Auto-Paste (X11)
+
+For X11 systems:
+
+```bash
+# Install clipboard tools
+sudo apt install xclip xdotool
+```
+
+### Clipboard Configuration
+
+Configure via environment variables:
+
+```bash
+# Clipboard settings
+export WHISPER_ALOUD_CLIPBOARD_AUTO_COPY=true    # Auto-copy transcriptions
+export WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE=true   # Auto-paste if available
+export WHISPER_ALOUD_CLIPBOARD_PASTE_DELAY_MS=100  # Delay before paste
+export WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS=5.0  # Command timeout
+export WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH=/tmp/whisper_aloud_clipboard.txt
+```
+
+### Fallback Mechanism
+
+If clipboard tools are not installed, WhisperAloud **always** saves text to a fallback file:
+
+```bash
+# View fallback file
+cat /tmp/whisper_aloud_clipboard.txt
+
+# Monitor for new transcriptions
+tail -f /tmp/whisper_aloud_clipboard.txt
+```
+
+This ensures transcriptions are never lost, even without clipboard tools installed.
+
+### Demo
+
+Test clipboard functionality:
+
+```bash
+python demo_clipboard.py
+```
+
+This will:
+- Detect your session type (Wayland/X11)
+- Test clipboard copy
+- Check paste simulation availability
+- Show setup instructions if needed
+
 ### Configuration
 
 Via environment variables:
@@ -189,5 +331,5 @@ sudo apt install -y portaudio19-dev libportaudio2
 
 - ✅ Phase 1: Core transcription engine
 - ✅ Phase 2: Audio recording module
-- 🔄 Phase 3: Clipboard integration (in progress)
+- ✅ Phase 3: Clipboard integration
 - ⏳ Phase 4: GTK4 GUI
