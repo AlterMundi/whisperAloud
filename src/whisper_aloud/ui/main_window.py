@@ -687,6 +687,18 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.transcriber = Transcriber(self.config)
                 self.transcriber.load_model()
                 
+                # Re-initialize recorder with new config if needed
+                if self.recorder:
+                    # Stop any active recording first
+                    if self.recorder.is_recording:
+                        self.recorder.cancel()
+                    
+                    # Create new recorder instance with updated config
+                    self.recorder = AudioRecorder(
+                        self.config.audio,
+                        level_callback=self._on_audio_level
+                    )
+                
                 GLib.idle_add(self._on_model_reloaded)
             except Exception as e:
                 logger.error(f"Failed to reload model: {e}", exc_info=True)
@@ -699,6 +711,7 @@ class MainWindow(Gtk.ApplicationWindow):
         logger.info("Model reloaded successfully")
         self.status_label.set_text("Ready")
         self.record_button.set_sensitive(True)
+        self.set_state(AppState.IDLE)  # Reset state to IDLE
         self.status_bar.set_model_info(
             self.config.model.name,
             self.config.model.device
