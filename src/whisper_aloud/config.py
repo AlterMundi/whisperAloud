@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass
 from typing import Optional
+from pathlib import Path
 
 from .exceptions import ConfigurationError
 
@@ -51,12 +52,41 @@ class ClipboardConfig:
 
 
 @dataclass
+class PersistenceConfig:
+    """Configuration for persistence/history."""
+
+    # Database
+    db_path: Optional[Path] = None
+
+    # Audio archiving
+    save_audio: bool = False
+    audio_archive_path: Optional[Path] = None
+    audio_format: str = "flac"
+    deduplicate_audio: bool = True
+
+    # Auto-cleanup
+    auto_cleanup_enabled: bool = True
+    auto_cleanup_days: int = 90
+
+    # Limits
+    max_entries: int = 10000
+
+    def __post_init__(self):
+        """Set default paths if not provided."""
+        if self.db_path is None:
+            self.db_path = Path.home() / ".local/share/whisper_aloud/history.db"
+        if self.audio_archive_path is None:
+            self.audio_archive_path = Path.home() / ".local/share/whisper_aloud/audio"
+
+
+@dataclass
 class WhisperAloudConfig:
     """Main configuration for WhisperAloud."""
     model: ModelConfig
     transcription: TranscriptionConfig
     audio: AudioConfig
     clipboard: ClipboardConfig
+    persistence: Optional[PersistenceConfig] = None
 
     @classmethod
     def load(cls) -> 'WhisperAloudConfig':
@@ -96,7 +126,24 @@ class WhisperAloudConfig:
             fallback_path=os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH', '/tmp/whisper_aloud_clipboard.txt'),
         )
 
-        config = cls(model=model_config, transcription=transcription_config, audio=audio_config, clipboard=clipboard_config)
+        persistence_config = PersistenceConfig(
+            db_path=Path(os.getenv('WHISPER_ALOUD_DB_PATH')) if os.getenv('WHISPER_ALOUD_DB_PATH') else None,
+            save_audio=os.getenv('WHISPER_ALOUD_SAVE_AUDIO', 'false').lower() == 'true',
+            audio_archive_path=Path(os.getenv('WHISPER_ALOUD_AUDIO_ARCHIVE')) if os.getenv('WHISPER_ALOUD_AUDIO_ARCHIVE') else None,
+            audio_format=os.getenv('WHISPER_ALOUD_AUDIO_FORMAT', 'flac'),
+            deduplicate_audio=os.getenv('WHISPER_ALOUD_DEDUPLICATE_AUDIO', 'true').lower() == 'true',
+            auto_cleanup_enabled=os.getenv('WHISPER_ALOUD_AUTO_CLEANUP', 'true').lower() == 'true',
+            auto_cleanup_days=int(os.getenv('WHISPER_ALOUD_CLEANUP_DAYS', '90')),
+            max_entries=int(os.getenv('WHISPER_ALOUD_MAX_ENTRIES', '10000'))
+        )
+
+        config = cls(
+            model=model_config,
+            transcription=transcription_config,
+            audio=audio_config,
+            clipboard=clipboard_config,
+            persistence=persistence_config
+        )
         config.validate()
         return config
 
