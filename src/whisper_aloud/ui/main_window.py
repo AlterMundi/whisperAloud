@@ -658,16 +658,25 @@ class MainWindow(Gtk.ApplicationWindow):
         new_config = WhisperAloudConfig.load()
         
         # Check if model settings changed
-        if (new_config.model.name != self.config.model.name or
+        model_changed = (
+            new_config.model.name != self.config.model.name or
             new_config.model.device != self.config.model.device or
-            new_config.model.compute_type != self.config.model.compute_type):
-            
-            logger.info("Model configuration changed, reloading...")
-            self.config = new_config
+            new_config.model.compute_type != self.config.model.compute_type
+        )
+        
+        # Check if audio settings changed (that require recorder re-init)
+        audio_changed = (
+            new_config.audio.device_id != self.config.audio.device_id or
+            new_config.audio.sample_rate != self.config.audio.sample_rate or
+            new_config.audio.channels != self.config.audio.channels
+        )
+        
+        self.config = new_config
+        
+        if model_changed or audio_changed:
+            logger.info(f"Configuration changed (model={model_changed}, audio={audio_changed}), reloading...")
             self._reload_model()
         else:
-            # Just update config object
-            self.config = new_config
             # Update status bar just in case
             self.status_bar.set_model_info(
                 self.config.model.name,
@@ -692,6 +701,9 @@ class MainWindow(Gtk.ApplicationWindow):
                     # Stop any active recording first
                     if self.recorder.is_recording:
                         self.recorder.cancel()
+                    
+                    # Ensure the old recorder releases resources
+                    del self.recorder
                     
                     # Create new recorder instance with updated config
                     self.recorder = AudioRecorder(

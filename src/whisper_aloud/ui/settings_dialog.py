@@ -497,6 +497,14 @@ class SettingsDialog(Gtk.Window):
             # Check if a valid device is selected (index != -1)
             if selected_device_idx != -1 and selected_device_idx < len(self._devices):
                 self._config.audio.device_id = self._devices[selected_device_idx].id
+            
+            # Update channels based on selected device
+            if self._config.audio.device_id is not None:
+                device = DeviceManager.get_device_by_id(self._config.audio.device_id)
+                # If device is mono-only, force mono. If stereo-capable, respect config or default to stereo?
+                # For now, let's just ensure we don't ask for more channels than available
+                if device.channels < self._config.audio.channels:
+                    self._config.audio.channels = device.channels
 
             # Validate audio settings
             self._config.audio.sample_rate = InputValidator.validate_integer(
