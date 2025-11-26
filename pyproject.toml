@@ -28,6 +28,9 @@ classifiers = [
 dependencies = [
     "faster-whisper>=1.1.0",
     "numpy>=1.24.0",
+    "sounddevice>=0.4.6",
+    "scipy>=1.11.0",
+    # PyGObject/GTK4: Use system package (python3-gi) instead of pip
 ]
 
 [project.optional-dependencies]
@@ -41,6 +44,7 @@ dev = [
 
 [project.scripts]
 whisper-aloud-transcribe = "whisper_aloud.__main__:main"
+whisper-aloud-gui = "whisper_aloud.ui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

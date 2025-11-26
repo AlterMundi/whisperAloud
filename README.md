@@ -14,12 +14,24 @@ This phase adds professional audio recording capabilities with real-time level m
 
 This phase adds clipboard integration to make transcriptions immediately usable. Features include automatic clipboard copy, paste simulation (Wayland/X11), and reliable file fallback.
 
+## Phase 4: GTK4 GUI (MVP) 🚧 IN PROGRESS
+
+A graphical user interface built with GTK4 for easy voice recording and transcription.
+
+**Current Status:** Core functionality complete
+- ✅ Application window with state management
+- ✅ Audio recording with timer
+- ✅ Real-time transcription
+- ✅ Copy to clipboard
+- ⏳ Settings dialog (pending)
+- ⏳ Level meter visualization (pending)
+
 ### Installation
 
 **Quick Start:**
 ```bash
 # Install system dependencies (Debian/Ubuntu)
-sudo apt install -y portaudio19-dev libportaudio2 python3-venv
+sudo apt install -y portaudio19-dev libportaudio2 python3-venv python3-gi gir1.2-gtk-4.0
 
 # Create and activate virtual environment
 python3 -m venv ~/.venvs/whisper_aloud
@@ -37,6 +49,21 @@ pip install -e ".[dev]"
 ```
 
 ### Usage
+
+**Graphical Interface (Recommended)**:
+```bash
+# Launch GUI application
+whisper-aloud-gui
+
+# Or using demo script
+python demo_gui.py
+```
+
+The GUI provides:
+- One-click recording with visual timer
+- Automatic transcription when you stop recording
+- Copy to clipboard (manual or automatic)
+- Clean, simple interface
 
 **Command Line**:
 ```bash
@@ -332,4 +359,7 @@ sudo apt install -y portaudio19-dev libportaudio2
 - ✅ Phase 1: Core transcription engine
 - ✅ Phase 2: Audio recording module
 - ✅ Phase 3: Clipboard integration
-- ⏳ Phase 4: GTK4 GUI
+- 🚧 Phase 4: GTK4 GUI (MVP functional, enhancements pending)
+- ⏳ Phase 5: Persistence layer (history)
+- ⏳ Phase 6: D-Bus service (daemon mode)
+- ⏳ Phase 7: GNOME integration
