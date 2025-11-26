@@ -44,3 +44,24 @@ package-lock.json
 # OS
 .DS_Store
 Thumbs.db
+
+# WhisperAloud specific
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+/tmp/
+.cache/
+
+# Claude Code
+.claude/
+
+# User configuration
+config.json
+config.toml
+
+# Temporary test files
+test_audio_*.wav
+sample_*.wav
+recording_*.wav
