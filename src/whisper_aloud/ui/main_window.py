@@ -13,6 +13,16 @@ from ..transcriber import Transcriber, TranscriptionResult
 from ..audio import AudioRecorder, AudioLevel
 from ..clipboard import ClipboardManager
 from .utils import AppState, format_duration
+from .level_meter import LevelMeterPanel
+from .settings_dialog import SettingsDialog
+from .error_handler import (
+    ErrorDialog,
+    ErrorSeverity,
+    handle_audio_device_error,
+    handle_model_load_error,
+    handle_transcription_error,
+    handle_clipboard_error
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +58,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_title("WhisperAloud")
         self.set_default_size(600, 500)
 
+        # Set up keyboard shortcuts
+        self._setup_keyboard_shortcuts()
+
         # Load configuration and initialize components in background
         GLib.idle_add(self._init_components_async)
 
@@ -63,10 +76,12 @@ class MainWindow(Gtk.ApplicationWindow):
         header_bar = Gtk.HeaderBar()
         header_bar.set_title_widget(Gtk.Label(label="WhisperAloud"))
 
-        # Settings button (menu)
-        menu_button = Gtk.MenuButton()
-        menu_button.set_icon_name("open-menu-symbolic")
-        header_bar.pack_end(menu_button)
+        # Settings button
+        settings_button = Gtk.Button()
+        settings_button.set_icon_name("preferences-system-symbolic")
+        settings_button.set_tooltip_text("Settings")
+        settings_button.connect("clicked", self._on_settings_clicked)
+        header_bar.pack_end(settings_button)
 
         main_box.append(header_bar)
 
@@ -89,6 +104,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.record_button.add_css_class("pill")
         self.record_button.set_size_request(-1, 60)
         self.record_button.set_sensitive(False)  # Disabled until model loads
+        self.record_button.set_tooltip_text("Start/stop recording (Space)")
         self.record_button.connect("clicked", self._on_record_button_clicked)
         recording_panel_box.append(self.record_button)
 
@@ -96,6 +112,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.timer_label = Gtk.Label(label="0:00")
         self.timer_label.add_css_class("title-1")
         recording_panel_box.append(self.timer_label)
+
+        # Level meter
+        self.level_meter = LevelMeterPanel()
+        self.level_meter.set_margin_top(12)
+        recording_panel_box.append(self.level_meter)
 
         main_box.append(recording_panel_box)
 
@@ -133,11 +154,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.copy_button = Gtk.Button(label="Copy to Clipboard")
         self.copy_button.set_sensitive(False)
+        self.copy_button.set_tooltip_text("Copy transcription to clipboard (Ctrl+C)")
         self.copy_button.connect("clicked", self._on_copy_clicked)
         button_box.append(self.copy_button)
 
         self.clear_button = Gtk.Button(label="Clear")
         self.clear_button.set_sensitive(False)
+        self.clear_button.set_tooltip_text("Clear transcription text (Escape)")
         self.clear_button.connect("clicked", self._on_clear_clicked)
         button_box.append(self.clear_button)
 
@@ -145,6 +168,59 @@ class MainWindow(Gtk.ApplicationWindow):
         main_box.append(transcription_box)
 
         logger.debug("UI built successfully")
+
+    def _setup_keyboard_shortcuts(self) -> None:
+        """Set up keyboard shortcuts."""
+        # Create event controller for key press
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_controller)
+
+        logger.debug("Keyboard shortcuts configured")
+
+    def _on_key_pressed(
+        self,
+        controller: Gtk.EventControllerKey,
+        keyval: int,
+        keycode: int,
+        state: 'Gdk.ModifierType'
+    ) -> bool:
+        """
+        Handle key press events.
+
+        Args:
+            controller: Event controller
+            keyval: Key value
+            keycode: Hardware keycode
+            state: Modifier state
+
+        Returns:
+            True if event was handled
+        """
+        from gi.repository import Gdk
+
+        # Check for Ctrl modifier
+        ctrl_pressed = (state & Gdk.ModifierType.CONTROL_MASK) != 0
+
+        # Ctrl+C: Copy to clipboard
+        if ctrl_pressed and keyval == Gdk.KEY_c:
+            if self.copy_button.get_sensitive():
+                self._copy_to_clipboard()
+                return True
+
+        # Space: Toggle recording (if not in transcribing state)
+        if keyval == Gdk.KEY_space:
+            if self.record_button.get_sensitive():
+                self.record_button.emit("clicked")
+                return True
+
+        # Escape: Clear text (if in ready state)
+        if keyval == Gdk.KEY_Escape:
+            if self.clear_button.get_sensitive():
+                self._on_clear_clicked(None)
+                return True
+
+        return False
 
     def _init_components_async(self) -> bool:
         """
@@ -164,7 +240,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.transcriber.load_model()
 
                 # Initialize other components
-                self.recorder = AudioRecorder(self.config.audio)
+                self.recorder = AudioRecorder(
+                    self.config.audio,
+                    level_callback=self._on_audio_level
+                )
                 self.clipboard_manager = ClipboardManager(self.config.clipboard)
 
                 GLib.idle_add(self._on_components_loaded)
@@ -201,8 +280,12 @@ class MainWindow(Gtk.ApplicationWindow):
             False to remove this idle callback
         """
         logger.error(f"Component load error: {error_msg}")
-        self.status_label.set_text(f"Error: {error_msg}")
+        self.status_label.set_text("Error loading components")
         self.set_state(AppState.ERROR)
+
+        # Show detailed error dialog
+        handle_model_load_error(self, Exception(error_msg))
+
         return False
 
     def set_state(self, new_state: AppState) -> None:
@@ -265,10 +348,39 @@ class MainWindow(Gtk.ApplicationWindow):
             # Stop recording and start transcription
             self._stop_recording_and_transcribe()
 
+    def _on_audio_level(self, level: AudioLevel) -> None:
+        """
+        Handle audio level updates from recorder (audio thread).
+
+        Args:
+            level: Audio level information
+        """
+        # Update level meter from main thread
+        GLib.idle_add(self._update_level_meter, level.rms, level.peak, level.db)
+
+    def _update_level_meter(self, rms: float, peak: float, db: float) -> bool:
+        """
+        Update level meter (main thread).
+
+        Args:
+            rms: RMS level
+            peak: Peak level
+            db: Decibel level
+
+        Returns:
+            False to remove this idle callback
+        """
+        self.level_meter.update_level(rms, peak, db)
+        return False
+
     def _start_recording(self) -> None:
         """Start audio recording."""
         try:
             logger.info("Starting audio recording")
+
+            # Reset level meter
+            self.level_meter.reset()
+
             self.recorder.start()
             self.set_state(AppState.RECORDING)
             self.status_label.set_text("Recording...")
@@ -279,8 +391,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
         except Exception as e:
             logger.error(f"Failed to start recording: {e}", exc_info=True)
-            self.status_label.set_text(f"Error: {e}")
+            self.status_label.set_text("Recording failed")
             self.set_state(AppState.ERROR)
+
+            # Show detailed error dialog
+            handle_audio_device_error(self, e)
 
     def _stop_recording_and_transcribe(self) -> None:
         """Stop recording and start transcription in background thread."""
@@ -388,8 +503,12 @@ class MainWindow(Gtk.ApplicationWindow):
             False to remove this idle callback
         """
         logger.error(f"Transcription error: {error_msg}")
-        self.status_label.set_text(f"Error: {error_msg}")
+        self.status_label.set_text("Transcription failed")
         self.set_state(AppState.ERROR)
+
+        # Show detailed error dialog
+        handle_transcription_error(self, Exception(error_msg))
+
         return False
 
     def _on_copy_clicked(self, button: Gtk.Button) -> None:
@@ -421,11 +540,18 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.status_label.set_text("Copied to clipboard")
                 logger.info(f"Copied {len(text)} characters to clipboard")
             else:
-                self.status_label.set_text("Copy failed (check fallback file)")
-                logger.warning("Clipboard copy failed")
+                self.status_label.set_text("Saved to fallback file")
+                logger.warning("Clipboard copy failed, using fallback")
+                ErrorDialog.show_error(
+                    parent=self,
+                    title="Clipboard Warning",
+                    message="Text saved to fallback file:\n/tmp/whisper_aloud_clipboard.txt",
+                    severity=ErrorSeverity.WARNING
+                )
         except Exception as e:
             logger.error(f"Clipboard error: {e}", exc_info=True)
-            self.status_label.set_text(f"Copy error: {e}")
+            self.status_label.set_text("Clipboard error")
+            handle_clipboard_error(self, e)
 
     def _on_clear_clicked(self, button: Gtk.Button) -> None:
         """
@@ -442,6 +568,19 @@ class MainWindow(Gtk.ApplicationWindow):
 
         if self._state == AppState.READY:
             self.set_state(AppState.IDLE)
+
+    def _on_settings_clicked(self, button: Gtk.Button) -> None:
+        """
+        Handle settings button click.
+
+        Args:
+            button: The button that was clicked
+        """
+        logger.info("Opening settings dialog")
+
+        # Create and show settings dialog
+        dialog = SettingsDialog(self, self.config)
+        dialog.present()
 
     def cleanup(self) -> None:
         """Clean up resources before shutdown."""
