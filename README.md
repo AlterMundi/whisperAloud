@@ -28,6 +28,19 @@ A graphical user interface built with GTK4 for easy voice recording and transcri
 - ✅ Keyboard shortcuts (Space, Ctrl+C, Escape)
 - ✅ Comprehensive error handling with recovery options
 
+## Phase 5: Persistence Layer ✅ COMPLETE
+
+A complete persistence layer for storing transcription history with full-text search and optional audio archiving.
+
+**Features:**
+- ✅ SQLite database with FTS5 full-text search
+- ✅ Sidebar history panel with search and filtering
+- ✅ Optional audio archiving (FLAC format) with deduplication
+- ✅ Export to JSON, Markdown, CSV, and Text
+- ✅ Auto-cleanup of old entries and orphaned audio files
+- ✅ Favorites and tagging support
+- ✅ Non-blocking background operations
+
 ### Installation
 
 **Quick Start:**
@@ -362,6 +375,6 @@ sudo apt install -y portaudio19-dev libportaudio2
 - ✅ Phase 2: Audio recording module
 - ✅ Phase 3: Clipboard integration
 - ✅ Phase 4: GTK4 GUI (Complete with settings, level meter, error handling)
-- ⏳ Phase 5: Persistence layer (history)
+- ✅ Phase 5: Persistence layer (history, search, audio archiving)
 - ⏳ Phase 6: D-Bus service (daemon mode)
 - ⏳ Phase 7: GNOME integration

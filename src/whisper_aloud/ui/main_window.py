@@ -15,6 +15,9 @@ from ..clipboard import ClipboardManager
 from .utils import AppState, format_duration
 from .level_meter import LevelMeterPanel
 from .settings_dialog import SettingsDialog
+from .history_panel import HistoryPanel
+from .status_bar import StatusBar
+from ..persistence.history_manager import HistoryManager
 from .error_handler import (
     ErrorDialog,
     ErrorSeverity,
@@ -50,6 +53,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.transcriber: Optional[Transcriber] = None
         self.recorder: Optional[AudioRecorder] = None
         self.clipboard_manager: Optional[ClipboardManager] = None
+        self.history_manager: Optional[HistoryManager] = None
+        self.session_id: Optional[str] = None
 
         # Build UI
         self._build_ui()
@@ -76,6 +81,14 @@ class MainWindow(Gtk.ApplicationWindow):
         header_bar = Gtk.HeaderBar()
         header_bar.set_title_widget(Gtk.Label(label="WhisperAloud"))
 
+        # History toggle button
+        self.history_toggle = Gtk.ToggleButton()
+        self.history_toggle.set_icon_name("sidebar-show-symbolic")
+        self.history_toggle.set_tooltip_text("Toggle History")
+        self.history_toggle.set_active(True)
+        self.history_toggle.connect("toggled", self._on_history_toggled)
+        header_bar.pack_start(self.history_toggle)
+
         # Settings button
         settings_button = Gtk.Button()
         settings_button.set_icon_name("preferences-system-symbolic")
@@ -85,11 +98,20 @@ class MainWindow(Gtk.ApplicationWindow):
 
         main_box.append(header_bar)
 
+        # Main content area (Paned)
+        self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.paned.set_position(400)  # Initial split position
+        self.paned.set_wide_handle(True)
+        main_box.append(self.paned)
+
+        # Left side: Recording and Transcription
+        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        
         # Status label
         self.status_label = Gtk.Label(label="Loading...")
         self.status_label.set_margin_top(12)
         self.status_label.set_margin_bottom(12)
-        main_box.append(self.status_label)
+        left_box.append(self.status_label)
 
         # Recording panel placeholder
         recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -118,10 +140,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.level_meter.set_margin_top(12)
         recording_panel_box.append(self.level_meter)
 
-        main_box.append(recording_panel_box)
+        left_box.append(recording_panel_box)
 
         # Separator
-        main_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        left_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # Transcription view placeholder
         transcription_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -165,7 +187,19 @@ class MainWindow(Gtk.ApplicationWindow):
         button_box.append(self.clear_button)
 
         transcription_box.append(button_box)
-        main_box.append(transcription_box)
+        left_box.append(transcription_box)
+
+        # Add left box to paned
+        self.paned.set_start_child(left_box)
+        
+        # Right side: History Panel (placeholder until initialized)
+        self.history_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.history_container.set_size_request(250, -1)
+        self.paned.set_end_child(self.history_container)
+
+        # Status bar
+        self.status_bar = StatusBar()
+        main_box.append(self.status_bar)
 
         logger.debug("UI built successfully")
 
@@ -245,6 +279,11 @@ class MainWindow(Gtk.ApplicationWindow):
                     level_callback=self._on_audio_level
                 )
                 self.clipboard_manager = ClipboardManager(self.config.clipboard)
+                
+                # Initialize history manager
+                import uuid
+                self.session_id = str(uuid.uuid4())
+                self.history_manager = HistoryManager(self.config.persistence)
 
                 GLib.idle_add(self._on_components_loaded)
 
@@ -267,6 +306,19 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status_label.set_text("Ready")
         self.record_button.set_sensitive(True)
         self.set_state(AppState.IDLE)
+        
+        # Initialize History Panel
+        if self.history_manager:
+            self.history_panel = HistoryPanel(self.history_manager)
+            self.history_panel.connect("entry-selected", self._on_history_entry_selected)
+            self.history_container.append(self.history_panel)
+
+        # Update status bar
+        self.status_bar.set_model_info(
+            self.config.model.name,
+            self.config.model.device
+        )
+            
         return False
 
     def _on_load_error(self, error_msg: str) -> bool:
@@ -452,6 +504,18 @@ class MainWindow(Gtk.ApplicationWindow):
             )
 
             logger.info(f"Transcription complete: {len(result.text)} characters")
+            
+            # Save to history (IN THIS THREAD)
+            if self.history_manager:
+                try:
+                    self.history_manager.add_transcription(
+                        result=result,
+                        audio=audio if self.config.persistence.save_audio else None,
+                        sample_rate=self.config.audio.sample_rate,
+                        session_id=self.session_id
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to save history: {e}", exc_info=True)
 
             # Update UI from main thread
             GLib.idle_add(self._on_transcription_complete, result)
@@ -489,6 +553,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # Auto-copy if enabled
         if self.config.clipboard.auto_copy:
             self._copy_to_clipboard()
+
+        # Refresh history panel
+        if hasattr(self, 'history_panel'):
+            self.history_panel.refresh_recent()
 
         return False
 
@@ -579,12 +647,97 @@ class MainWindow(Gtk.ApplicationWindow):
         logger.info("Opening settings dialog")
 
         # Create and show settings dialog
-        dialog = SettingsDialog(self, self.config)
+        dialog = SettingsDialog(self, self.config, on_save_callback=self._on_settings_saved)
         dialog.present()
+
+    def _on_settings_saved(self) -> None:
+        """Handle settings saved event."""
+        logger.info("Settings saved, checking for changes...")
+        
+        # Reload configuration from file to get latest changes
+        new_config = WhisperAloudConfig.load()
+        
+        # Check if model settings changed
+        if (new_config.model.name != self.config.model.name or
+            new_config.model.device != self.config.model.device or
+            new_config.model.compute_type != self.config.model.compute_type):
+            
+            logger.info("Model configuration changed, reloading...")
+            self.config = new_config
+            self._reload_model()
+        else:
+            # Just update config object
+            self.config = new_config
+            # Update status bar just in case
+            self.status_bar.set_model_info(
+                self.config.model.name,
+                self.config.model.device
+            )
+
+    def _reload_model(self) -> None:
+        """Reload the Whisper model."""
+        self.status_label.set_text("Reloading model...")
+        self.record_button.set_sensitive(False)
+        
+        def _reload_thread():
+            try:
+                if self.transcriber:
+                    self.transcriber.unload_model()
+                
+                self.transcriber = Transcriber(self.config)
+                self.transcriber.load_model()
+                
+                GLib.idle_add(self._on_model_reloaded)
+            except Exception as e:
+                logger.error(f"Failed to reload model: {e}", exc_info=True)
+                GLib.idle_add(self._on_load_error, str(e))
+
+        threading.Thread(target=_reload_thread, daemon=True).start()
+
+    def _on_model_reloaded(self) -> bool:
+        """Called when model is reloaded."""
+        logger.info("Model reloaded successfully")
+        self.status_label.set_text("Ready")
+        self.record_button.set_sensitive(True)
+        self.status_bar.set_model_info(
+            self.config.model.name,
+            self.config.model.device
+        )
+        return False
+
+    def _on_history_toggled(self, button: Gtk.ToggleButton) -> None:
+        """Handle history toggle button."""
+        is_visible = button.get_active()
+        button.set_icon_name("sidebar-show-symbolic" if is_visible else "sidebar-hide-symbolic")
+        
+        if is_visible:
+            self.paned.set_end_child(self.history_container)
+        else:
+            self.paned.set_end_child(None)
+
+    def _on_history_entry_selected(self, panel, entry):
+        """Handle history entry selection."""
+        buffer = self.text_view.get_buffer()
+        buffer.set_text(entry.text)
+        
+        # Update status
+        confidence_pct = int(entry.confidence * 100)
+        self.status_label.set_text(
+            f"Loaded from history (Confidence: {confidence_pct}%, "
+            f"Duration: {entry.duration:.1f}s)"
+        )
+        
+        self.set_state(AppState.READY)
+        self.copy_button.set_sensitive(True)
+        self.clear_button.set_sensitive(True)
 
     def cleanup(self) -> None:
         """Clean up resources before shutdown."""
         logger.info("Cleaning up main window resources")
+
+        # Stop status bar monitoring
+        if hasattr(self, 'status_bar'):
+            self.status_bar.cleanup()
 
         # Stop recording if active
         if self.recorder and hasattr(self.recorder, 'is_recording') and self.recorder.is_recording:

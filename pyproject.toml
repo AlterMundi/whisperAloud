@@ -29,7 +29,9 @@ dependencies = [
     "faster-whisper>=1.1.0",
     "numpy>=1.24.0",
     "sounddevice>=0.4.6",
+    "soundfile>=0.12.0",
     "scipy>=1.11.0",
+    "psutil>=5.9.0",
     # PyGObject/GTK4: Use system package (python3-gi) instead of pip
 ]
 

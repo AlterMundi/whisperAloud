@@ -8,7 +8,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
 
-from ..config import WhisperAloudConfig, ModelConfig, AudioConfig, ClipboardConfig
+from ..config import WhisperAloudConfig, ModelConfig, AudioConfig, ClipboardConfig, PersistenceConfig
 from ..audio import DeviceManager
 from .error_handler import InputValidator, ValidationError
 
@@ -18,13 +18,19 @@ logger = logging.getLogger(__name__)
 class SettingsDialog(Gtk.Window):
     """Settings dialog for configuring WhisperAloud."""
 
-    def __init__(self, parent: Gtk.Window, config: WhisperAloudConfig) -> None:
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        config: WhisperAloudConfig,
+        on_save_callback: Optional[callable] = None
+    ) -> None:
         """
         Initialize the settings dialog.
 
         Args:
             parent: Parent window
             config: Current configuration
+            on_save_callback: Callback function to run after saving
         """
         super().__init__()
 
@@ -36,6 +42,7 @@ class SettingsDialog(Gtk.Window):
         # Store configuration
         self._config = config
         self._parent = parent
+        self._on_save_callback = on_save_callback
 
         # Build UI
         self._build_ui()
@@ -81,6 +88,7 @@ class SettingsDialog(Gtk.Window):
         self._add_model_page()
         self._add_audio_page()
         self._add_clipboard_page()
+        self._add_history_page()
 
         main_box.append(self.stack)
 
@@ -130,12 +138,12 @@ class SettingsDialog(Gtk.Window):
         device_label.set_halign(Gtk.Align.START)
         device_label.set_hexpand(True)
 
-        self.device_dropdown = Gtk.DropDown.new_from_strings(["cpu", "cuda"])
+        self.compute_device_dropdown = Gtk.DropDown.new_from_strings(["cpu", "cuda"])
         if self._config.model.device == "cuda":
-            self.device_dropdown.set_selected(1)
+            self.compute_device_dropdown.set_selected(1)
 
         device_box.append(device_label)
-        device_box.append(self.device_dropdown)
+        device_box.append(self.compute_device_dropdown)
         page.append(device_box)
 
         # Help text
@@ -174,23 +182,23 @@ class SettingsDialog(Gtk.Window):
             for d in self._devices
         ]
 
-        self.device_dropdown = Gtk.DropDown.new_from_strings(device_names)
+        self.audio_device_dropdown = Gtk.DropDown.new_from_strings(device_names)
 
         # Set current device
         current_device_id = self._config.audio.device_id
         if current_device_id is not None:
             for i, device in enumerate(self._devices):
                 if device.id == current_device_id:
-                    self.device_dropdown.set_selected(i)
+                    self.audio_device_dropdown.set_selected(i)
                     break
         else:
             # Find default device
             for i, device in enumerate(self._devices):
                 if device.is_default:
-                    self.device_dropdown.set_selected(i)
+                    self.audio_device_dropdown.set_selected(i)
                     break
 
-        device_box.append(self.device_dropdown)
+        device_box.append(self.audio_device_dropdown)
         page.append(device_box)
 
         # Sample rate
@@ -318,6 +326,148 @@ class SettingsDialog(Gtk.Window):
 
         self.stack.add_titled(page, "clipboard", "Clipboard")
 
+    def _add_history_page(self) -> None:
+        """Add history/persistence configuration page."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(24)
+        page.set_margin_end(24)
+        page.set_margin_top(24)
+        page.set_margin_bottom(24)
+
+        # Scrolled window for long content
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)
+
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        scrolled.set_child(content_box)
+
+        # Save audio switch
+        self.save_audio_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.save_audio_switch.set_active(self._config.persistence.save_audio)
+
+        save_audio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        save_audio_label = Gtk.Label(label="Save Audio Archives:")
+        save_audio_label.set_halign(Gtk.Align.START)
+        save_audio_label.set_hexpand(True)
+
+        save_audio_box.append(save_audio_label)
+        save_audio_box.append(self.save_audio_switch)
+        content_box.append(save_audio_box)
+
+        # Deduplicate audio switch
+        self.deduplicate_audio_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.deduplicate_audio_switch.set_active(self._config.persistence.deduplicate_audio)
+
+        dedupe_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        dedupe_label = Gtk.Label(label="Deduplicate Audio Files:")
+        dedupe_label.set_halign(Gtk.Align.START)
+        dedupe_label.set_hexpand(True)
+
+        dedupe_box.append(dedupe_label)
+        dedupe_box.append(self.deduplicate_audio_switch)
+        content_box.append(dedupe_box)
+
+        # Auto-cleanup switch
+        self.auto_cleanup_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.auto_cleanup_switch.set_active(self._config.persistence.auto_cleanup_enabled)
+
+        cleanup_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        cleanup_label = Gtk.Label(label="Auto-cleanup Old Entries:")
+        cleanup_label.set_halign(Gtk.Align.START)
+        cleanup_label.set_hexpand(True)
+
+        cleanup_box.append(cleanup_label)
+        cleanup_box.append(self.auto_cleanup_switch)
+        content_box.append(cleanup_box)
+
+        # Cleanup days entry
+        cleanup_days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        cleanup_days_label = Gtk.Label(label="Cleanup After (days):")
+        cleanup_days_label.set_halign(Gtk.Align.START)
+        cleanup_days_label.set_hexpand(True)
+
+        self.cleanup_days_entry = Gtk.Entry()
+        if self._config.persistence:
+            self.cleanup_days_entry.set_text(str(self._config.persistence.auto_cleanup_days))
+        else:
+            self.cleanup_days_entry.set_text("90")
+
+        cleanup_days_box.append(cleanup_days_label)
+        cleanup_days_box.append(self.cleanup_days_entry)
+        content_box.append(cleanup_days_box)
+
+        # Max entries
+        max_entries_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        max_entries_label = Gtk.Label(label="Maximum Entries:")
+        max_entries_label.set_halign(Gtk.Align.START)
+        max_entries_label.set_hexpand(True)
+
+        self.max_entries_entry = Gtk.Entry()
+        if self._config.persistence:
+            self.max_entries_entry.set_text(str(self._config.persistence.max_entries))
+        else:
+            self.max_entries_entry.set_text("10000")
+
+        max_entries_box.append(max_entries_label)
+        max_entries_box.append(self.max_entries_entry)
+        content_box.append(max_entries_box)
+
+        # Database path
+        db_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        db_path_label = Gtk.Label(label="Database Path:")
+        db_path_label.set_halign(Gtk.Align.START)
+        db_path_label.set_hexpand(True)
+
+        self.db_path_entry = Gtk.Entry()
+        if self._config.persistence and self._config.persistence.db_path:
+            self.db_path_entry.set_text(str(self._config.persistence.db_path))
+        else:
+            default_path = Path.home() / ".local/share/whisper_aloud/history.db"
+            self.db_path_entry.set_text(str(default_path))
+        self.db_path_entry.set_hexpand(True)
+
+        db_path_box.append(db_path_label)
+        db_path_box.append(self.db_path_entry)
+        content_box.append(db_path_box)
+
+        # Audio archive path
+        audio_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        audio_path_label = Gtk.Label(label="Audio Archive Path:")
+        audio_path_label.set_halign(Gtk.Align.START)
+        audio_path_label.set_hexpand(True)
+
+        self.audio_archive_entry = Gtk.Entry()
+        if self._config.persistence and self._config.persistence.audio_archive_path:
+            self.audio_archive_entry.set_text(str(self._config.persistence.audio_archive_path))
+        else:
+            default_path = Path.home() / ".local/share/whisper_aloud/audio"
+            self.audio_archive_entry.set_text(str(default_path))
+        self.audio_archive_entry.set_hexpand(True)
+
+        audio_path_box.append(audio_path_label)
+        audio_path_box.append(self.audio_archive_entry)
+        content_box.append(audio_path_box)
+
+        # Help text
+        help_label = Gtk.Label()
+        help_label.set_markup(
+            "<small>Save Audio: Archive audio recordings with transcriptions (requires disk space)\n"
+            "Deduplicate: Reuse identical audio files to save space\n"
+            "Auto-cleanup: Automatically remove entries older than specified days\n"
+            "Paths: Leave empty to use default XDG-compliant paths</small>"
+        )
+        help_label.set_halign(Gtk.Align.START)
+        help_label.add_css_class("dim-label")
+        help_label.set_wrap(True)
+        content_box.append(help_label)
+
+        page.append(scrolled)
+        self.stack.add_titled(page, "history", "History")
+
     def _on_save_clicked(self, button: Gtk.Button) -> None:
         """
         Handle save button click.
@@ -338,11 +488,14 @@ class SettingsDialog(Gtk.Window):
             self._config.transcription.language = validated_lang if validated_lang else None
 
             devices = ["cpu", "cuda"]
-            self._config.model.device = devices[self.device_dropdown.get_selected()]
+            selected_compute_idx = self.compute_device_dropdown.get_selected()
+            if selected_compute_idx != -1 and selected_compute_idx < len(devices):
+                self._config.model.device = devices[selected_compute_idx]
 
             # Update audio config
-            selected_device_idx = self.device_dropdown.get_selected()
-            if selected_device_idx < len(self._devices):
+            selected_device_idx = self.audio_device_dropdown.get_selected()
+            # Check if a valid device is selected (index != -1)
+            if selected_device_idx != -1 and selected_device_idx < len(self._devices):
                 self._config.audio.device_id = self._devices[selected_device_idx].id
 
             # Validate audio settings
@@ -371,8 +524,41 @@ class SettingsDialog(Gtk.Window):
                 field_name="Paste delay"
             )
 
+            # Update persistence config
+            if not self._config.persistence:
+                self._config.persistence = PersistenceConfig()
+
+            self._config.persistence.save_audio = self.save_audio_switch.get_active()
+            self._config.persistence.deduplicate_audio = self.deduplicate_audio_switch.get_active()
+            self._config.persistence.auto_cleanup_enabled = self.auto_cleanup_switch.get_active()
+            self._config.persistence.auto_cleanup_days = InputValidator.validate_integer(
+                self.cleanup_days_entry.get_text(),
+                min_value=1,
+                max_value=36500,  # ~100 years
+                field_name="Cleanup days"
+            )
+            self._config.persistence.max_entries = InputValidator.validate_integer(
+                self.max_entries_entry.get_text(),
+                min_value=100,
+                max_value=1000000,
+                field_name="Maximum entries"
+            )
+
+            # Update paths (empty string means use defaults)
+            db_path_text = self.db_path_entry.get_text().strip()
+            if db_path_text:
+                self._config.persistence.db_path = Path(db_path_text)
+
+            audio_path_text = self.audio_archive_entry.get_text().strip()
+            if audio_path_text:
+                self._config.persistence.audio_archive_path = Path(audio_path_text)
+
             # Save to file
             self._save_config()
+
+            # Trigger callback
+            if self._on_save_callback:
+                self._on_save_callback()
 
             # Show success message
             self._show_message("Settings saved successfully", Gtk.MessageType.INFO)
@@ -411,7 +597,7 @@ class SettingsDialog(Gtk.Window):
                 "sample_rate": self._config.audio.sample_rate,
                 "device_id": self._config.audio.device_id,
                 "channels": self._config.audio.channels,
-                "chunk_duration_ms": self._config.audio.chunk_duration_ms,
+                "chunk_duration": self._config.audio.chunk_duration,
                 "vad_enabled": self._config.audio.vad_enabled,
                 "vad_threshold": self._config.audio.vad_threshold,
                 "normalize_audio": self._config.audio.normalize_audio,
@@ -423,6 +609,15 @@ class SettingsDialog(Gtk.Window):
                 "paste_delay_ms": self._config.clipboard.paste_delay_ms,
                 "timeout_seconds": self._config.clipboard.timeout_seconds,
                 "fallback_path": self._config.clipboard.fallback_path,
+            },
+            "persistence": {
+                "save_audio": self._config.persistence.save_audio if self._config.persistence else False,
+                "deduplicate_audio": self._config.persistence.deduplicate_audio if self._config.persistence else True,
+                "auto_cleanup_enabled": self._config.persistence.auto_cleanup_enabled if self._config.persistence else True,
+                "auto_cleanup_days": self._config.persistence.auto_cleanup_days if self._config.persistence else 90,
+                "max_entries": self._config.persistence.max_entries if self._config.persistence else 10000,
+                "db_path": str(self._config.persistence.db_path) if self._config.persistence and self._config.persistence.db_path else None,
+                "audio_archive_path": str(self._config.persistence.audio_archive_path) if self._config.persistence and self._config.persistence.audio_archive_path else None,
             },
         }
 
