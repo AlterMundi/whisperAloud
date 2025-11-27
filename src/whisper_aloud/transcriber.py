@@ -11,6 +11,7 @@ import numpy as np
 
 from .config import WhisperAloudConfig
 from .exceptions import AudioFormatError, ModelLoadError, TranscriptionError
+from .utils.validation_helpers import sanitize_language_code
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +150,15 @@ class Transcriber:
 
         # Merge config with kwargs
         language = kwargs.get("language", self.config.transcription.language)
-        
-        # Validate language code to prevent segmentation faults in underlying library
-        if language and (len(language) != 2 or not language.isalpha()):
-             logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
-             language = None
+
+        # Sanitize language code to prevent segmentation faults in underlying library
+        if language:
+            sanitized = sanitize_language_code(language)
+            if sanitized is None:
+                logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
+                language = None
+            else:
+                language = sanitized
 
         transcribe_kwargs = {
             "language": language,
@@ -220,11 +225,15 @@ class Transcriber:
 
         # Merge config with kwargs
         language = kwargs.get("language", self.config.transcription.language)
-        
-        # Validate language code to prevent segmentation faults in underlying library
-        if language and (len(language) != 2 or not language.isalpha()):
-             logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
-             language = None
+
+        # Sanitize language code to prevent segmentation faults in underlying library
+        if language:
+            sanitized = sanitize_language_code(language)
+            if sanitized is None:
+                logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
+                language = None
+            else:
+                language = sanitized
 
         transcribe_kwargs = {
             "language": language,

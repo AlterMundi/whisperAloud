@@ -35,7 +35,7 @@ class HistoryPanel(Gtk.Box):
 
         # Search debouncing
         self._search_timeout_id = None
-        self._search_debounce_ms = 300
+        self._search_debounce_ms = 500
         self._current_query = ""
         self._show_favorites_only = False
 
@@ -328,7 +328,7 @@ class HistoryPanel(Gtk.Box):
                     else:
                         entries = self.history_manager.search(self._current_query, limit=1000)
                 else:
-                    entries = self.history_manager.get_recent(limit=10000)
+                    entries = self.history_manager.get_recent(limit=None)
                 
                 from pathlib import Path
                 file_path = Path(path)

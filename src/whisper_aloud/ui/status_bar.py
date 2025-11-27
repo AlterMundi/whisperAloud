@@ -89,7 +89,7 @@ class StatusBar(Gtk.Box):
                 # Update UI
                 GLib.idle_add(self._update_labels, mem_str, cpu_percent)
 
-                time.sleep(2.0)  # Update every 2 seconds
+                time.sleep(5.0)  # Update every 5 seconds
 
             except Exception as e:
                 logger.error(f"Resource monitoring error: {e}")

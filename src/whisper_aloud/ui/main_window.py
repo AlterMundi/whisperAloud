@@ -27,6 +27,7 @@ from .error_handler import (
     handle_transcription_error,
     handle_clipboard_error
 )
+from ..utils.config_persistence import save_config_to_file
 
 logger = logging.getLogger(__name__)
 
@@ -320,16 +321,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.history_panel.connect("entry-selected", self._on_history_entry_selected)
             self.history_container.append(self.history_panel)
 
-        # Update status bar
-        self.status_bar.set_model_info(
-            self.config.model.name,
-            self.config.model.device,
-            self.config.transcription.language
-        )
-        
-        # Update language button
-        lang = self.config.transcription.language or "auto"
-        self.lang_button.set_label(lang.upper())
+        # Update model info display
+        self._update_model_info()
             
         return False
 
@@ -679,35 +672,19 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Update config
         self.config.transcription.language = new_lang
-        
+
         # Save config to file
         try:
-            # We need to load the full config, update it, and save it back
-            # This is a bit inefficient but ensures consistency
-            full_config = WhisperAloudConfig.load()
-            full_config.transcription.language = new_lang
-            
-            # Save logic duplicated from SettingsDialog (should be refactored)
-            config_dir = Path.home() / ".config" / "whisper_aloud"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            config_path = config_dir / "config.json"
-            
-            # We need to serialize the full config properly
-            # For now, we'll just trigger a reload which will pick up the change if we saved it
-            # But since we modified self.config in place, we can just trigger the reload logic
-            
+            save_config_to_file(self.config)
+
             # Update UI
             self.lang_button.set_label(new_lang.upper())
-            self.status_bar.set_model_info(
-                self.config.model.name,
-                self.config.model.device,
-                new_lang
-            )
-            
+            self._update_model_info()
+
             # Reload model in background
             logger.info("Reloading model with new language")
             threading.Thread(target=self._reload_model, daemon=True).start()
-            
+
         except Exception as e:
             logger.error(f"Failed to toggle language: {e}", exc_info=True)
 
@@ -762,16 +739,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 logger.info("Audio settings changed, re-initializing recorder")
                 self._reinit_recorder()
 
-            # Update status bar
-            self.status_bar.set_model_info(
-                self.config.model.name,
-                self.config.model.device,
-                self.config.transcription.language
-            )
-            
-            # Update language button
-            lang = self.config.transcription.language or "auto"
-            self.lang_button.set_label(lang.upper())
+            # Update model info display
+            self._update_model_info()
             
         except Exception as e:
             logger.error(f"Error in _on_settings_saved: {e}", exc_info=True)
@@ -841,18 +810,14 @@ class MainWindow(Gtk.ApplicationWindow):
         """Called when model is reloaded (synchronous version)."""
         try:
             logger.info("Model reloaded successfully")
-            logger.debug("Setting status label to Ready")
-            self.status_label.set_text("Ready")
+            logger.debug("Setting status label to success message")
+            self.status_label.set_text("Model reloaded successfully")
             logger.debug("Enabling record button")
             self.record_button.set_sensitive(True)
             logger.debug("Setting state to IDLE")
             self.set_state(AppState.IDLE)  # Reset state to IDLE
-            logger.debug("Updating status bar")
-            self.status_bar.set_model_info(
-                self.config.model.name,
-                self.config.model.device,
-                self.config.transcription.language
-            )
+            logger.debug("Updating model info display")
+            self._update_model_info()
             logger.debug("Restarting resource monitoring")
             self.status_bar.start_monitoring()
             logger.debug("Model reload UI update complete")
@@ -878,17 +843,29 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle history entry selection."""
         buffer = self.text_view.get_buffer()
         buffer.set_text(entry.text)
-        
+
         # Update status
         confidence_pct = int(entry.confidence * 100)
         self.status_label.set_text(
             f"Loaded from history (Confidence: {confidence_pct}%, "
             f"Duration: {entry.duration:.1f}s)"
         )
-        
+
         self.set_state(AppState.READY)
         self.copy_button.set_sensitive(True)
         self.clear_button.set_sensitive(True)
+
+    def _update_model_info(self) -> None:
+        """Update status bar and language button with current model info."""
+        self.status_bar.set_model_info(
+            self.config.model.name,
+            self.config.model.device,
+            self.config.transcription.language
+        )
+
+        # Update language button
+        lang = self.config.transcription.language or "auto"
+        self.lang_button.set_label(lang.upper())
 
     def cleanup(self) -> None:
         """Clean up resources before shutdown."""

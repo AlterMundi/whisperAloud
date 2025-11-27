@@ -77,24 +77,18 @@ class HistoryManager:
         audio_hash = None
 
         # Archive audio if enabled and provided
+        audio_saved = False
         if audio is not None and self.audio_archive:
             audio_hash = self._hash_audio(audio)
 
-            # Check for duplicate
-            if self.config.deduplicate_audio:
-                existing = self.db.get_by_audio_hash(audio_hash)
-                if existing:
-                    audio_path = existing.audio_file_path
-                    logger.debug(f"Reusing existing audio file: {audio_path}")
-
-            # Save new audio file if not deduplicated
-            if audio_path is None:
-                audio_path = self.audio_archive.save(
-                    audio,
-                    sample_rate,
-                    audio_hash
-                )
-                logger.debug(f"Saved audio file: {audio_path}")
+            # Save audio file (safe due to idempotent save)
+            audio_path = self.audio_archive.save(
+                audio,
+                sample_rate,
+                audio_hash
+            )
+            audio_saved = True  # Note: may be reused existing file
+            logger.debug(f"Saved/reused audio file: {audio_path}")
 
         # Create entry from result
         entry = HistoryEntry.from_transcription_result(
@@ -104,9 +98,26 @@ class HistoryManager:
             session_id=session_id
         )
 
-        # Save to database
-        entry_id = self.db.insert(entry)
-        logger.info(f"Added transcription {entry_id}: {entry.text[:50]}...")
+        # Save to database with rollback on failure
+        try:
+            if self.config.deduplicate_audio and audio_hash:
+                # Use atomic insert_or_get_by_hash to prevent race conditions
+                entry_id, is_new = self.db.insert_or_get_by_hash(entry)
+                if not is_new:
+                    logger.info(f"Reused existing transcription {entry_id} for audio hash {audio_hash}")
+                else:
+                    logger.info(f"Added new transcription {entry_id}: {entry.text[:50]}...")
+            else:
+                entry_id = self.db.insert(entry)
+                logger.info(f"Added transcription {entry_id}: {entry.text[:50]}...")
+        except Exception as e:
+            # Rollback: delete audio file if we saved a new one and it's not referenced
+            if audio_saved and audio_path and self.audio_archive:
+                ref_count = self.db.count_audio_references(str(audio_path))
+                if ref_count == 0:
+                    self.audio_archive.delete(audio_path)
+                    logger.warning(f"Rolled back audio file after database error: {audio_path}")
+            raise  # Re-raise the exception
 
         # NOTE: Auto-cleanup is NOT run here to avoid performance impact.
         # Instead, it should be run:
@@ -129,12 +140,12 @@ class HistoryManager:
         """
         return self.db.search(query, limit)
 
-    def get_recent(self, limit: int = 50) -> List[HistoryEntry]:
+    def get_recent(self, limit: Optional[int] = 50) -> List[HistoryEntry]:
         """
         Get recent transcriptions.
 
         Args:
-            limit: Maximum number of results (default: 50)
+            limit: Maximum number of results (default: 50, None for no limit)
 
         Returns:
             List of recent HistoryEntry instances
@@ -284,14 +295,8 @@ class HistoryManager:
         # Delete audio file if present and not used by other entries
         if success and entry and entry.audio_file_path and self.audio_archive:
             # Check if any other entry uses this audio file
-            other_entries = self.db.get_all(limit=10000)  # TODO: optimize this
-            audio_path_str = str(entry.audio_file_path)
-            in_use = any(
-                e.audio_file_path and str(e.audio_file_path) == audio_path_str
-                for e in other_entries
-            )
-
-            if not in_use:
+            ref_count = self.db.count_audio_references(str(entry.audio_file_path))
+            if ref_count == 0:
                 self.audio_archive.delete(entry.audio_file_path)
                 logger.debug(f"Deleted audio file: {entry.audio_file_path}")
 

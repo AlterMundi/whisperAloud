@@ -325,12 +325,83 @@ class TranscriptionDatabase:
             row = cursor.fetchone()
             return self._row_to_entry(row) if row else None
 
-    def get_all(self, limit: int = 50, offset: int = 0) -> List[HistoryEntry]:
+    def insert_or_get_by_hash(self, entry: HistoryEntry) -> tuple[int, bool]:
+        """
+        Insert entry or return existing if audio_hash matches.
+
+        Uses exclusive transaction to prevent race conditions during deduplication.
+
+        Args:
+            entry: HistoryEntry to insert (must have audio_hash)
+
+        Returns:
+            Tuple of (entry_id, is_new) where is_new is True if inserted, False if existing found
+        """
+        if not entry.audio_hash:
+            # No hash, just insert normally
+            entry_id = self.insert(entry)
+            return entry_id, True
+
+        with self._connection() as conn:
+            cursor = conn.cursor()
+
+            # Start exclusive transaction to prevent race conditions
+            cursor.execute("BEGIN EXCLUSIVE")
+
+            try:
+                # Check if entry with this hash already exists
+                cursor.execute(
+                    "SELECT id FROM transcriptions WHERE audio_hash = ? LIMIT 1",
+                    (entry.audio_hash,)
+                )
+                existing_row = cursor.fetchone()
+
+                if existing_row:
+                    # Return existing entry ID
+                    entry_id = existing_row[0]
+                    logger.debug(f"Found existing entry {entry_id} for audio hash {entry.audio_hash}")
+                    return entry_id, False
+
+                # No existing entry, insert new one
+                cursor.execute("""
+                    INSERT INTO transcriptions (
+                        timestamp, text, language, confidence, duration, processing_time,
+                        segments, audio_file_path, audio_hash, tags, notes, favorite,
+                        session_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    entry.timestamp.isoformat() if entry.timestamp else datetime.now().isoformat(),
+                    entry.text,
+                    entry.language,
+                    entry.confidence,
+                    entry.duration,
+                    entry.processing_time,
+                    json.dumps(entry.segments),
+                    str(entry.audio_file_path) if entry.audio_file_path else None,
+                    entry.audio_hash,
+                    json.dumps(entry.tags),
+                    entry.notes,
+                    int(entry.favorite),
+                    entry.session_id,
+                    entry.created_at.isoformat() if entry.created_at else datetime.now().isoformat(),
+                    entry.updated_at.isoformat() if entry.updated_at else datetime.now().isoformat()
+                ))
+                entry_id = cursor.lastrowid
+                logger.debug(f"Inserted new entry {entry_id} for audio hash {entry.audio_hash}")
+                return entry_id, True
+
+            except Exception:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
+
+    def get_all(self, limit: Optional[int] = 50, offset: int = 0) -> List[HistoryEntry]:
         """
         Get all entries ordered by timestamp DESC.
 
         Args:
-            limit: Maximum number of entries to return (default: 50)
+            limit: Maximum number of entries to return (default: 50, None for no limit)
             offset: Number of entries to skip (default: 0)
 
         Returns:
@@ -338,10 +409,16 @@ class TranscriptionDatabase:
         """
         with self._connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM transcriptions ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-                (limit, offset)
-            )
+            if limit is None:
+                cursor.execute(
+                    "SELECT * FROM transcriptions ORDER BY timestamp DESC OFFSET ?",
+                    (offset,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM transcriptions ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    (limit, offset)
+                )
             return [self._row_to_entry(row) for row in cursor.fetchall()]
 
     def search(self, query: str, limit: int = 50) -> List[HistoryEntry]:
@@ -488,6 +565,24 @@ class TranscriptionDatabase:
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT audio_file_path FROM transcriptions WHERE audio_file_path IS NOT NULL")
             return {Path(row[0]) for row in cursor.fetchall()}
+
+    def count_audio_references(self, audio_path: str) -> int:
+        """
+        Count how many entries reference a specific audio file path.
+
+        Args:
+            audio_path: Audio file path to check
+
+        Returns:
+            Number of entries referencing this path
+        """
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM transcriptions WHERE audio_file_path = ?",
+                (audio_path,)
+            )
+            return cursor.fetchone()[0]
 
     def get_stats(self) -> dict:
         """

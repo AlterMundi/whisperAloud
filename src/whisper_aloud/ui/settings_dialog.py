@@ -11,6 +11,8 @@ from gi.repository import Gtk, GLib
 from ..config import WhisperAloudConfig, ModelConfig, AudioConfig, ClipboardConfig, PersistenceConfig
 from ..audio import DeviceManager
 from .error_handler import InputValidator, ValidationError
+from ..utils.config_persistence import save_config_to_file
+from ..utils.validation_helpers import sanitize_language_code
 
 logger = logging.getLogger(__name__)
 
@@ -486,10 +488,9 @@ class SettingsDialog(Gtk.Window):
             # Validate language code
             lang = self.language_entry.get_text().strip()
             if lang:
-                # Basic validation for ISO 639-1 code (2 letters)
-                if len(lang) != 2 or not lang.isalpha():
+                validated_lang = sanitize_language_code(lang)
+                if validated_lang is None:
                     raise ValidationError(f"Invalid language code '{lang}'. Must be a 2-letter ISO code (e.g., 'en', 'es').")
-                validated_lang = lang.lower()
             else:
                 validated_lang = None
             
@@ -574,7 +575,7 @@ class SettingsDialog(Gtk.Window):
 
             logger.debug("Saving config to file")
             # Save to file
-            self._save_config()
+            save_config_to_file(self._config)
 
             logger.debug("Triggering save callback")
             # Trigger callback
@@ -595,58 +596,6 @@ class SettingsDialog(Gtk.Window):
             logger.error(f"Failed to save settings: {e}", exc_info=True)
             self._show_message(f"Error saving settings: {e}", Gtk.MessageType.ERROR)
 
-    def _save_config(self) -> None:
-        """Save configuration to file."""
-        # Determine config path
-        config_dir = Path.home() / ".config" / "whisper_aloud"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "config.json"
-
-        # Convert config to dict
-        config_dict = {
-            "model": {
-                "name": self._config.model.name,
-                "device": self._config.model.device,
-                "compute_type": self._config.model.compute_type,
-            },
-            "transcription": {
-                "language": self._config.transcription.language,
-                "task": self._config.transcription.task,
-            },
-            "audio": {
-                "sample_rate": self._config.audio.sample_rate,
-                "device_id": self._config.audio.device_id,
-                "channels": self._config.audio.channels,
-                "chunk_duration": self._config.audio.chunk_duration,
-                "vad_enabled": self._config.audio.vad_enabled,
-                "vad_threshold": self._config.audio.vad_threshold,
-                "normalize_audio": self._config.audio.normalize_audio,
-                "max_recording_duration": self._config.audio.max_recording_duration,
-            },
-            "clipboard": {
-                "auto_copy": self._config.clipboard.auto_copy,
-                "auto_paste": self._config.clipboard.auto_paste,
-                "paste_delay_ms": self._config.clipboard.paste_delay_ms,
-                "timeout_seconds": self._config.clipboard.timeout_seconds,
-                "fallback_path": self._config.clipboard.fallback_path,
-            },
-            "persistence": {
-                "save_audio": self._config.persistence.save_audio if self._config.persistence else False,
-                "deduplicate_audio": self._config.persistence.deduplicate_audio if self._config.persistence else True,
-                "auto_cleanup_enabled": self._config.persistence.auto_cleanup_enabled if self._config.persistence else True,
-                "auto_cleanup_days": self._config.persistence.auto_cleanup_days if self._config.persistence else 90,
-                "max_entries": self._config.persistence.max_entries if self._config.persistence else 10000,
-                "db_path": str(self._config.persistence.db_path) if self._config.persistence and self._config.persistence.db_path else None,
-                "audio_archive_path": str(self._config.persistence.audio_archive_path) if self._config.persistence and self._config.persistence.audio_archive_path else None,
-            },
-        }
-
-        # Write to file
-        import json
-        with open(config_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
-
-        logger.info(f"Configuration saved to {config_path}")
 
     def _on_cancel_clicked(self, button: Gtk.Button) -> None:
         """

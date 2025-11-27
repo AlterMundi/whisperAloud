@@ -1,8 +1,13 @@
 """Shared pytest fixtures for WhisperAloud tests."""
 
+import json
 import pytest
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+
 from whisper_aloud.persistence.database import TranscriptionDatabase
 from whisper_aloud.persistence.models import HistoryEntry
 
@@ -71,3 +76,48 @@ def sample_entries():
             notes="Important note"
         )
     ]
+
+
+@pytest.fixture
+def mock_whisper_model():
+    """Mock WhisperModel for testing."""
+    with patch('whisper_aloud.transcriber.WhisperModel') as mock:
+        mock_instance = MagicMock()
+        mock.return_value = mock_instance
+        # Configure mock transcription results
+        yield mock_instance
+
+
+@pytest.fixture
+def sample_audio():
+    """Generate sample audio data for testing."""
+    duration = 3.0  # seconds
+    sample_rate = 16000
+    samples = int(duration * sample_rate)
+    return np.random.randn(samples).astype(np.float32) * 0.1
+
+
+@pytest.fixture
+def temp_audio_archive(tmp_path):
+    """Temporary audio archive directory."""
+    archive_path = tmp_path / "audio_archive"
+    archive_path.mkdir()
+    return archive_path
+
+
+@pytest.fixture
+def mock_config_file(tmp_path):
+    """Create temporary config file for testing."""
+    config_dir = tmp_path / ".config" / "whisper_aloud"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.json"
+
+    config_data = {
+        "model": {"name": "base", "device": "cpu"},
+        "transcription": {"language": "es"}
+    }
+
+    with open(config_path, "w") as f:
+        json.dump(config_data, f)
+
+    return config_path
