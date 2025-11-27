@@ -34,6 +34,14 @@ class StatusBar(Gtk.Box):
         # Separator
         self.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
+        # Language info
+        self.language_label = Gtk.Label(label="Lang: --")
+        self.language_label.add_css_class("dim-label")
+        self.append(self.language_label)
+
+        # Separator
+        self.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+
         # Memory usage
         self.memory_label = Gtk.Label(label="Mem: --")
         self.memory_label.add_css_class("dim-label")
@@ -52,15 +60,18 @@ class StatusBar(Gtk.Box):
         self._monitor_thread = threading.Thread(target=self._monitor_resources, daemon=True)
         self._monitor_thread.start()
 
-    def set_model_info(self, name: str, device: str):
+    def set_model_info(self, name: str, device: str, language: str = None):
         """
         Update model information.
 
         Args:
             name: Model name (e.g., "base")
             device: Compute device (e.g., "cpu", "cuda")
+            language: Language code (e.g., "en", "es")
         """
         self.model_label.set_text(f"Model: {name} ({device})")
+        if language:
+            self.language_label.set_text(f"Lang: {language}")
 
     def _monitor_resources(self):
         """Monitor system resources in background."""
@@ -99,8 +110,15 @@ class StatusBar(Gtk.Box):
         self.cpu_label.set_text(f"CPU: {cpu_percent:.1f}%")
         return False
 
+    def start_monitoring(self):
+        """Start monitoring."""
+        if not self._monitoring:
+            self._monitoring = True
+            self._monitor_thread = threading.Thread(target=self._monitor_resources, daemon=True)
+            self._monitor_thread.start()
+
     def cleanup(self):
         """Stop monitoring."""
         self._monitoring = False
-        if self._monitor_thread.is_alive():
+        if hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=1.0)

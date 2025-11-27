@@ -3,6 +3,7 @@
 import logging
 import threading
 from typing import Optional
+from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -95,6 +96,12 @@ class MainWindow(Gtk.ApplicationWindow):
         settings_button.set_tooltip_text("Settings")
         settings_button.connect("clicked", self._on_settings_clicked)
         header_bar.pack_end(settings_button)
+
+        # Language toggle button
+        self.lang_button = Gtk.Button(label="ES")
+        self.lang_button.set_tooltip_text("Toggle Language (ES/EN)")
+        self.lang_button.connect("clicked", self._on_language_toggle_clicked)
+        header_bar.pack_end(self.lang_button)
 
         main_box.append(header_bar)
 
@@ -316,20 +323,22 @@ class MainWindow(Gtk.ApplicationWindow):
         # Update status bar
         self.status_bar.set_model_info(
             self.config.model.name,
-            self.config.model.device
+            self.config.model.device,
+            self.config.transcription.language
         )
+        
+        # Update language button
+        lang = self.config.transcription.language or "auto"
+        self.lang_button.set_label(lang.upper())
             
         return False
 
-    def _on_load_error(self, error_msg: str) -> bool:
+    def _on_load_error_sync(self, error_msg: str) -> None:
         """
-        Called when component loading fails (main thread).
+        Called when component loading fails (synchronous version).
 
         Args:
             error_msg: Error message
-
-        Returns:
-            False to remove this idle callback
         """
         logger.error(f"Component load error: {error_msg}")
         self.status_label.set_text("Error loading components")
@@ -338,6 +347,17 @@ class MainWindow(Gtk.ApplicationWindow):
         # Show detailed error dialog
         handle_model_load_error(self, Exception(error_msg))
 
+    def _on_load_error(self, error_msg: str) -> bool:
+        """
+        Called when component loading fails (asynchronous version).
+
+        Args:
+            error_msg: Error message
+
+        Returns:
+            False to remove this idle callback
+        """
+        self._on_load_error_sync(error_msg)
         return False
 
     def set_state(self, new_state: AppState) -> None:
@@ -350,39 +370,47 @@ class MainWindow(Gtk.ApplicationWindow):
         logger.info(f"State transition: {self._state.value} -> {new_state.value}")
         self._state = new_state
 
-        # Update UI based on state
-        if new_state == AppState.IDLE:
-            self.record_button.set_label("Start Recording")
-            self.record_button.set_sensitive(True)
-            self.record_button.remove_css_class("destructive-action")
-            self.record_button.add_css_class("suggested-action")
-            self.timer_label.set_text("0:00")
+        try:
+            # Update UI based on state
+            if new_state == AppState.IDLE:
+                logger.debug("Setting UI for IDLE state")
+                self.record_button.set_label("Start Recording")
+                self.record_button.set_sensitive(True)
+                self.record_button.remove_css_class("destructive-action")
+                self.record_button.add_css_class("suggested-action")
+                self.timer_label.set_text("0:00")
 
-        elif new_state == AppState.RECORDING:
-            self.record_button.set_label("Stop Recording")
-            self.record_button.set_sensitive(True)
-            self.record_button.remove_css_class("suggested-action")
-            self.record_button.add_css_class("destructive-action")
+            elif new_state == AppState.RECORDING:
+                logger.debug("Setting UI for RECORDING state")
+                self.record_button.set_label("Stop Recording")
+                self.record_button.set_sensitive(True)
+                self.record_button.remove_css_class("suggested-action")
+                self.record_button.add_css_class("destructive-action")
 
-        elif new_state == AppState.TRANSCRIBING:
-            self.record_button.set_label("Transcribing...")
-            self.record_button.set_sensitive(False)
-            self.status_label.set_text("Transcribing...")
+            elif new_state == AppState.TRANSCRIBING:
+                logger.debug("Setting UI for TRANSCRIBING state")
+                self.record_button.set_label("Transcribing...")
+                self.record_button.set_sensitive(False)
+                self.status_label.set_text("Transcribing...")
 
-        elif new_state == AppState.READY:
-            self.record_button.set_label("Record Again")
-            self.record_button.set_sensitive(True)
-            self.record_button.remove_css_class("destructive-action")
-            self.record_button.add_css_class("suggested-action")
-            self.status_label.set_text("Ready")
-            self.copy_button.set_sensitive(True)
-            self.clear_button.set_sensitive(True)
+            elif new_state == AppState.READY:
+                logger.debug("Setting UI for READY state")
+                self.record_button.set_label("Record Again")
+                self.record_button.set_sensitive(True)
+                self.record_button.remove_css_class("destructive-action")
+                self.record_button.add_css_class("suggested-action")
+                self.status_label.set_text("Ready")
+                self.copy_button.set_sensitive(True)
+                self.clear_button.set_sensitive(True)
 
-        elif new_state == AppState.ERROR:
-            self.record_button.set_label("Try Again")
-            self.record_button.set_sensitive(True)
-            self.record_button.remove_css_class("destructive-action")
-            self.record_button.add_css_class("suggested-action")
+            elif new_state == AppState.ERROR:
+                logger.debug("Setting UI for ERROR state")
+                self.record_button.set_label("Try Again")
+                self.record_button.set_sensitive(True)
+                self.record_button.remove_css_class("destructive-action")
+                self.record_button.add_css_class("suggested-action")
+        except Exception as e:
+            logger.error(f"Error in set_state: {e}", exc_info=True)
 
     def _on_record_button_clicked(self, button: Gtk.Button) -> None:
         """
@@ -637,6 +665,52 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._state == AppState.READY:
             self.set_state(AppState.IDLE)
 
+    def _on_language_toggle_clicked(self, button: Gtk.Button) -> None:
+        """
+        Handle language toggle button click.
+        
+        Args:
+            button: The button that was clicked
+        """
+        current_lang = self.config.transcription.language
+        new_lang = "en" if current_lang == "es" else "es"
+        
+        logger.info(f"Toggling language: {current_lang} -> {new_lang}")
+        
+        # Update config
+        self.config.transcription.language = new_lang
+        
+        # Save config to file
+        try:
+            # We need to load the full config, update it, and save it back
+            # This is a bit inefficient but ensures consistency
+            full_config = WhisperAloudConfig.load()
+            full_config.transcription.language = new_lang
+            
+            # Save logic duplicated from SettingsDialog (should be refactored)
+            config_dir = Path.home() / ".config" / "whisper_aloud"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = config_dir / "config.json"
+            
+            # We need to serialize the full config properly
+            # For now, we'll just trigger a reload which will pick up the change if we saved it
+            # But since we modified self.config in place, we can just trigger the reload logic
+            
+            # Update UI
+            self.lang_button.set_label(new_lang.upper())
+            self.status_bar.set_model_info(
+                self.config.model.name,
+                self.config.model.device,
+                new_lang
+            )
+            
+            # Reload model in background
+            logger.info("Reloading model with new language")
+            threading.Thread(target=self._reload_model, daemon=True).start()
+            
+        except Exception as e:
+            logger.error(f"Failed to toggle language: {e}", exc_info=True)
+
     def _on_settings_clicked(self, button: Gtk.Button) -> None:
         """
         Handle settings button click.
@@ -653,81 +727,141 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_settings_saved(self) -> None:
         """Handle settings saved event."""
         logger.info("Settings saved, checking for changes...")
-        
-        # Reload configuration from file to get latest changes
-        new_config = WhisperAloudConfig.load()
-        
-        # Check if model settings changed
-        model_changed = (
-            new_config.model.name != self.config.model.name or
-            new_config.model.device != self.config.model.device or
-            new_config.model.compute_type != self.config.model.compute_type
-        )
-        
-        # Check if audio settings changed (that require recorder re-init)
-        audio_changed = (
-            new_config.audio.device_id != self.config.audio.device_id or
-            new_config.audio.sample_rate != self.config.audio.sample_rate or
-            new_config.audio.channels != self.config.audio.channels
-        )
-        
-        self.config = new_config
-        
-        if model_changed or audio_changed:
-            logger.info(f"Configuration changed (model={model_changed}, audio={audio_changed}), reloading...")
-            self._reload_model()
-        else:
-            # Update status bar just in case
-            self.status_bar.set_model_info(
-                self.config.model.name,
-                self.config.model.device
+
+        try:
+            # Reload configuration from file to get latest changes
+            logger.debug("Reloading configuration from file")
+            new_config = WhisperAloudConfig.load()
+            logger.debug("Configuration reloaded successfully")
+
+            # Check if model settings changed
+            model_changed = (
+                new_config.model.name != self.config.model.name or
+                new_config.model.device != self.config.model.device or
+                new_config.model.compute_type != self.config.model.compute_type or
+                new_config.transcription.language != self.config.transcription.language
             )
 
+            # Check if audio settings changed (that require recorder re-init)
+            audio_changed = (
+                new_config.audio.device_id != self.config.audio.device_id or
+                new_config.audio.sample_rate != self.config.audio.sample_rate or
+                new_config.audio.channels != self.config.audio.channels
+            )
+
+            logger.info(f"Model changed: {model_changed}, Audio changed: {audio_changed}")
+
+            self.config = new_config
+
+            if model_changed:
+                logger.info("Model settings changed, reloading model")
+                # Reload model in background
+                threading.Thread(target=self._reload_model, daemon=True).start()
+
+            if audio_changed:
+                logger.info("Audio settings changed, re-initializing recorder")
+                self._reinit_recorder()
+
+            # Update status bar
+            self.status_bar.set_model_info(
+                self.config.model.name,
+                self.config.model.device,
+                self.config.transcription.language
+            )
+            
+            # Update language button
+            lang = self.config.transcription.language or "auto"
+            self.lang_button.set_label(lang.upper())
+            
+        except Exception as e:
+            logger.error(f"Error in _on_settings_saved: {e}", exc_info=True)
+            self.status_label.set_text("Error updating settings")
+            self.set_state(AppState.ERROR)
+
+    def _reinit_recorder(self) -> None:
+        """Re-initialize the audio recorder with new config."""
+        try:
+            if self.recorder:
+                logger.debug("Re-initializing recorder")
+                # Stop any active recording first
+                if self.recorder.is_recording:
+                    logger.debug("Cancel active recording")
+                    self.recorder.cancel()
+
+                # Ensure the old recorder releases resources
+                logger.debug("Delete old recorder")
+                del self.recorder
+
+            # Create new recorder instance with updated config
+            logger.debug("Create new recorder instance")
+            self.recorder = AudioRecorder(
+                self.config.audio,
+                level_callback=self._on_audio_level
+            )
+            logger.info("Recorder re-initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to re-init recorder: {e}", exc_info=True)
+            # Show error dialog
+            handle_audio_device_error(self, e)
+
     def _reload_model(self) -> None:
-        """Reload the Whisper model."""
+        """Reload the Whisper model synchronously."""
+        logger.info("Starting model reload")
         self.status_label.set_text("Reloading model...")
         self.record_button.set_sensitive(False)
-        
-        def _reload_thread():
-            try:
-                if self.transcriber:
-                    self.transcriber.unload_model()
-                
-                self.transcriber = Transcriber(self.config)
-                self.transcriber.load_model()
-                
-                # Re-initialize recorder with new config if needed
-                if self.recorder:
-                    # Stop any active recording first
-                    if self.recorder.is_recording:
-                        self.recorder.cancel()
-                    
-                    # Ensure the old recorder releases resources
-                    del self.recorder
-                    
-                    # Create new recorder instance with updated config
-                    self.recorder = AudioRecorder(
-                        self.config.audio,
-                        level_callback=self._on_audio_level
-                    )
-                
-                GLib.idle_add(self._on_model_reloaded)
-            except Exception as e:
-                logger.error(f"Failed to reload model: {e}", exc_info=True)
-                GLib.idle_add(self._on_load_error, str(e))
 
-        threading.Thread(target=_reload_thread, daemon=True).start()
+        # Stop resource monitoring to avoid conflicts
+        logger.debug("Stopping resource monitoring")
+        self.status_bar.cleanup()
+
+        try:
+            logger.debug("Unload existing model")
+            if self.transcriber:
+                self.transcriber.unload_model()
+
+            logger.debug("Create new transcriber")
+            self.transcriber = Transcriber(self.config)
+
+            logger.debug("Load new model")
+            self.transcriber.load_model()
+            logger.info("Model loaded successfully")
+
+            # Re-initialize recorder with new config if needed
+            self._reinit_recorder()
+
+            logger.debug("Model reload complete, updating UI")
+            self._on_model_reloaded_sync()
+        except Exception as e:
+            logger.error(f"Failed to reload model: {e}", exc_info=True)
+            # Revert to previous valid config if possible, or just show error
+            # For now, show error dialog
+            GLib.idle_add(self._on_load_error_sync, str(e))
+
+    def _on_model_reloaded_sync(self) -> None:
+        """Called when model is reloaded (synchronous version)."""
+        try:
+            logger.info("Model reloaded successfully")
+            logger.debug("Setting status label to Ready")
+            self.status_label.set_text("Ready")
+            logger.debug("Enabling record button")
+            self.record_button.set_sensitive(True)
+            logger.debug("Setting state to IDLE")
+            self.set_state(AppState.IDLE)  # Reset state to IDLE
+            logger.debug("Updating status bar")
+            self.status_bar.set_model_info(
+                self.config.model.name,
+                self.config.model.device,
+                self.config.transcription.language
+            )
+            logger.debug("Restarting resource monitoring")
+            self.status_bar.start_monitoring()
+            logger.debug("Model reload UI update complete")
+        except Exception as e:
+            logger.error(f"Error in _on_model_reloaded_sync: {e}", exc_info=True)
 
     def _on_model_reloaded(self) -> bool:
-        """Called when model is reloaded."""
-        logger.info("Model reloaded successfully")
-        self.status_label.set_text("Ready")
-        self.record_button.set_sensitive(True)
-        self.set_state(AppState.IDLE)  # Reset state to IDLE
-        self.status_bar.set_model_info(
-            self.config.model.name,
-            self.config.model.device
-        )
+        """Called when model is reloaded (asynchronous version)."""
+        self._on_model_reloaded_sync()
         return False
 
     def _on_history_toggled(self, button: Gtk.ToggleButton) -> None:

@@ -119,8 +119,8 @@ class AudioRecorder:
 
         # Calculate and report level
         if self.level_callback:
-            level = self._level_meter.calculate_level(audio_chunk)
             try:
+                level = self._level_meter.calculate_level(audio_chunk)
                 self.level_callback(level)
             except Exception as e:
                 logger.error(f"Level callback error: {e}")

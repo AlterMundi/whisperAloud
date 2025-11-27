@@ -36,8 +36,8 @@ class SettingsDialog(Gtk.Window):
 
         self.set_title("Settings")
         self.set_default_size(600, 500)
-        self.set_modal(True)
-        self.set_transient_for(parent)
+        self.set_modal(False)
+        # self.set_transient_for(parent)
 
         # Store configuration
         self._config = config
@@ -478,26 +478,35 @@ class SettingsDialog(Gtk.Window):
         logger.info("Saving settings")
 
         try:
+            logger.debug("Updating model config")
             # Update model config
             models = ["tiny", "base", "small", "medium", "large"]
             self._config.model.name = models[self.model_dropdown.get_selected()]
 
             # Validate language code
             lang = self.language_entry.get_text().strip()
-            validated_lang = InputValidator.validate_language_code(lang)
-            self._config.transcription.language = validated_lang if validated_lang else None
+            if lang:
+                # Basic validation for ISO 639-1 code (2 letters)
+                if len(lang) != 2 or not lang.isalpha():
+                    raise ValidationError(f"Invalid language code '{lang}'. Must be a 2-letter ISO code (e.g., 'en', 'es').")
+                validated_lang = lang.lower()
+            else:
+                validated_lang = None
+            
+            self._config.transcription.language = validated_lang
 
             devices = ["cpu", "cuda"]
             selected_compute_idx = self.compute_device_dropdown.get_selected()
             if selected_compute_idx != -1 and selected_compute_idx < len(devices):
                 self._config.model.device = devices[selected_compute_idx]
 
+            logger.debug("Updating audio config")
             # Update audio config
             selected_device_idx = self.audio_device_dropdown.get_selected()
             # Check if a valid device is selected (index != -1)
             if selected_device_idx != -1 and selected_device_idx < len(self._devices):
                 self._config.audio.device_id = self._devices[selected_device_idx].id
-            
+
             # Update channels based on selected device
             if self._config.audio.device_id is not None:
                 device = DeviceManager.get_device_by_id(self._config.audio.device_id)
@@ -522,6 +531,7 @@ class SettingsDialog(Gtk.Window):
             )
             self._config.audio.normalize_audio = self.normalize_switch.get_active()
 
+            logger.debug("Updating clipboard config")
             # Update clipboard config
             self._config.clipboard.auto_copy = self.auto_copy_switch.get_active()
             self._config.clipboard.auto_paste = self.auto_paste_switch.get_active()
@@ -532,6 +542,7 @@ class SettingsDialog(Gtk.Window):
                 field_name="Paste delay"
             )
 
+            logger.debug("Updating persistence config")
             # Update persistence config
             if not self._config.persistence:
                 self._config.persistence = PersistenceConfig()
@@ -561,18 +572,18 @@ class SettingsDialog(Gtk.Window):
             if audio_path_text:
                 self._config.persistence.audio_archive_path = Path(audio_path_text)
 
+            logger.debug("Saving config to file")
             # Save to file
             self._save_config()
 
+            logger.debug("Triggering save callback")
             # Trigger callback
             if self._on_save_callback:
                 self._on_save_callback()
 
+            logger.debug("Showing success message")
             # Show success message
-            self._show_message("Settings saved successfully", Gtk.MessageType.INFO)
-
-            # Close dialog
-            self.close()
+            self._show_message("Settings saved successfully", Gtk.MessageType.INFO, on_close=self.close)
 
         except ValidationError as e:
             logger.error(f"Validation error: {e}")
@@ -596,6 +607,7 @@ class SettingsDialog(Gtk.Window):
             "model": {
                 "name": self._config.model.name,
                 "device": self._config.model.device,
+                "compute_type": self._config.model.compute_type,
             },
             "transcription": {
                 "language": self._config.transcription.language,
@@ -646,13 +658,14 @@ class SettingsDialog(Gtk.Window):
         logger.info("Settings dialog cancelled")
         self.close()
 
-    def _show_message(self, message: str, message_type: Gtk.MessageType) -> None:
+    def _show_message(self, message: str, message_type: Gtk.MessageType, on_close: Optional[callable] = None) -> None:
         """
         Show a message dialog.
 
         Args:
             message: Message to display
             message_type: Type of message (INFO, WARNING, ERROR)
+            on_close: Optional callback to run when dialog closes
         """
         dialog = Gtk.MessageDialog(
             transient_for=self,
@@ -661,5 +674,11 @@ class SettingsDialog(Gtk.Window):
             buttons=Gtk.ButtonsType.OK,
             text=message,
         )
-        dialog.connect("response", lambda d, r: d.close())
+        
+        def on_response(d, r):
+            d.close()
+            if on_close:
+                on_close()
+                
+        dialog.connect("response", on_response)
         dialog.present()

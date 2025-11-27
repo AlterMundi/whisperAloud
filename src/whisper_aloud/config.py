@@ -1,11 +1,15 @@
 """Configuration management for WhisperAloud."""
 
+import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
 
 from .exceptions import ConfigurationError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -90,51 +94,178 @@ class WhisperAloudConfig:
 
     @classmethod
     def load(cls) -> 'WhisperAloudConfig':
-        """Load configuration from environment variables."""
+        """Load configuration from file and environment variables."""
+        # Start with defaults
         model_config = ModelConfig(
-            name=os.getenv('WHISPER_ALOUD_MODEL_NAME', 'base'),
-            device=os.getenv('WHISPER_ALOUD_MODEL_DEVICE', 'auto'),
-            compute_type=os.getenv('WHISPER_ALOUD_MODEL_COMPUTE_TYPE', 'int8'),
-            download_root=os.getenv('WHISPER_ALOUD_MODEL_DOWNLOAD_ROOT'),
+            name='base',
+            device='auto',
+            compute_type='int8',
+            download_root=None,
         )
 
         transcription_config = TranscriptionConfig(
-            language=os.getenv('WHISPER_ALOUD_LANGUAGE', 'es'),
-            beam_size=int(os.getenv('WHISPER_ALOUD_BEAM_SIZE', '5')),
-            vad_filter=os.getenv('WHISPER_ALOUD_VAD_FILTER', 'true').lower() == 'true',
-            task=os.getenv('WHISPER_ALOUD_TASK', 'transcribe'),
+            language='es',
+            beam_size=5,
+            vad_filter=True,
+            task='transcribe',
         )
 
         audio_config = AudioConfig(
-            sample_rate=int(os.getenv('WHISPER_ALOUD_SAMPLE_RATE', '16000')),
-            channels=int(os.getenv('WHISPER_ALOUD_CHANNELS', '1')),
-            device_id=int(os.getenv('WHISPER_ALOUD_DEVICE_ID')) if os.getenv('WHISPER_ALOUD_DEVICE_ID') else None,
-            chunk_duration=float(os.getenv('WHISPER_ALOUD_CHUNK_DURATION', '0.1')),
-            vad_enabled=os.getenv('WHISPER_ALOUD_VAD_ENABLED', 'true').lower() == 'true',
-            vad_threshold=float(os.getenv('WHISPER_ALOUD_VAD_THRESHOLD', '0.02')),
-            silence_duration=float(os.getenv('WHISPER_ALOUD_SILENCE_DURATION', '1.0')),
-            normalize_audio=os.getenv('WHISPER_ALOUD_NORMALIZE_AUDIO', 'true').lower() == 'true',
-            max_recording_duration=float(os.getenv('WHISPER_ALOUD_MAX_RECORDING_DURATION', '300.0')),
+            sample_rate=16000,
+            channels=1,
+            device_id=None,
+            chunk_duration=0.1,
+            vad_enabled=True,
+            vad_threshold=0.02,
+            silence_duration=1.0,
+            normalize_audio=True,
+            max_recording_duration=300.0,
         )
 
         clipboard_config = ClipboardConfig(
-            auto_copy=os.getenv('WHISPER_ALOUD_CLIPBOARD_AUTO_COPY', 'true').lower() == 'true',
-            auto_paste=os.getenv('WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE', 'true').lower() == 'true',
-            paste_delay_ms=int(os.getenv('WHISPER_ALOUD_CLIPBOARD_PASTE_DELAY_MS', '100')),
-            timeout_seconds=float(os.getenv('WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS', '5.0')),
-            fallback_to_file=os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE', 'true').lower() == 'true',
-            fallback_path=os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH', '/tmp/whisper_aloud_clipboard.txt'),
+            auto_copy=True,
+            auto_paste=True,
+            paste_delay_ms=100,
+            timeout_seconds=5.0,
+            fallback_to_file=True,
+            fallback_path='/tmp/whisper_aloud_clipboard.txt',
+        )
+
+        persistence_config = PersistenceConfig()
+
+        # Load from config file if exists
+        config_dir = Path.home() / ".config" / "whisper_aloud"
+        config_path = config_dir / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    file_config = json.load(f)
+                logger.info(f"Loading configuration from {config_path}")
+
+                # Override with file values
+                if "model" in file_config:
+                    model_dict = file_config["model"]
+                    if "name" in model_dict:
+                        model_config.name = model_dict["name"]
+                    if "device" in model_dict:
+                        model_config.device = model_dict["device"]
+                    if "compute_type" in model_dict:
+                        model_config.compute_type = model_dict["compute_type"]
+                    if "download_root" in model_dict:
+                        model_config.download_root = model_dict["download_root"]
+
+                if "transcription" in file_config:
+                    trans_dict = file_config["transcription"]
+                    if "language" in trans_dict:
+                        transcription_config.language = trans_dict["language"]
+                    if "beam_size" in trans_dict:
+                        transcription_config.beam_size = int(trans_dict["beam_size"])
+                    if "vad_filter" in trans_dict:
+                        transcription_config.vad_filter = trans_dict["vad_filter"]
+                    if "task" in trans_dict:
+                        transcription_config.task = trans_dict["task"]
+
+                if "audio" in file_config:
+                    audio_dict = file_config["audio"]
+                    if "sample_rate" in audio_dict:
+                        audio_config.sample_rate = int(audio_dict["sample_rate"])
+                    if "channels" in audio_dict:
+                        audio_config.channels = int(audio_dict["channels"])
+                    if "device_id" in audio_dict:
+                        audio_config.device_id = audio_dict["device_id"]
+                    if "chunk_duration" in audio_dict:
+                        audio_config.chunk_duration = float(audio_dict["chunk_duration"])
+                    if "vad_enabled" in audio_dict:
+                        audio_config.vad_enabled = audio_dict["vad_enabled"]
+                    if "vad_threshold" in audio_dict:
+                        audio_config.vad_threshold = float(audio_dict["vad_threshold"])
+                    if "silence_duration" in audio_dict:
+                        audio_config.silence_duration = float(audio_dict["silence_duration"])
+                    if "normalize_audio" in audio_dict:
+                        audio_config.normalize_audio = audio_dict["normalize_audio"]
+                    if "max_recording_duration" in audio_dict:
+                        audio_config.max_recording_duration = float(audio_dict["max_recording_duration"])
+
+                if "clipboard" in file_config:
+                    clip_dict = file_config["clipboard"]
+                    if "auto_copy" in clip_dict:
+                        clipboard_config.auto_copy = clip_dict["auto_copy"]
+                    if "auto_paste" in clip_dict:
+                        clipboard_config.auto_paste = clip_dict["auto_paste"]
+                    if "paste_delay_ms" in clip_dict:
+                        clipboard_config.paste_delay_ms = int(clip_dict["paste_delay_ms"])
+                    if "timeout_seconds" in clip_dict:
+                        clipboard_config.timeout_seconds = float(clip_dict["timeout_seconds"])
+                    if "fallback_to_file" in clip_dict:
+                        clipboard_config.fallback_to_file = clip_dict["fallback_to_file"]
+                    if "fallback_path" in clip_dict:
+                        clipboard_config.fallback_path = clip_dict["fallback_path"]
+
+                if "persistence" in file_config:
+                    pers_dict = file_config["persistence"]
+                    if "save_audio" in pers_dict:
+                        persistence_config.save_audio = pers_dict["save_audio"]
+                    if "deduplicate_audio" in pers_dict:
+                        persistence_config.deduplicate_audio = pers_dict["deduplicate_audio"]
+                    if "auto_cleanup_enabled" in pers_dict:
+                        persistence_config.auto_cleanup_enabled = pers_dict["auto_cleanup_enabled"]
+                    if "auto_cleanup_days" in pers_dict:
+                        persistence_config.auto_cleanup_days = int(pers_dict["auto_cleanup_days"])
+                    if "max_entries" in pers_dict:
+                        persistence_config.max_entries = int(pers_dict["max_entries"])
+                    if "db_path" in pers_dict and pers_dict["db_path"]:
+                        persistence_config.db_path = Path(pers_dict["db_path"])
+                    if "audio_archive_path" in pers_dict and pers_dict["audio_archive_path"]:
+                        persistence_config.audio_archive_path = Path(pers_dict["audio_archive_path"])
+
+            except Exception as e:
+                logger.warning(f"Failed to load config from file: {e}")
+
+        # Override with environment variables
+        model_config = ModelConfig(
+            name=os.getenv('WHISPER_ALOUD_MODEL_NAME', model_config.name),
+            device=os.getenv('WHISPER_ALOUD_MODEL_DEVICE', model_config.device),
+            compute_type=os.getenv('WHISPER_ALOUD_MODEL_COMPUTE_TYPE', model_config.compute_type),
+            download_root=os.getenv('WHISPER_ALOUD_MODEL_DOWNLOAD_ROOT', model_config.download_root),
+        )
+
+        transcription_config = TranscriptionConfig(
+            language=os.getenv('WHISPER_ALOUD_LANGUAGE', transcription_config.language),
+            beam_size=int(os.getenv('WHISPER_ALOUD_BEAM_SIZE', transcription_config.beam_size)),
+            vad_filter=os.getenv('WHISPER_ALOUD_VAD_FILTER', str(transcription_config.vad_filter)).lower() == 'true',
+            task=os.getenv('WHISPER_ALOUD_TASK', transcription_config.task),
+        )
+
+        audio_config = AudioConfig(
+            sample_rate=int(os.getenv('WHISPER_ALOUD_SAMPLE_RATE', audio_config.sample_rate)),
+            channels=int(os.getenv('WHISPER_ALOUD_CHANNELS', audio_config.channels)),
+            device_id=int(os.getenv('WHISPER_ALOUD_DEVICE_ID')) if os.getenv('WHISPER_ALOUD_DEVICE_ID') else audio_config.device_id,
+            chunk_duration=float(os.getenv('WHISPER_ALOUD_CHUNK_DURATION', audio_config.chunk_duration)),
+            vad_enabled=os.getenv('WHISPER_ALOUD_VAD_ENABLED', str(audio_config.vad_enabled)).lower() == 'true',
+            vad_threshold=float(os.getenv('WHISPER_ALOUD_VAD_THRESHOLD', audio_config.vad_threshold)),
+            silence_duration=float(os.getenv('WHISPER_ALOUD_SILENCE_DURATION', audio_config.silence_duration)),
+            normalize_audio=os.getenv('WHISPER_ALOUD_NORMALIZE_AUDIO', str(audio_config.normalize_audio)).lower() == 'true',
+            max_recording_duration=float(os.getenv('WHISPER_ALOUD_MAX_RECORDING_DURATION', audio_config.max_recording_duration)),
+        )
+
+        clipboard_config = ClipboardConfig(
+            auto_copy=os.getenv('WHISPER_ALOUD_CLIPBOARD_AUTO_COPY', str(clipboard_config.auto_copy)).lower() == 'true',
+            auto_paste=os.getenv('WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE', str(clipboard_config.auto_paste)).lower() == 'true',
+            paste_delay_ms=int(os.getenv('WHISPER_ALOUD_CLIPBOARD_PASTE_DELAY_MS', clipboard_config.paste_delay_ms)),
+            timeout_seconds=float(os.getenv('WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS', clipboard_config.timeout_seconds)),
+            fallback_to_file=os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE', str(clipboard_config.fallback_to_file)).lower() == 'true',
+            fallback_path=os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH', clipboard_config.fallback_path),
         )
 
         persistence_config = PersistenceConfig(
-            db_path=Path(os.getenv('WHISPER_ALOUD_DB_PATH')) if os.getenv('WHISPER_ALOUD_DB_PATH') else None,
-            save_audio=os.getenv('WHISPER_ALOUD_SAVE_AUDIO', 'false').lower() == 'true',
-            audio_archive_path=Path(os.getenv('WHISPER_ALOUD_AUDIO_ARCHIVE')) if os.getenv('WHISPER_ALOUD_AUDIO_ARCHIVE') else None,
-            audio_format=os.getenv('WHISPER_ALOUD_AUDIO_FORMAT', 'flac'),
-            deduplicate_audio=os.getenv('WHISPER_ALOUD_DEDUPLICATE_AUDIO', 'true').lower() == 'true',
-            auto_cleanup_enabled=os.getenv('WHISPER_ALOUD_AUTO_CLEANUP', 'true').lower() == 'true',
-            auto_cleanup_days=int(os.getenv('WHISPER_ALOUD_CLEANUP_DAYS', '90')),
-            max_entries=int(os.getenv('WHISPER_ALOUD_MAX_ENTRIES', '10000'))
+            db_path=Path(os.getenv('WHISPER_ALOUD_DB_PATH')) if os.getenv('WHISPER_ALOUD_DB_PATH') else persistence_config.db_path,
+            save_audio=os.getenv('WHISPER_ALOUD_SAVE_AUDIO', str(persistence_config.save_audio)).lower() == 'true',
+            audio_archive_path=Path(os.getenv('WHISPER_ALOUD_AUDIO_ARCHIVE')) if os.getenv('WHISPER_ALOUD_AUDIO_ARCHIVE') else persistence_config.audio_archive_path,
+            audio_format=os.getenv('WHISPER_ALOUD_AUDIO_FORMAT', persistence_config.audio_format),
+            deduplicate_audio=os.getenv('WHISPER_ALOUD_DEDUPLICATE_AUDIO', str(persistence_config.deduplicate_audio)).lower() == 'true',
+            auto_cleanup_enabled=os.getenv('WHISPER_ALOUD_AUTO_CLEANUP', str(persistence_config.auto_cleanup_enabled)).lower() == 'true',
+            auto_cleanup_days=int(os.getenv('WHISPER_ALOUD_CLEANUP_DAYS', persistence_config.auto_cleanup_days)),
+            max_entries=int(os.getenv('WHISPER_ALOUD_MAX_ENTRIES', persistence_config.max_entries))
         )
 
         config = cls(
@@ -175,10 +306,9 @@ class WhisperAloudConfig:
 
         # Validate language (basic check)
         if not isinstance(self.transcription.language, str) or len(self.transcription.language) < 2:
-            raise ConfigurationError(
-                f"Invalid language '{self.transcription.language}'. "
-                "Use ISO language code (e.g., 'en', 'es') or 'auto'"
-            )
+            # Fallback to default if invalid
+            logger.warning(f"Invalid language '{self.transcription.language}' in config, resetting to 'es'")
+            self.transcription.language = 'es'
 
         # Validate beam size
         if not (1 <= self.transcription.beam_size <= 10):

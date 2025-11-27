@@ -148,8 +148,15 @@ class Transcriber:
         self.load_model()
 
         # Merge config with kwargs
+        language = kwargs.get("language", self.config.transcription.language)
+        
+        # Validate language code to prevent segmentation faults in underlying library
+        if language and (len(language) != 2 or not language.isalpha()):
+             logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
+             language = None
+
         transcribe_kwargs = {
-            "language": kwargs.get("language", self.config.transcription.language),
+            "language": language,
             "beam_size": kwargs.get("beam_size", self.config.transcription.beam_size),
             "vad_filter": kwargs.get("vad_filter", self.config.transcription.vad_filter),
             "task": kwargs.get("task", self.config.transcription.task),
@@ -212,8 +219,15 @@ class Transcriber:
         self.load_model()
 
         # Merge config with kwargs
+        language = kwargs.get("language", self.config.transcription.language)
+        
+        # Validate language code to prevent segmentation faults in underlying library
+        if language and (len(language) != 2 or not language.isalpha()):
+             logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
+             language = None
+
         transcribe_kwargs = {
-            "language": kwargs.get("language", self.config.transcription.language),
+            "language": language,
             "beam_size": kwargs.get("beam_size", self.config.transcription.beam_size),
             "vad_filter": kwargs.get("vad_filter", self.config.transcription.vad_filter),
             "task": kwargs.get("task", self.config.transcription.task),
