@@ -116,6 +116,27 @@ def handle_daemon_command(args) -> int:
             return 1
 
 
+def handle_config_command(args) -> int:
+    """Handle config-related commands."""
+    if args.subcommand == 'validate':
+        try:
+            from .config import WhisperAloudConfig
+            config = WhisperAloudConfig.load()
+            print("✅ Configuration is valid")
+            print(f"   Model: {config.model.name} on {config.model.device}")
+            print(f"   Language: {config.transcription.language}")
+            print(f"   Sample Rate: {config.audio.sample_rate}Hz")
+            print(f"   VAD: {'enabled' if config.audio.vad_enabled else 'disabled'}")
+            print(f"   Persistence: {'enabled' if config.persistence and config.persistence.save_audio else 'disabled'}")
+            return 0
+        except Exception as e:
+            print(f"❌ Configuration has errors: {e}", file=sys.stderr)
+            return 1
+    else:
+        print("Unknown config subcommand", file=sys.stderr)
+        return 1
+
+
 def handle_file_transcription(args) -> int:
     """Handle file transcription (legacy mode)."""
     # Configure logging
@@ -203,6 +224,9 @@ Examples:
   whisper-aloud toggle
   whisper-aloud reload
   whisper-aloud quit
+
+  # Configuration
+  whisper-aloud config validate
         """
     )
 
@@ -221,8 +245,16 @@ Examples:
     parser.add_argument(
         "command",
         nargs='?',
-        choices=['start', 'stop', 'status', 'toggle', 'quit', 'reload'],
+        choices=['start', 'stop', 'status', 'toggle', 'quit', 'reload', 'config'],
         help="Daemon control command (requires running daemon)"
+    )
+
+    # Subcommand for config
+    parser.add_argument(
+        "subcommand",
+        nargs='?',
+        choices=['validate'],
+        help="Subcommand for config operations"
     )
 
     # Legacy file transcription arguments
@@ -251,7 +283,10 @@ Examples:
 
     # Handle daemon control commands
     if args.command:
-        return handle_daemon_command(args)
+        if args.command == 'config':
+            return handle_config_command(args)
+        else:
+            return handle_daemon_command(args)
 
     # Legacy file transcription mode
     if args.audio_file:
