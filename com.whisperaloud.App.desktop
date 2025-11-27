@@ -1,0 +1,29 @@
+[Desktop Entry]
+Type=Application
+Name=WhisperAloud
+Comment=Voice dictation and transcription
+Exec=whisper-aloud-gui
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Audio;Accessibility;
+Keywords=voice;dictation;transcription;speech;whisper;
+StartupNotify=true
+X-GNOME-UsesNotifications=true
+
+# Actions
+Actions=StartDaemon;StopDaemon;Status;
+
+[Desktop Action StartDaemon]
+Name=Start Daemon
+Exec=whisper-aloud --daemon
+Icon=media-playback-start
+
+[Desktop Action StopDaemon]
+Name=Stop Daemon
+Exec=whisper-aloud quit
+Icon=media-playback-stop
+
+[Desktop Action Status]
+Name=Daemon Status
+Exec=gnome-terminal -- bash -c "whisper-aloud status; read -p 'Press Enter to close...'"
+Icon=info

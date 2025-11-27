@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="whisperaloud">
+  <schema id="org.gnome.shell.extensions.whisperaloud" path="/org/gnome/shell/extensions/whisperaloud/">
+    <key name="toggle-recording" type="as">
+      <default><![CDATA[['<Super><Alt>r']]]></default>
+      <summary>Toggle recording shortcut</summary>
+      <description>Keybinding to toggle recording state.</description>
+    </key>
+  </schema>
+</schemalist>

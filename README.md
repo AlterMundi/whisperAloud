@@ -41,6 +41,18 @@ A complete persistence layer for storing transcription history with full-text se
 - ✅ Favorites and tagging support
 - ✅ Non-blocking background operations
 
+## Phase 6: D-Bus Service (Daemon Mode) ✅ COMPLETE
+
+A D-Bus service that allows WhisperAloud to run as a background daemon, enabling control from CLI, GUI, or system components like global shortcuts.
+
+**Features:**
+- ✅ D-Bus interface for remote control (`org.fede.whisperAloud`)
+- ✅ Background daemon mode with `whisper-aloud --daemon`
+- ✅ CLI client commands: `start`, `stop`, `status`, `toggle`, `quit`
+- ✅ Non-blocking transcription with signal-based completion
+- ✅ Thread-safe state management
+- ✅ Integration with existing AudioRecorder and Transcriber components
+
 ### Installation
 
 **Quick Start:**
@@ -81,15 +93,36 @@ The GUI provides:
 - Clean, simple interface
 
 **Command Line**:
+
+**File Transcription (Legacy)**:
 ```bash
 # Transcribe audio file
-whisper-aloud-transcribe audio.wav
+whisper-aloud audio.wav
 
 # Specify model and language
-whisper-aloud-transcribe audio.wav --model medium --language en
+whisper-aloud audio.wav --model medium --language en
 
 # Verbose output
-whisper-aloud-transcribe audio.wav --verbose
+whisper-aloud audio.wav --verbose
+```
+
+**Daemon Mode**:
+```bash
+# Start background daemon
+whisper-aloud --daemon
+
+# Control running daemon (in another terminal)
+whisper-aloud start    # Start recording
+whisper-aloud stop     # Stop recording and transcribe
+whisper-aloud status   # Show current status
+whisper-aloud toggle   # Toggle recording state
+whisper-aloud quit     # Stop the daemon
+```
+
+**Testing the Daemon**:
+```bash
+# Run automated daemon test
+python scripts/test_daemon.py
 ```
 
 **Python API**:
@@ -376,5 +409,5 @@ sudo apt install -y portaudio19-dev libportaudio2
 - ✅ Phase 3: Clipboard integration
 - ✅ Phase 4: GTK4 GUI (Complete with settings, level meter, error handling)
 - ✅ Phase 5: Persistence layer (history, search, audio archiving)
-- ⏳ Phase 6: D-Bus service (daemon mode)
-- ⏳ Phase 7: GNOME integration
+- ✅ Phase 6: D-Bus service (daemon mode)
+- ✅ Phase 7: GNOME integration

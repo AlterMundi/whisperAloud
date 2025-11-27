@@ -1,4 +1,4 @@
-"""CLI interface for WhisperAloud transcription."""
+"""CLI interface for WhisperAloud transcription and daemon control."""
 
 import argparse
 import logging
@@ -8,37 +8,113 @@ from pathlib import Path
 from . import Transcriber, WhisperAloudConfig, __version__
 from .exceptions import WhisperAloudError
 
+# Import GObject libraries conditionally
+try:
+    import gi
+    gi.require_version('Gio', '2.0')
+    from gi.repository import Gio, GLib
+    HAS_GIO = True
+except ImportError:
+    HAS_GIO = False
 
-def main() -> int:
-    """Main CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="Transcribe audio files using Whisper AI",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
 
-    parser.add_argument("audio_file", type=Path, help="Path to audio file")
-    parser.add_argument(
-        "--model",
-        default="base",
-        choices=["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"],
-        help="Model size (default: base)",
-    )
-    parser.add_argument(
-        "--language", default="es", help="Language code or 'auto' (default: es)"
-    )
-    parser.add_argument(
-        "--device",
-        default="auto",
-        choices=["auto", "cpu", "cuda"],
-        help="Device to use (default: auto)",
-    )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Show detailed progress"
-    )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+def check_service_running() -> bool:
+    """Check if the D-Bus service is running."""
+    if not HAS_GIO:
+        return False
 
-    args = parser.parse_args()
+    try:
+        connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        # Try to get the service name owner
+        owner = connection.call_sync(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetNameOwner",
+            GLib.Variant("(s)", ("org.fede.whisperAloud",)),
+            GLib.VariantType("(s)"),
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None
+        )
+        return owner is not None
+    except Exception:
+        return False
 
+
+def call_service_method(method_name: str, *args):
+    """Call a method on the running D-Bus service."""
+    try:
+        from pydbus import SessionBus
+        bus = SessionBus()
+        service = bus.get("org.fede.whisperAloud")
+
+        # Call the method
+        method = getattr(service, method_name)
+        result = method(*args)
+        return result
+    except Exception as e:
+        raise WhisperAloudError(f"Failed to call service method {method_name}: {e}")
+
+
+def handle_daemon_command(args) -> int:
+    """Handle daemon-related commands."""
+    if args.daemon:
+        # Start the daemon service
+        try:
+            from .service import WhisperAloudService
+            service = WhisperAloudService()
+            service.run()
+            return 0
+        except Exception as e:
+            print(f"Failed to start daemon: {e}", file=sys.stderr)
+            return 1
+
+    # Check if service is running
+    if check_service_running():
+        # Service is running, act as client
+        try:
+            if args.command:
+                if args.command == 'start':
+                    call_service_method("StartRecording")
+                    print("Recording started")
+                elif args.command == 'stop':
+                    result = call_service_method("StopRecording")
+                    print("Recording stopped, transcription in progress...")
+                    # Note: actual transcription result comes via signal
+                elif args.command == 'toggle':
+                    result = call_service_method("ToggleRecording")
+                    print(f"State: {result}")
+                elif args.command == 'status':
+                    result = call_service_method("GetStatus")
+                    print(f"Status: {result}")
+                elif args.command == 'quit':
+                    call_service_method("Quit")
+                    print("Service quit")
+                else:
+                    print(f"Unknown command: {args.command}", file=sys.stderr)
+                    return 1
+            else:
+                # No command specified, show status
+                result = call_service_method("GetStatus")
+                print(f"Service status: {result.get_string()}")
+            return 0
+        except WhisperAloudError as e:
+            print(f"Service error: {e}", file=sys.stderr)
+            return 1
+    else:
+        # Service not running
+        if args.command:
+            print("Service is not running. Start with 'whisper-aloud --daemon'", file=sys.stderr)
+            return 1
+        else:
+            # This shouldn't happen in daemon command handler
+            print("No service running and no command specified", file=sys.stderr)
+            return 1
+
+
+def handle_file_transcription(args) -> int:
+    """Handle file transcription (legacy mode)."""
     # Configure logging
     if args.verbose:
         logging.basicConfig(
@@ -50,6 +126,10 @@ def main() -> int:
         logging.basicConfig(level=logging.WARNING)
 
     # Validate input file
+    if not hasattr(args, 'audio_file') or not args.audio_file:
+        print("Error: No audio file specified", file=sys.stderr)
+        return 1
+
     if not args.audio_file.exists():
         print(f"Error: File not found: {args.audio_file}", file=sys.stderr)
         return 1
@@ -97,6 +177,83 @@ def main() -> int:
         if args.verbose:
             import traceback
             traceback.print_exc()
+        return 1
+
+
+def main() -> int:
+    """Main CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio using Whisper AI or control daemon",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # File transcription (legacy mode)
+  whisper-aloud audio.wav
+
+  # Daemon mode
+  whisper-aloud --daemon
+
+  # Control running daemon
+  whisper-aloud start
+  whisper-aloud stop
+  whisper-aloud status
+  whisper-aloud toggle
+  whisper-aloud quit
+        """
+    )
+
+    # Global options
+    parser.add_argument(
+        "--verbose", action="store_true", help="Show detailed progress"
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+
+    # Daemon flag
+    parser.add_argument(
+        "--daemon", action="store_true", help="Start daemon service"
+    )
+
+    # Command (for controlling daemon)
+    parser.add_argument(
+        "command",
+        nargs='?',
+        choices=['start', 'stop', 'status', 'toggle', 'quit'],
+        help="Daemon control command (requires running daemon)"
+    )
+
+    # Legacy file transcription arguments
+    parser.add_argument("audio_file", type=Path, nargs='?', help="Path to audio file")
+    parser.add_argument(
+        "--model",
+        default="base",
+        choices=["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"],
+        help="Model size (default: base)",
+    )
+    parser.add_argument(
+        "--language", default="es", help="Language code or 'auto' (default: es)"
+    )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device to use (default: auto)",
+    )
+
+    args = parser.parse_args()
+
+    # Handle daemon mode
+    if args.daemon:
+        return handle_daemon_command(args)
+
+    # Handle daemon control commands
+    if args.command:
+        return handle_daemon_command(args)
+
+    # Legacy file transcription mode
+    if args.audio_file:
+        return handle_file_transcription(args)
+    else:
+        parser.print_help()
         return 1
 
 

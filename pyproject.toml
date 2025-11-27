@@ -45,6 +45,7 @@ dev = [
 ]
 
 [project.scripts]
+whisper-aloud = "whisper_aloud.__main__:main"
 whisper-aloud-transcribe = "whisper_aloud.__main__:main"
 whisper-aloud-gui = "whisper_aloud.ui:main"
 
