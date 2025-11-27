@@ -2,6 +2,7 @@
 
 import logging
 import signal as signal_module
+import uuid
 from pydbus.generic import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,7 @@ from ..config import WhisperAloudConfig
 from ..exceptions import WhisperAloudError
 from ..transcriber import Transcriber
 from ..gnome_integration import NotificationManager
+from ..persistence import HistoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +38,15 @@ class WhisperAloudService:
           <arg type="s"/>
         </signal>
         <signal name="TranscriptionCompleted">
-          <arg type="s"/>
-        </signal>
-        <signal name="ErrorOccurred">
-          <arg type="s"/>
-        </signal>
+           <arg type="s"/>
+           <arg type="i"/>
+         </signal>
+         <signal name="HistoryUpdated">
+           <arg type="i"/>
+         </signal>
+         <signal name="ErrorOccurred">
+           <arg type="s"/>
+         </signal>
       </interface>
     </node>
     """
@@ -71,6 +77,11 @@ class WhisperAloudService:
             self.notifications = NotificationManager(self.config)
         except Exception as e:
             logger.warning(f"Failed to initialize notifications: {e}")
+
+        # Initialize history manager for persistence
+        self.history_manager = HistoryManager(self.config.persistence)
+        self.session_id = str(uuid.uuid4())
+        logger.info(f"Daemon session ID: {self.session_id}")
 
         logger.info("WhisperAloudService initialized")
 
@@ -188,6 +199,7 @@ class WhisperAloudService:
 
     StatusChanged = signal()
     TranscriptionCompleted = signal()
+    HistoryUpdated = signal()
     ErrorOccurred = signal()
 
     def _transcribe_audio(self, audio_data):
@@ -198,13 +210,35 @@ class WhisperAloudService:
         """Transcribe audio and emit completion signal (runs in thread)."""
         try:
             result = self._transcribe_audio(audio_data)
-            # Emit signals
-            self._transcribing = False
-            self.StatusChanged("idle")
-            self.TranscriptionCompleted(result.text)
-            if self.notifications:
-                self.notifications.show_transcription_completed(result.text)
-            logger.info("Transcription completed and signal emitted")
+
+            # Save to history database
+            try:
+                entry_id = self.history_manager.add_transcription(
+                    result=result,
+                    audio=audio_data if self.config.persistence.save_audio else None,
+                    sample_rate=self.config.audio.sample_rate,
+                    session_id=self.session_id
+                )
+                logger.info(f"Transcription saved to database: ID {entry_id}")
+
+                # Emit signals with entry ID
+                self._transcribing = False
+                self.StatusChanged("idle")
+                self.TranscriptionCompleted(result.text, entry_id)
+                self.HistoryUpdated(entry_id)  # Nueva señal para sincronización
+                if self.notifications:
+                    self.notifications.show_transcription_completed(result.text)
+                logger.info("Transcription completed and signals emitted")
+
+            except Exception as e:
+                logger.error(f"Failed to save history: {e}")
+                # Continue with signal emission even if history save fails
+                self._transcribing = False
+                self.StatusChanged("idle")
+                self.TranscriptionCompleted(result.text, -1)  # -1 indicates save failed
+                if self.notifications:
+                    self.notifications.show_transcription_completed(result.text)
+
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             self._transcribing = False

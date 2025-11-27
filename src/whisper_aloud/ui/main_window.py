@@ -321,9 +321,48 @@ class MainWindow(Gtk.ApplicationWindow):
             self.history_panel.connect("entry-selected", self._on_history_entry_selected)
             self.history_container.append(self.history_panel)
 
+        # Set up D-Bus listener for daemon signals
+        self._setup_dbus_listener()
+
         # Update model info display
         self._update_model_info()
             
+        return False
+
+    def _setup_dbus_listener(self) -> None:
+        """Set up D-Bus listener for daemon signals."""
+        try:
+            from pydbus import SessionBus
+            bus = SessionBus()
+            daemon = bus.get('org.fede.whisperAloud')
+
+            # Callback for HistoryUpdated signal
+            def on_history_updated(entry_id):
+                logger.debug(f"Daemon added transcription {entry_id}")
+                GLib.idle_add(self._on_daemon_history_updated, entry_id)
+
+            daemon.onHistoryUpdated = on_history_updated
+            logger.info("Listening to daemon HistoryUpdated signals")
+
+        except Exception as e:
+            logger.debug(f"No daemon available for sync: {e}")
+
+    def _on_daemon_history_updated(self, entry_id: int) -> bool:
+        """
+        Called when daemon adds a new transcription (main thread).
+
+        Args:
+            entry_id: ID of the new entry
+
+        Returns:
+            False to remove this idle callback
+        """
+        logger.info(f"Daemon added transcription {entry_id}, refreshing history")
+
+        # Refresh history panel to show new entry
+        if hasattr(self, 'history_panel'):
+            self.history_panel.refresh_recent()
+
         return False
 
     def _on_load_error_sync(self, error_msg: str) -> None:
