@@ -577,6 +577,17 @@ class SettingsDialog(Gtk.Window):
             # Save to file
             save_config_to_file(self._config)
 
+            logger.debug("Notifying daemon of config changes")
+            # Notify daemon to reload config
+            try:
+                from pydbus import SessionBus
+                bus = SessionBus()
+                daemon = bus.get('org.fede.whisperAloud')
+                result = daemon.ReloadConfig()
+                logger.info(f"Daemon config reload: {result}")
+            except Exception as e:
+                logger.debug(f"No daemon to notify: {e}")
+
             logger.debug("Triggering save callback")
             # Trigger callback
             if self._on_save_callback:

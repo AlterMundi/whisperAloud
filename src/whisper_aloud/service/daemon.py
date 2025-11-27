@@ -44,6 +44,10 @@ class WhisperAloudService:
          <signal name="HistoryUpdated">
            <arg type="i"/>
          </signal>
+         <method name="ReloadConfig">
+           <arg type="s" direction="out"/>
+         </method>
+         <signal name="ConfigReloaded"/>
          <signal name="ErrorOccurred">
            <arg type="s"/>
          </signal>
@@ -186,6 +190,33 @@ class WhisperAloudService:
             return "transcribing"
         return self.recorder.state.value
 
+    def ReloadConfig(self) -> str:
+        """Reload configuration from file and apply changes."""
+        try:
+            logger.info("Reloading configuration...")
+            new_config = WhisperAloudConfig.load()
+
+            # Check if model config changed
+            if (new_config.model.name != self.config.model.name or
+                new_config.model.device != self.config.model.device):
+                logger.info("Model config changed, reloading...")
+                self.transcriber = Transcriber(new_config)
+                self.transcriber.load_model()
+
+            # Check if audio config changed
+            if new_config.audio != self.config.audio:
+                logger.info("Audio config changed, recreating recorder...")
+                self.recorder = AudioRecorder(new_config.audio)
+
+            self.config = new_config
+            self.ConfigReloaded()
+            logger.info("Configuration reloaded successfully")
+            return "OK"
+
+        except Exception as e:
+            logger.error(f"Failed to reload config: {e}")
+            return f"ERROR: {e}"
+
     def Quit(self) -> None:
         """Quit the service."""
         logger.info("Quit requested via D-Bus")
@@ -200,6 +231,7 @@ class WhisperAloudService:
     StatusChanged = signal()
     TranscriptionCompleted = signal()
     HistoryUpdated = signal()
+    ConfigReloaded = signal()
     ErrorOccurred = signal()
 
     def _transcribe_audio(self, audio_data):

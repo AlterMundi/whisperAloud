@@ -91,6 +91,9 @@ def handle_daemon_command(args) -> int:
                 elif args.command == 'quit':
                     call_service_method("Quit")
                     print("Service quit")
+                elif args.command == 'reload':
+                    result = call_service_method("ReloadConfig")
+                    print(f"Config reload: {result}")
                 else:
                     print(f"Unknown command: {args.command}", file=sys.stderr)
                     return 1
@@ -198,6 +201,7 @@ Examples:
   whisper-aloud stop
   whisper-aloud status
   whisper-aloud toggle
+  whisper-aloud reload
   whisper-aloud quit
         """
     )
@@ -217,7 +221,7 @@ Examples:
     parser.add_argument(
         "command",
         nargs='?',
-        choices=['start', 'stop', 'status', 'toggle', 'quit'],
+        choices=['start', 'stop', 'status', 'toggle', 'quit', 'reload'],
         help="Daemon control command (requires running daemon)"
     )
 
