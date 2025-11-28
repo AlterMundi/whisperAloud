@@ -171,6 +171,64 @@ export WHISPER_ALOUD_COMPUTE_TYPE=int8
 
 ---
 
+## Issue: CUDA/GPU Errors
+
+### Error: "Unable to load libcudnn_ops.so"
+
+**Full error:**
+```
+Unable to load any of {libcudnn_ops.so.9.1.0, libcudnn_ops.so.9.1, libcudnn_ops.so.9, libcudnn_ops.so}
+Invalid handle. Cannot load symbol cudnnCreateTensorDescriptor
+Abortado (`core' generado)
+```
+
+**Cause**: cuDNN library not installed.
+
+**Solution** (Debian/Ubuntu/Linux Mint):
+```bash
+# Add NVIDIA repo (if not already added)
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt update
+
+# Install cuDNN
+sudo apt install libcudnn9-cuda-12
+```
+
+### Error: "Cannot load symbol cublasLtGetVersion"
+
+**Full error:**
+```
+Invalid handle. Cannot load symbol cublasLtGetVersion
+```
+
+**Cause**: cuBLAS library not installed.
+
+**Solution**:
+```bash
+sudo apt install libcublas-12-8
+```
+
+### Workaround: Use CPU Instead
+
+If you don't want to install CUDA libraries:
+
+```bash
+# Run with CPU
+WHISPER_ALOUD_MODEL_DEVICE=cpu whisper-aloud-gui
+```
+
+Or set in `~/.config/whisper_aloud/config.json`:
+```json
+{
+  "model": {
+    "device": "cpu"
+  }
+}
+```
+
+---
+
 ## Issue: Out of Memory
 
 **Error:**
@@ -456,6 +514,9 @@ If problems persist:
 | Import errors | Activate venv: `source ~/.venvs/whisper_aloud/bin/activate` |
 | PortAudio errors | Install: `sudo apt install portaudio19-dev` |
 | Model download fails | Check internet, try different model |
+| CUDA libcudnn error | Install: `sudo apt install libcudnn9-cuda-12` |
+| CUDA cublas error | Install: `sudo apt install libcublas-12-8` |
+| Skip GPU issues | Use: `WHISPER_ALOUD_MODEL_DEVICE=cpu whisper-aloud-gui` |
 
 ---
 

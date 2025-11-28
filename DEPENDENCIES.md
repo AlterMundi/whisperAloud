@@ -382,7 +382,101 @@ sudo pacman -S --needed \
 | Wayland Clipboard | `wl-clipboard` | Copy on Wayland | Clipboard won't work on Wayland |
 | X11 Clipboard | `xclip` | Copy on X11 | Clipboard won't work on X11 |
 | Paste Simulation | `ydotool`/`xdotool` | Auto-paste | Manual paste required |
-| GPU Acceleration | CUDA toolkit | Faster inference | CPU-only (slower) |
+| GPU Acceleration | CUDA + cuDNN + cuBLAS | Faster inference | CPU-only (slower) |
+
+---
+
+## GPU Acceleration (NVIDIA CUDA)
+
+For significantly faster transcription on NVIDIA GPUs, you need CUDA runtime libraries.
+
+### Required CUDA Libraries
+
+| Library | Debian/Ubuntu Package | Purpose |
+|---------|----------------------|---------|
+| CUDA Runtime | `cuda-runtime-12-*` | CUDA base runtime |
+| cuDNN | `libcudnn9-cuda-12` | Deep Neural Network library |
+| cuBLAS | `libcublas-12-*` | Linear algebra library |
+
+### Installation (Debian/Ubuntu/Linux Mint)
+
+**Step 1: Add NVIDIA CUDA Repository**
+
+```bash
+# Download and install the CUDA keyring
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt update
+```
+
+> **Note**: For older Ubuntu versions, replace `ubuntu2404` with your version:
+> - Ubuntu 22.04: `ubuntu2204`
+> - Ubuntu 20.04: `ubuntu2004`
+
+**Step 2: Install CUDA Libraries**
+
+```bash
+sudo apt install -y libcudnn9-cuda-12 libcublas-12-8
+```
+
+### Common GPU Errors
+
+#### "Unable to load libcudnn_ops.so"
+
+```
+Unable to load any of {libcudnn_ops.so.9.1.0, libcudnn_ops.so.9.1, libcudnn_ops.so.9, libcudnn_ops.so}
+```
+
+**Fix**: Install cuDNN
+```bash
+sudo apt install libcudnn9-cuda-12
+```
+
+#### "Cannot load symbol cublasLtGetVersion"
+
+```
+Invalid handle. Cannot load symbol cublasLtGetVersion
+```
+
+**Fix**: Install cuBLAS
+```bash
+sudo apt install libcublas-12-8
+```
+
+### Verify GPU Support
+
+```bash
+# Check if CUDA is available to faster-whisper
+python3 -c "
+import torch
+print(f'CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'GPU: {torch.cuda.get_device_name(0)}')
+"
+
+# Or check via faster-whisper directly
+python3 -c "
+from faster_whisper import WhisperModel
+model = WhisperModel('tiny', device='cuda')
+print('GPU inference OK')
+"
+```
+
+### Using CPU Instead
+
+If you don't have an NVIDIA GPU or prefer not to install CUDA, set device to CPU:
+
+```bash
+# Via environment variable
+WHISPER_ALOUD_MODEL_DEVICE=cpu whisper-aloud-gui
+
+# Or in config.json
+{
+  "model": {
+    "device": "cpu"
+  }
+}
+```
 
 ---
 

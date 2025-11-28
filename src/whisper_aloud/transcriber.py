@@ -59,9 +59,54 @@ class Transcriber:
         """Check if cancellation has been requested."""
         return self._cancel_flag.is_set()
 
+    def _is_cuda_library_error(self, error: Exception) -> bool:
+        """Check if the error is related to missing CUDA libraries."""
+        error_str = str(error).lower()
+        cuda_indicators = [
+            "libcudnn",
+            "cudnn",
+            "cublas",
+            "libcublas",
+            "cuda",
+            "nvrtc",
+            "unable to load",
+            "cannot load symbol",
+        ]
+        return any(indicator in error_str for indicator in cuda_indicators)
+
+    def _try_load_model(self, device: str, compute_type: str) -> bool:
+        """
+        Attempt to load model with specified device.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info("Attempting to load model on device: %s", device)
+            self._model = WhisperModel(
+                self.config.model.name,
+                device=device,
+                compute_type=compute_type,
+                download_root=self.config.model.download_root,
+            )
+
+            # Test with dummy inference
+            dummy_audio = np.zeros(1600, dtype=np.float32)
+            segments, info = self._model.transcribe(dummy_audio, language="en")
+            list(segments)  # Consume generator
+            return True
+
+        except Exception as e:
+            self._model = None
+            logger.debug("Failed to load on %s: %s", device, e)
+            return False
+
     def load_model(self) -> None:
         """
         Explicitly load the Whisper model.
+
+        If CUDA is requested but libraries are missing, automatically
+        falls back to CPU with a warning.
 
         Raises:
             ModelLoadError: If model fails to load with details
@@ -70,41 +115,65 @@ class Transcriber:
             logger.debug("Model already loaded")
             return
 
-        try:
-            logger.info("Loading Whisper model: %s on device: %s",
-                       self.config.model.name, self.config.model.device)
+        requested_device = self.config.model.device
+        compute_type = self.config.model.compute_type
 
-            # Try to load model
+        logger.info("Loading Whisper model: %s on device: %s",
+                   self.config.model.name, requested_device)
+
+        # Try loading with requested device
+        try:
             self._model = WhisperModel(
                 self.config.model.name,
-                device=self.config.model.device,
-                compute_type=self.config.model.compute_type,
+                device=requested_device,
+                compute_type=compute_type,
                 download_root=self.config.model.download_root,
             )
 
-            # Test model with dummy inference to ensure it works
-            # This will catch issues like incompatible compute_type
-            try:
-                # Create a short dummy audio (0.1s silence)
-                dummy_audio = np.zeros(1600, dtype=np.float32)
-                segments, info = self._model.transcribe(dummy_audio, language="en")
-                list(segments)  # Consume generator
-                logger.info("Model loaded successfully")
-            except Exception as e:
-                self._model = None
-                raise ModelLoadError(
-                    f"Model '{self.config.model.name}' loaded but failed test inference: {e}"
-                ) from e
+            # Test model with dummy inference
+            dummy_audio = np.zeros(1600, dtype=np.float32)
+            segments, info = self._model.transcribe(dummy_audio, language="en")
+            list(segments)  # Consume generator
+            logger.info("Model loaded successfully on %s", requested_device)
+            return
 
         except Exception as e:
             self._model = None
+
+            # Check if this is a CUDA library error and we can fallback
+            if self._is_cuda_library_error(e) and requested_device in ("cuda", "auto"):
+                logger.warning(
+                    "CUDA libraries not available (%s). "
+                    "Install with: sudo apt install libcudnn9-cuda-12 libcublas-12-8",
+                    str(e)[:100]
+                )
+                logger.info("Falling back to CPU...")
+
+                # Try CPU fallback
+                # For CPU, prefer int8 compute type for efficiency
+                cpu_compute = "int8" if compute_type in ("float16", "int8") else compute_type
+
+                if self._try_load_model("cpu", cpu_compute):
+                    logger.warning(
+                        "Model loaded on CPU (fallback). GPU acceleration unavailable. "
+                        "To enable GPU: run ./scripts/install_cuda.sh"
+                    )
+                    return
+                else:
+                    raise ModelLoadError(
+                        f"Failed to load model on both CUDA and CPU. "
+                        f"Original error: {e}"
+                    ) from e
+
+            # Not a CUDA error or fallback failed - raise with hints
             device_hint = ""
             if "cuda" in str(e).lower():
-                device_hint = " Try device='cpu' to use CPU instead."
-            elif "cpu" in str(e).lower():
+                device_hint = " Install CUDA libs or set device='cpu'."
+            elif "cpu" in str(e).lower() or "memory" in str(e).lower():
                 device_hint = " Ensure sufficient RAM available."
+
             raise ModelLoadError(
-                f"Failed to load model '{self.config.model.name}' on device '{self.config.model.device}': {e}.{device_hint}"
+                f"Failed to load model '{self.config.model.name}' on device '{requested_device}': {e}.{device_hint}"
             ) from e
 
     def _process_segments(self, segments, duration: float) -> tuple[str, List[dict], float, bool]:

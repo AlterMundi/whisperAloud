@@ -15,6 +15,8 @@ NC='\033[0m' # No Color
 VENV_PATH="${WHISPER_VENV:-$HOME/.venvs/whisper_aloud}"
 INSTALL_DEV=false
 SKIP_SYSTEM_DEPS=false
+INSTALL_CUDA=false
+CUDA_AUTO_DETECT=true
 
 # Print colored message
 print_msg() {
@@ -47,10 +49,15 @@ Options:
                             (default: ~/.venvs/whisper_aloud)
     -s, --skip-system       Skip system dependency installation
                             (useful if already installed)
+    --cuda                  Install NVIDIA CUDA dependencies (cuDNN, cuBLAS)
+                            for GPU acceleration
+    --no-cuda               Skip CUDA even if NVIDIA GPU detected
     --uninstall             Remove WhisperAloud installation
 
 Examples:
-    ./install.sh                    # Standard installation
+    ./install.sh                    # Standard install (prompts for CUDA if GPU found)
+    ./install.sh --cuda             # Install with CUDA support
+    ./install.sh --no-cuda          # CPU-only, skip GPU detection
     ./install.sh --dev              # With dev tools (pytest, black, etc.)
     ./install.sh -v ~/my_venv       # Custom venv location
     ./install.sh --uninstall        # Remove installation
@@ -64,16 +71,188 @@ detect_distro() {
         . /etc/os-release
         DISTRO=$ID
         DISTRO_FAMILY=$ID_LIKE
+        DISTRO_VERSION=$VERSION_ID
     elif [ -f /etc/debian_version ]; then
         DISTRO="debian"
         DISTRO_FAMILY="debian"
+        DISTRO_VERSION=$(cat /etc/debian_version)
     elif [ -f /etc/fedora-release ]; then
         DISTRO="fedora"
         DISTRO_FAMILY="fedora"
+        DISTRO_VERSION=""
     else
         DISTRO="unknown"
         DISTRO_FAMILY="unknown"
+        DISTRO_VERSION=""
     fi
+}
+
+# Detect NVIDIA GPU
+detect_nvidia_gpu() {
+    # Check via lspci (most reliable, doesn't need drivers)
+    if command -v lspci &>/dev/null; then
+        if lspci | grep -qi "nvidia"; then
+            return 0
+        fi
+    fi
+
+    # Check via nvidia-smi (requires driver)
+    if command -v nvidia-smi &>/dev/null; then
+        if nvidia-smi &>/dev/null; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Get NVIDIA GPU name
+get_gpu_name() {
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1
+    elif command -v lspci &>/dev/null; then
+        lspci | grep -i nvidia | grep -i vga | sed 's/.*: //' | head -1
+    else
+        echo "NVIDIA GPU"
+    fi
+}
+
+# Get Ubuntu version code for CUDA repo
+get_ubuntu_cuda_repo() {
+    case "$DISTRO_VERSION" in
+        24.04|24.10) echo "ubuntu2404" ;;
+        22.04|22.10) echo "ubuntu2204" ;;
+        20.04|20.10) echo "ubuntu2004" ;;
+        *)
+            # For Mint and derivatives, map to Ubuntu base
+            if [ -f /etc/upstream-release/lsb-release ]; then
+                . /etc/upstream-release/lsb-release
+                case "$DISTRIB_RELEASE" in
+                    24.04) echo "ubuntu2404" ;;
+                    22.04) echo "ubuntu2204" ;;
+                    20.04) echo "ubuntu2004" ;;
+                    *) echo "ubuntu2204" ;;  # fallback
+                esac
+            else
+                echo "ubuntu2204"  # safe fallback
+            fi
+            ;;
+    esac
+}
+
+# Install CUDA dependencies for Debian/Ubuntu
+install_cuda_debian() {
+    print_msg "Installing CUDA dependencies (cuDNN, cuBLAS)..."
+
+    local cuda_repo=$(get_ubuntu_cuda_repo)
+    local keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${cuda_repo}/x86_64/cuda-keyring_1.1-1_all.deb"
+
+    print_msg "Adding NVIDIA CUDA repository (${cuda_repo})..."
+
+    # Download and install keyring
+    local tmp_keyring="/tmp/cuda-keyring.deb"
+    if ! wget -q "$keyring_url" -O "$tmp_keyring"; then
+        print_error "Failed to download CUDA keyring"
+        print_warning "You may need to install CUDA manually. See DEPENDENCIES.md"
+        return 1
+    fi
+
+    sudo dpkg -i "$tmp_keyring" || true
+    rm -f "$tmp_keyring"
+
+    # Update and install CUDA libraries
+    sudo apt update
+
+    print_msg "Installing cuDNN and cuBLAS..."
+    if sudo apt install -y libcudnn9-cuda-12 libcublas-12-8; then
+        print_success "CUDA dependencies installed"
+        return 0
+    else
+        print_error "Failed to install CUDA dependencies"
+        print_warning "GPU acceleration may not work. Use device=cpu as fallback."
+        return 1
+    fi
+}
+
+# Install CUDA dependencies for Fedora
+install_cuda_fedora() {
+    print_msg "Installing CUDA dependencies (Fedora)..."
+
+    # Fedora uses RPM Fusion for NVIDIA
+    print_warning "Fedora CUDA setup requires RPM Fusion and manual steps"
+    print_msg "See: https://rpmfusion.org/Howto/CUDA"
+
+    # Try to install if repos are already set up
+    if sudo dnf install -y cuda-cudnn cuda-cublas 2>/dev/null; then
+        print_success "CUDA dependencies installed"
+        return 0
+    else
+        print_warning "CUDA installation skipped - manual setup may be required"
+        return 1
+    fi
+}
+
+# Install CUDA dependencies for Arch
+install_cuda_arch() {
+    print_msg "Installing CUDA dependencies (Arch)..."
+
+    if sudo pacman -S --needed cudnn 2>/dev/null; then
+        print_success "CUDA dependencies installed"
+        return 0
+    else
+        print_warning "CUDA installation failed - check AUR for cudnn"
+        return 1
+    fi
+}
+
+# Install CUDA dependencies based on distro
+install_cuda_deps() {
+    detect_distro
+
+    case "$DISTRO" in
+        debian|ubuntu|linuxmint|pop)
+            install_cuda_debian
+            ;;
+        fedora)
+            install_cuda_fedora
+            ;;
+        arch|manjaro|endeavouros)
+            install_cuda_arch
+            ;;
+        *)
+            if [[ "$DISTRO_FAMILY" == *"debian"* ]] || [[ "$DISTRO_FAMILY" == *"ubuntu"* ]]; then
+                install_cuda_debian
+            else
+                print_warning "CUDA auto-install not supported for $DISTRO"
+                print_msg "See DEPENDENCIES.md for manual installation"
+                return 1
+            fi
+            ;;
+    esac
+}
+
+# Prompt user for CUDA installation
+prompt_cuda_install() {
+    local gpu_name=$(get_gpu_name)
+
+    echo ""
+    print_msg "NVIDIA GPU detected: $gpu_name"
+    echo ""
+    echo "CUDA support enables GPU acceleration for faster transcription."
+    echo "This requires ~500MB download and sudo access."
+    echo ""
+    read -p "Install CUDA dependencies? [Y/n] " response
+
+    case "$response" in
+        [nN][oO]|[nN])
+            print_warning "Skipping CUDA installation"
+            print_msg "You can install later with: ./scripts/install_cuda.sh"
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 }
 
 # Install system dependencies for Debian/Ubuntu
@@ -403,6 +582,16 @@ while [[ $# -gt 0 ]]; do
             SKIP_SYSTEM_DEPS=true
             shift
             ;;
+        --cuda)
+            INSTALL_CUDA=true
+            CUDA_AUTO_DETECT=false
+            shift
+            ;;
+        --no-cuda)
+            INSTALL_CUDA=false
+            CUDA_AUTO_DETECT=false
+            shift
+            ;;
         --uninstall)
             uninstall
             exit 0
@@ -445,6 +634,24 @@ main() {
         install_system_deps
     else
         print_warning "Skipping system dependencies (--skip-system)"
+    fi
+
+    # Handle CUDA installation
+    if [ "$INSTALL_CUDA" = true ]; then
+        # Explicit --cuda flag: install CUDA
+        install_cuda_deps
+    elif [ "$CUDA_AUTO_DETECT" = true ]; then
+        # Auto-detect: check for NVIDIA GPU and prompt
+        if detect_nvidia_gpu; then
+            if prompt_cuda_install; then
+                install_cuda_deps
+            fi
+        else
+            print_msg "No NVIDIA GPU detected, skipping CUDA"
+        fi
+    else
+        # --no-cuda flag: skip silently
+        print_msg "Skipping CUDA installation (--no-cuda)"
     fi
 
     # Create venv and install
