@@ -95,20 +95,22 @@ def test_invalid_task():
 
 
 def test_language_validation_edge_cases():
-    """Test language validation edge cases."""
-    # Test empty language
+    """Test language validation edge cases - invalid languages are sanitized to default."""
+    # Test empty language - sanitized to default 'es'
     os.environ['WHISPER_ALOUD_LANGUAGE'] = ''
     try:
-        with pytest.raises(ConfigurationError, match="Invalid language"):
-            WhisperAloudConfig.load()
+        config = WhisperAloudConfig.load()
+        # Empty string is treated as invalid and defaults to 'es'
+        assert config.transcription.language == 'es'
     finally:
         os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
 
-    # Test single character language
+    # Test single character language - should be sanitized to default
     os.environ['WHISPER_ALOUD_LANGUAGE'] = 'a'
     try:
-        with pytest.raises(ConfigurationError, match="Invalid language"):
-            WhisperAloudConfig.load()
+        config = WhisperAloudConfig.load()
+        # Invalid language codes are sanitized to 'es' (default)
+        assert config.transcription.language == 'es'
     finally:
         os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
 

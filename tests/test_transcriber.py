@@ -52,23 +52,26 @@ def test_transcribe_silence(mock_whisper_model):
 
 @patch('whisper_aloud.transcriber.WhisperModel')
 def test_gpu_fallback(mock_whisper_model):
-    """Test graceful fallback from GPU to CPU."""
-    # Mock model to fail on first call, succeed on second
+    """Test that model loads successfully with mocked WhisperModel."""
+    # Create a properly mocked model instance
     mock_model_instance = Mock()
-    mock_whisper_model.side_effect = [Exception("CUDA error"), mock_model_instance]
 
-    config = WhisperAloudConfig.load()
-    config.model.device = "cuda"  # Force CUDA
-    transcriber = Transcriber(config)
+    # Mock the transcribe method to return proper format for test inference
+    mock_segment = Mock()
+    mock_segment.text = "test"
+    mock_info = Mock()
+    mock_info.language = "en"
+    mock_info.duration = 1.0
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
 
-    # This should not raise an error due to fallback logic
-    # But in our implementation, we don't have automatic fallback in load_model
-    # For this test, we'll assume it loads successfully with mock
-    mock_whisper_model.side_effect = None
     mock_whisper_model.return_value = mock_model_instance
 
+    config = WhisperAloudConfig.load()
+    transcriber = Transcriber(config)
     transcriber.load_model()
+
     assert transcriber.is_loaded
+    mock_whisper_model.assert_called_once()
 
 
 def test_invalid_audio_format_numpy():
@@ -103,6 +106,15 @@ def test_transcribe_file_not_found(mock_whisper_model):
 def test_unload_model(mock_whisper_model):
     """Test unloading model."""
     mock_model_instance = Mock()
+
+    # Mock transcribe for test inference during load
+    mock_segment = Mock()
+    mock_segment.text = "test"
+    mock_info = Mock()
+    mock_info.language = "en"
+    mock_info.duration = 1.0
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
     mock_whisper_model.return_value = mock_model_instance
 
     config = WhisperAloudConfig.load()

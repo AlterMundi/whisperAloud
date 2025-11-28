@@ -241,12 +241,11 @@ Examples:
         "--daemon", action="store_true", help="Start daemon service"
     )
 
-    # Command (for controlling daemon)
+    # Positional argument - can be either a command or an audio file
     parser.add_argument(
-        "command",
+        "positional",
         nargs='?',
-        choices=['start', 'stop', 'status', 'toggle', 'quit', 'reload', 'config'],
-        help="Daemon control command (requires running daemon)"
+        help="Audio file path OR daemon command (start/stop/status/toggle/quit/reload/config)"
     )
 
     # Subcommand for config
@@ -256,9 +255,6 @@ Examples:
         choices=['validate'],
         help="Subcommand for config operations"
     )
-
-    # Legacy file transcription arguments
-    parser.add_argument("audio_file", type=Path, nargs='?', help="Path to audio file")
     parser.add_argument(
         "--model",
         default="base",
@@ -279,21 +275,31 @@ Examples:
 
     # Handle daemon mode
     if args.daemon:
+        # Set command to None for daemon mode
+        args.command = None
         return handle_daemon_command(args)
 
-    # Handle daemon control commands
-    if args.command:
-        if args.command == 'config':
-            return handle_config_command(args)
-        else:
-            return handle_daemon_command(args)
+    # Parse positional argument - could be command or audio file
+    daemon_commands = ['start', 'stop', 'status', 'toggle', 'quit', 'reload', 'config']
 
-    # Legacy file transcription mode
-    if args.audio_file:
-        return handle_file_transcription(args)
+    if args.positional:
+        if args.positional in daemon_commands:
+            # It's a daemon command
+            args.command = args.positional
+            args.audio_file = None
+
+            if args.command == 'config':
+                return handle_config_command(args)
+            else:
+                return handle_daemon_command(args)
+        else:
+            # Assume it's an audio file path
+            args.command = None
+            args.audio_file = Path(args.positional)
+            return handle_file_transcription(args)
     else:
         parser.print_help()
-        return 1
+        return 0
 
 
 if __name__ == "__main__":
