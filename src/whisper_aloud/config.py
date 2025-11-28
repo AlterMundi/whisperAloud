@@ -340,8 +340,12 @@ class WhisperAloudConfig:
 
     def validate(self) -> None:
         """Validate configuration values."""
-        # Validate model name
-        valid_models = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
+        # Validate model name (faster-whisper supported models)
+        valid_models = [
+            "tiny", "base", "small", "medium",
+            "large-v1", "large-v2", "large-v3", "large",  # large is alias for large-v3
+            "large-v3-turbo", "turbo",  # turbo variants
+        ]
         if self.model.name not in valid_models:
             raise ConfigurationError(f"Invalid model name '{self.model.name}'. Valid: {', '.join(valid_models)}")
 
