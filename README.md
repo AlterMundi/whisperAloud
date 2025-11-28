@@ -55,20 +55,59 @@ A D-Bus service that allows WhisperAloud to run as a background daemon, enabling
 
 ### Installation
 
-**Quick Start:**
+**Automated Install (Recommended):**
 ```bash
-# Install system dependencies (Debian/Ubuntu)
-sudo apt install -y portaudio19-dev libportaudio2 python3-venv python3-gi gir1.2-gtk-4.0
+# Clone repository
+git clone https://github.com/your-org/whisperAloud.git
+cd whisperAloud
 
-# Create and activate virtual environment
-python3 -m venv ~/.venvs/whisper_aloud
-source ~/.venvs/whisper_aloud/bin/activate
+# Run installer (handles all dependencies)
+./install.sh
 
-# Install WhisperAloud
-pip install -e .
+# Or with development tools
+./install.sh --dev
 ```
 
-**For detailed installation instructions, troubleshooting, and other platforms, see [INSTALL.md](INSTALL.md).**
+**Manual Install:**
+```bash
+# 1. Install ALL system dependencies (Debian/Ubuntu)
+sudo apt install -y \
+    portaudio19-dev libportaudio2 \
+    python3-venv python3-dev \
+    python3-gi python3-gi-cairo \
+    gir1.2-gtk-4.0 gir1.2-adw-1 \
+    gir1.2-gsound-1.0 \
+    wl-clipboard xclip
+
+# 2. Create virtual environment WITH system package access
+#    (Required for GTK4 bindings)
+python3 -m venv ~/.venvs/whisper_aloud --system-site-packages
+source ~/.venvs/whisper_aloud/bin/activate
+
+# 3. Install WhisperAloud
+pip install -e .
+
+# 4. Verify installation
+python scripts/check_dependencies.py
+```
+
+**System Dependencies Reference:**
+
+| Package | Purpose | Required |
+|---------|---------|----------|
+| `portaudio19-dev` | Audio recording | Yes |
+| `python3-gi` | GObject bindings | Yes |
+| `gir1.2-gtk-4.0` | GTK4 UI | Yes |
+| `gir1.2-adw-1` | Adwaita theming | Yes |
+| `gir1.2-gsound-1.0` | Sound feedback | No |
+| `wl-clipboard` | Wayland clipboard | No* |
+| `xclip` | X11 clipboard | No* |
+| `ydotool` | Paste simulation | No |
+
+*One clipboard tool required for copy functionality.
+
+**For detailed installation instructions, see [INSTALL.md](INSTALL.md).**
+**For complete dependency reference, see [DEPENDENCIES.md](DEPENDENCIES.md).**
 
 **Development installation:**
 ```bash

@@ -7,9 +7,12 @@ Complete installation instructions for WhisperAloud voice dictation application.
 - [System Requirements](#system-requirements)
 - [Quick Install](#quick-install)
 - [Detailed Installation](#detailed-installation)
+- [System Dependencies Reference](#system-dependencies-reference)
 - [Troubleshooting](#troubleshooting)
 - [Validation](#validation)
 - [Uninstallation](#uninstallation)
+
+> **See also**: [DEPENDENCIES.md](DEPENDENCIES.md) for complete dependency documentation.
 
 ---
 
@@ -17,8 +20,10 @@ Complete installation instructions for WhisperAloud voice dictation application.
 
 ### Operating System
 - **Debian 12+ / Ubuntu 22.04+** (primary target)
+- **Fedora 39+** (supported)
+- **Arch Linux** (supported)
 - Linux kernel 5.15+ recommended
-- **Display Server**: Wayland or X11
+- **Display Server**: Wayland (recommended) or X11
 
 ### Python Version
 - **Python 3.10 - 3.13** (tested on 3.13)
@@ -27,7 +32,9 @@ Complete installation instructions for WhisperAloud voice dictation application.
 
 ### System Libraries
 - **PortAudio**: Required for audio recording
-- **ALSA/PulseAudio**: Audio system
+- **GTK4**: Required for graphical interface
+- **GObject Introspection**: Required for Python-GTK bindings
+- **ALSA/PulseAudio/PipeWire**: Audio system
 
 ### Hardware
 - **RAM**: 2GB minimum, 4GB recommended
@@ -40,21 +47,52 @@ Complete installation instructions for WhisperAloud voice dictation application.
 
 ## Quick Install
 
-For experienced users on Debian/Ubuntu:
+### Automated Installation (Recommended)
+
+The easiest way to install WhisperAloud:
 
 ```bash
-# 1. Install system dependencies
-sudo apt update && sudo apt install -y portaudio19-dev libportaudio2 python3-dev python3-venv
+# Clone repository
+git clone https://github.com/your-org/whisperAloud.git
+cd whisperAloud
 
-# 2. Create virtual environment
-python3 -m venv ~/.venvs/whisper_aloud
+# Run automated installer
+./install.sh
+
+# Or with development tools (pytest, black, etc.)
+./install.sh --dev
+```
+
+The installer will:
+1. Detect your Linux distribution
+2. Install all system dependencies
+3. Create a virtual environment with system package access
+4. Install WhisperAloud and verify the installation
+5. Install a desktop file for easy launching
+
+### Manual Quick Install (Debian/Ubuntu)
+
+```bash
+# 1. Install ALL system dependencies
+sudo apt update && sudo apt install -y \
+    portaudio19-dev libportaudio2 \
+    python3-dev python3-venv python3-pip \
+    python3-gi python3-gi-cairo \
+    gir1.2-gtk-4.0 gir1.2-adw-1 \
+    gir1.2-gsound-1.0 \
+    wl-clipboard xclip
+
+# 2. Create virtual environment WITH system site-packages
+#    IMPORTANT: --system-site-packages is REQUIRED for GTK4!
+python3 -m venv ~/.venvs/whisper_aloud --system-site-packages
 source ~/.venvs/whisper_aloud/bin/activate
 
 # 3. Install WhisperAloud
 pip install -e .
 
 # 4. Verify installation
-whisper-aloud-transcribe --help
+python scripts/check_dependencies.py
+whisper-aloud-gui
 ```
 
 ---
@@ -63,39 +101,83 @@ whisper-aloud-transcribe --help
 
 ### Step 1: Install System Dependencies
 
+WhisperAloud requires both audio libraries and GTK4 for the graphical interface.
+**Important:** GTK4 Python bindings (PyGObject) must be installed as system packages.
+
 #### On Debian/Ubuntu:
 ```bash
 sudo apt update
 sudo apt install -y \
-    portaudio19-dev \
-    libportaudio2 \
+    # Build tools
+    build-essential \
     python3-dev \
     python3-venv \
     python3-pip \
-    build-essential
+    # Audio
+    portaudio19-dev \
+    libportaudio2 \
+    # GTK4 and GObject (REQUIRED - cannot install via pip)
+    python3-gi \
+    python3-gi-cairo \
+    gir1.2-gtk-4.0 \
+    libgtk-4-dev \
+    # Adwaita theming
+    gir1.2-adw-1 \
+    libadwaita-1-dev \
+    # Sound feedback (optional)
+    gir1.2-gsound-1.0 \
+    libgsound-dev \
+    # Clipboard tools
+    wl-clipboard \
+    xclip
 ```
 
-#### On Fedora/RHEL:
+#### On Fedora:
 ```bash
 sudo dnf install -y \
-    portaudio-devel \
-    python3-devel \
+    # Build tools
     gcc \
-    gcc-c++
+    gcc-c++ \
+    python3-devel \
+    # Audio
+    portaudio-devel \
+    # GTK4 and GObject
+    python3-gobject \
+    gtk4-devel \
+    # Adwaita theming
+    libadwaita-devel \
+    # Sound feedback (optional)
+    gsound-devel \
+    # Clipboard tools
+    wl-clipboard \
+    xclip \
+    ydotool
 ```
 
 #### On Arch Linux:
 ```bash
-sudo pacman -S portaudio python python-pip
+sudo pacman -S --needed \
+    base-devel \
+    python \
+    python-pip \
+    portaudio \
+    python-gobject \
+    gtk4 \
+    libadwaita \
+    gsound \
+    wl-clipboard \
+    xclip \
+    ydotool
 ```
 
 ### Step 2: Create Virtual Environment
 
-We strongly recommend using a virtual environment:
+**CRITICAL:** The virtual environment MUST have access to system site-packages
+for GTK4 bindings to work. Use the `--system-site-packages` flag:
 
 ```bash
-# Create virtual environment
-python3 -m venv ~/.venvs/whisper_aloud
+# Create virtual environment WITH system package access
+python3 -m venv ~/.venvs/whisper_aloud --system-site-packages
 
 # Activate virtual environment
 source ~/.venvs/whisper_aloud/bin/activate
@@ -103,6 +185,12 @@ source ~/.venvs/whisper_aloud/bin/activate
 # Upgrade pip, setuptools, and wheel
 pip install --upgrade pip setuptools wheel
 ```
+
+**Why `--system-site-packages`?**
+- PyGObject (GTK4 bindings) cannot be easily installed via pip
+- It requires C compilation with GTK4 headers and GObject introspection
+- The system package `python3-gi` provides pre-compiled bindings
+- Without this flag, Python won't find the GTK4 modules
 
 **Add to your ~/.bashrc or ~/.zshrc for convenience:**
 ```bash
@@ -160,6 +248,66 @@ print('✅ Model downloaded successfully')
 ```
 
 Models are stored in `~/.cache/huggingface/hub/`.
+
+---
+
+## System Dependencies Reference
+
+### Complete Dependency List
+
+| Package (Debian/Ubuntu) | Package (Fedora) | Package (Arch) | Purpose | Required |
+|------------------------|------------------|----------------|---------|----------|
+| **Audio** |
+| `portaudio19-dev` | `portaudio-devel` | `portaudio` | Audio I/O library | Yes |
+| `libportaudio2` | (included) | (included) | PortAudio runtime | Yes |
+| **Python Build** |
+| `build-essential` | `gcc gcc-c++` | `base-devel` | C compiler | Yes |
+| `python3-dev` | `python3-devel` | `python` | Python headers | Yes |
+| `python3-venv` | (included) | (included) | Virtual environments | Yes |
+| **GTK4 / GObject** |
+| `python3-gi` | `python3-gobject` | `python-gobject` | GObject bindings | Yes |
+| `python3-gi-cairo` | (included) | (included) | Cairo integration | Yes |
+| `gir1.2-gtk-4.0` | `gtk4-devel` | `gtk4` | GTK4 introspection | Yes |
+| `libgtk-4-dev` | (included) | (included) | GTK4 headers | Yes |
+| **Adwaita** |
+| `gir1.2-adw-1` | `libadwaita-devel` | `libadwaita` | Adwaita widgets | Yes |
+| `libadwaita-1-dev` | (included) | (included) | Adwaita headers | Yes |
+| **Sound Feedback** |
+| `gir1.2-gsound-1.0` | `gsound-devel` | `gsound` | Sound feedback | No |
+| `libgsound-dev` | (included) | (included) | GSound headers | No |
+| **Clipboard** |
+| `wl-clipboard` | `wl-clipboard` | `wl-clipboard` | Wayland clipboard | No* |
+| `xclip` | `xclip` | `xclip` | X11 clipboard | No* |
+| `ydotool` | `ydotool` | `ydotool` | Paste simulation | No |
+
+*At least one clipboard tool is required for copy functionality.
+
+### Python Package Dependencies (pip)
+
+These are installed automatically via `pip install -e .`:
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `faster-whisper` | >=1.1.0 | Whisper speech recognition |
+| `numpy` | >=1.24.0 | Numerical computing |
+| `sounddevice` | >=0.4.6 | Audio recording |
+| `soundfile` | >=0.12.0 | Audio file I/O |
+| `scipy` | >=1.11.0 | Signal processing |
+| `psutil` | >=5.9.0 | System information |
+
+### Dependency Checker
+
+Run the dependency checker to verify your installation:
+
+```bash
+python scripts/check_dependencies.py
+
+# With detailed output
+python scripts/check_dependencies.py --verbose
+
+# Show fix commands for missing dependencies
+python scripts/check_dependencies.py --fix
+```
 
 ---
 
@@ -247,6 +395,50 @@ print(f'🌐 Language: {result.language} (confidence: {result.language_probabili
 ---
 
 ## Troubleshooting
+
+### Issue: GTK4 / PyGObject not found
+
+**Error:**
+```
+ModuleNotFoundError: No module named 'gi'
+```
+or
+```
+ValueError: Namespace Gtk not available
+```
+
+**Cause:** Virtual environment doesn't have access to system site-packages.
+
+**Solution:**
+```bash
+# 1. Deactivate current venv
+deactivate
+
+# 2. Remove old venv
+rm -rf ~/.venvs/whisper_aloud
+
+# 3. Recreate WITH system-site-packages
+python3 -m venv ~/.venvs/whisper_aloud --system-site-packages
+
+# 4. Activate and reinstall
+source ~/.venvs/whisper_aloud/bin/activate
+pip install -e .
+
+# 5. Verify
+python -c "import gi; gi.require_version('Gtk', '4.0'); print('OK')"
+```
+
+**If GTK4 system packages are missing:**
+```bash
+# Debian/Ubuntu
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0
+
+# Fedora
+sudo dnf install python3-gobject gtk4-devel
+
+# Arch
+sudo pacman -S python-gobject gtk4
+```
 
 ### Issue: PortAudio library not found
 
