@@ -9,7 +9,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
 
-from ..config import WhisperAloudConfig
+from ..config import WhisperAloudConfig, detect_config_changes
 from ..transcriber import Transcriber, TranscriptionResult
 from ..audio import AudioRecorder, AudioLevel
 from ..clipboard import ClipboardManager
@@ -29,7 +29,6 @@ from .error_handler import (
     handle_transcription_error,
     handle_clipboard_error
 )
-from ..utils.config_persistence import save_config_to_file
 
 logger = logging.getLogger(__name__)
 
@@ -934,7 +933,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Save config to file
         try:
-            save_config_to_file(self.config)
+            self.config.save()
             self._update_model_info()
 
             # Reload model in background with new language
@@ -978,37 +977,25 @@ class MainWindow(Gtk.ApplicationWindow):
             new_config = WhisperAloudConfig.load()
             logger.debug("Configuration reloaded successfully")
 
-            # Check if model settings changed
-            model_changed = (
-                new_config.model.name != self.config.model.name or
-                new_config.model.device != self.config.model.device or
-                new_config.model.compute_type != self.config.model.compute_type or
-                new_config.transcription.language != self.config.transcription.language
-            )
+            # Use centralized change detection
+            changes = detect_config_changes(self.config, new_config)
+            logger.info(f"Config changes: {changes}")
 
-            # Check if audio settings changed (that require recorder re-init)
-            audio_changed = (
-                new_config.audio.device_id != self.config.audio.device_id or
-                new_config.audio.sample_rate != self.config.audio.sample_rate or
-                new_config.audio.channels != self.config.audio.channels
-            )
-
-            logger.info(f"Model changed: {model_changed}, Audio changed: {audio_changed}")
-
+            # Update config reference
             self.config = new_config
 
-            if model_changed:
+            if changes.requires_model_reload:
                 logger.info("Model settings changed, reloading model")
                 # Reload model in background
                 threading.Thread(target=self._reload_model, daemon=True).start()
 
-            if audio_changed:
+            if changes.requires_audio_reinit:
                 logger.info("Audio settings changed, re-initializing recorder")
                 self._reinit_recorder()
 
             # Update model info display
             self._update_model_info()
-            
+
         except Exception as e:
             logger.error(f"Error in _on_settings_saved: {e}", exc_info=True)
             self.status_label.set_text("Error updating settings")

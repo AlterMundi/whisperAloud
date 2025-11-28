@@ -7,6 +7,12 @@ from whisper_aloud.config import WhisperAloudConfig
 from whisper_aloud.exceptions import ConfigurationError
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch, tmp_path):
+    """Isolate tests from real config by using a temp HOME."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
 def test_default_config():
     """Test default configuration values."""
     config = WhisperAloudConfig.load()

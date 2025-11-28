@@ -11,7 +11,6 @@ from gi.repository import Gtk, GLib
 from ..config import WhisperAloudConfig, ModelConfig, AudioConfig, ClipboardConfig, PersistenceConfig
 from ..audio import DeviceManager
 from .error_handler import InputValidator, ValidationError
-from ..utils.config_persistence import save_config_to_file
 from ..utils.validation_helpers import sanitize_language_code
 
 logger = logging.getLogger(__name__)
@@ -528,8 +527,8 @@ class SettingsDialog(Gtk.Window):
                 self._config.persistence.audio_archive_path = Path(audio_path_text)
 
             logger.debug("Saving config to file")
-            # Save to file
-            save_config_to_file(self._config)
+            # Save to file using config's built-in save method
+            self._config.save()
 
             logger.debug("Notifying daemon of config changes")
             # Notify daemon to reload config
