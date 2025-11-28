@@ -2,6 +2,7 @@
 
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,8 +40,24 @@ class Transcriber:
         """Initialize transcriber with configuration (lazy loading)."""
         self.config = config
         self._model: Optional[WhisperModel] = None
+        self._cancel_flag = threading.Event()
         logger.info("Transcriber initialized with model: %s, device: %s",
                    config.model.name, config.model.device)
+
+    def cancel_transcription(self) -> None:
+        """
+        Signal the transcription to stop processing segments.
+
+        This will cause the current transcription to exit early,
+        returning a partial result with whatever segments were processed.
+        """
+        self._cancel_flag.set()
+        logger.info("Transcription cancellation requested")
+
+    @property
+    def is_cancelling(self) -> bool:
+        """Check if cancellation has been requested."""
+        return self._cancel_flag.is_set()
 
     def load_model(self) -> None:
         """
@@ -90,7 +107,7 @@ class Transcriber:
                 f"Failed to load model '{self.config.model.name}' on device '{self.config.model.device}': {e}.{device_hint}"
             ) from e
 
-    def _process_segments(self, segments, duration: float) -> tuple[str, List[dict], float]:
+    def _process_segments(self, segments, duration: float) -> tuple[str, List[dict], float, bool]:
         """
         Process transcription segments into result components.
 
@@ -99,14 +116,21 @@ class Transcriber:
             duration: Audio duration in seconds
 
         Returns:
-            Tuple of (text, segment_list, confidence)
+            Tuple of (text, segment_list, confidence, was_cancelled)
         """
         segment_list = []
         text_parts = []
         total_logprob = 0.0
         segment_count = 0
+        was_cancelled = False
 
         for segment in segments:
+            # Check for cancellation before processing each segment
+            if self._cancel_flag.is_set():
+                logger.info("Transcription cancelled by user after %d segments", segment_count)
+                was_cancelled = True
+                break
+
             segment_list.append({
                 "text": segment.text,
                 "start": segment.start,
@@ -121,7 +145,7 @@ class Transcriber:
         text = "".join(text_parts).strip()
         confidence = math.exp(total_logprob / segment_count) if segment_count > 0 else 0.0
 
-        return text, segment_list, confidence
+        return text, segment_list, confidence, was_cancelled
 
     def transcribe_file(self, audio_path: str, **kwargs) -> TranscriptionResult:
         """
@@ -168,13 +192,19 @@ class Transcriber:
         }
 
         try:
+            # Reset cancellation flag before starting
+            self._cancel_flag.clear()
+
             logger.info("Starting transcription of file: %s", audio_path)
             start_time = time.time()
 
             segments, info = self._model.transcribe(audio_path, **transcribe_kwargs)
 
             processing_time = time.time() - start_time
-            text, segment_list, confidence = self._process_segments(segments, info.duration)
+            text, segment_list, confidence, was_cancelled = self._process_segments(segments, info.duration)
+
+            if was_cancelled:
+                logger.info("Transcription was cancelled, returning partial result")
 
             result = TranscriptionResult(
                 text=text,
@@ -185,7 +215,8 @@ class Transcriber:
                 processing_time=processing_time,
             )
 
-            logger.info("Transcription completed in %.2fs, confidence: %.2f%%",
+            logger.info("Transcription %s in %.2fs, confidence: %.2f%%",
+                       "cancelled" if was_cancelled else "completed",
                        processing_time, confidence * 100)
             return result
 
@@ -243,6 +274,9 @@ class Transcriber:
         }
 
         try:
+            # Reset cancellation flag before starting
+            self._cancel_flag.clear()
+
             logger.info("Starting transcription of numpy array (%.2fs)", len(audio) / sample_rate)
             start_time = time.time()
 
@@ -250,7 +284,10 @@ class Transcriber:
 
             processing_time = time.time() - start_time
             duration = len(audio) / sample_rate
-            text, segment_list, confidence = self._process_segments(segments, duration)
+            text, segment_list, confidence, was_cancelled = self._process_segments(segments, duration)
+
+            if was_cancelled:
+                logger.info("Transcription was cancelled, returning partial result")
 
             result = TranscriptionResult(
                 text=text,
@@ -261,7 +298,8 @@ class Transcriber:
                 processing_time=processing_time,
             )
 
-            logger.info("Transcription completed in %.2fs, confidence: %.2f%%",
+            logger.info("Transcription %s in %.2fs, confidence: %.2f%%",
+                       "cancelled" if was_cancelled else "completed",
                        processing_time, confidence * 100)
             return result
 

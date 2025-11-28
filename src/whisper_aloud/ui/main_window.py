@@ -16,7 +16,9 @@ from ..clipboard import ClipboardManager
 from .utils import AppState, format_duration
 from .level_meter import LevelMeterPanel
 from .settings_dialog import SettingsDialog
+from .shortcuts_window import ShortcutsWindow
 from .history_panel import HistoryPanel
+from .sound_feedback import SoundFeedback
 from .status_bar import StatusBar
 from ..persistence.history_manager import HistoryManager
 from .error_handler import (
@@ -58,12 +60,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.history_manager: Optional[HistoryManager] = None
         self.session_id: Optional[str] = None
 
+        # Sound feedback (initialized early as it's lightweight)
+        self.sound_feedback = SoundFeedback(enabled=True)
+
         # Build UI
         self._build_ui()
 
         # Set window properties
         self.set_title("WhisperAloud")
-        self.set_default_size(600, 500)
+        self.set_default_size(900, 600)
+        self.set_titlebar(self.header_bar)  # Use custom header bar
 
         # Set up keyboard shortcuts
         self._setup_keyboard_shortcuts()
@@ -80,8 +86,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_child(main_box)
 
         # Create header bar
-        header_bar = Gtk.HeaderBar()
-        header_bar.set_title_widget(Gtk.Label(label="WhisperAloud"))
+        self.header_bar = Gtk.HeaderBar()
+        self.header_bar.set_show_title_buttons(True)
 
         # History toggle button
         self.history_toggle = Gtk.ToggleButton()
@@ -89,27 +95,39 @@ class MainWindow(Gtk.ApplicationWindow):
         self.history_toggle.set_tooltip_text("Toggle History")
         self.history_toggle.set_active(True)
         self.history_toggle.connect("toggled", self._on_history_toggled)
-        header_bar.pack_start(self.history_toggle)
+        self.header_bar.pack_start(self.history_toggle)
+
+        # Help/Shortcuts button
+        help_button = Gtk.Button()
+        help_button.set_icon_name("help-about-symbolic")
+        help_button.set_tooltip_text("Keyboard Shortcuts (F1)")
+        help_button.connect("clicked", self._on_help_clicked)
+        self.header_bar.pack_end(help_button)
 
         # Settings button
         settings_button = Gtk.Button()
         settings_button.set_icon_name("preferences-system-symbolic")
-        settings_button.set_tooltip_text("Settings")
+        settings_button.set_tooltip_text("Settings (Ctrl+,)")
         settings_button.connect("clicked", self._on_settings_clicked)
-        header_bar.pack_end(settings_button)
+        self.header_bar.pack_end(settings_button)
 
-        # Language toggle button
-        self.lang_button = Gtk.Button(label="ES")
-        self.lang_button.set_tooltip_text("Toggle Language (ES/EN)")
-        self.lang_button.connect("clicked", self._on_language_toggle_clicked)
-        header_bar.pack_end(self.lang_button)
+        # Language selector dropdown
+        self._language_codes = ["auto", "en", "es", "fr", "de", "it", "pt", "ja", "zh", "ko", "ru", "ar", "hi"]
+        self._language_labels = ["Auto", "English", "Espa\u00f1ol", "Fran\u00e7ais", "Deutsch",
+                                  "Italiano", "Portugu\u00eas", "\u65e5\u672c\u8a9e", "\u4e2d\u6587", "\ud55c\uad6d\uc5b4", "\u0420\u0443\u0441\u0441\u043a\u0438\u0439", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "\u0939\u093f\u0928\u094d\u0926\u0940"]
+        self.lang_dropdown = Gtk.DropDown.new_from_strings(self._language_labels)
+        self.lang_dropdown.set_tooltip_text("Select transcription language")
+        self.lang_dropdown.set_selected(0)  # Default to Auto, will be updated when config loads
 
-        main_box.append(header_bar)
+        self.lang_dropdown.connect("notify::selected", self._on_language_changed)
+        self.header_bar.pack_end(self.lang_dropdown)
 
         # Main content area (Paned)
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.paned.set_position(400)  # Initial split position
+        self.paned.set_position(280)  # History panel width
         self.paned.set_wide_handle(True)
+        self.paned.set_shrink_start_child(False)  # Don't allow history to shrink below minimum
+        self.paned.set_shrink_end_child(False)  # Don't allow main area to shrink too much
         main_box.append(self.paned)
 
         # Left side: Recording and Transcription
@@ -121,31 +139,44 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status_label.set_margin_bottom(12)
         left_box.append(self.status_label)
 
-        # Recording panel placeholder
+        # Recording panel
         recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        recording_panel_box.set_margin_start(24)
-        recording_panel_box.set_margin_end(24)
-        recording_panel_box.set_margin_top(12)
-        recording_panel_box.set_margin_bottom(12)
+        recording_panel_box.set_margin_start(32)
+        recording_panel_box.set_margin_end(32)
+        recording_panel_box.set_margin_top(16)
+        recording_panel_box.set_margin_bottom(16)
+        recording_panel_box.set_halign(Gtk.Align.CENTER)  # Center the recording controls
 
         # Record button
         self.record_button = Gtk.Button(label="Start Recording")
         self.record_button.add_css_class("suggested-action")
         self.record_button.add_css_class("pill")
-        self.record_button.set_size_request(-1, 60)
+        self.record_button.set_size_request(200, 56)  # Fixed width for consistent look
         self.record_button.set_sensitive(False)  # Disabled until model loads
         self.record_button.set_tooltip_text("Start/stop recording (Space)")
         self.record_button.connect("clicked", self._on_record_button_clicked)
         recording_panel_box.append(self.record_button)
 
+        # Cancel button (shown during transcription)
+        self.cancel_button = Gtk.Button(label="Cancel")
+        self.cancel_button.add_css_class("destructive-action")
+        self.cancel_button.add_css_class("pill")
+        self.cancel_button.set_size_request(200, 56)  # Same size as record button
+        self.cancel_button.set_visible(False)  # Hidden by default
+        self.cancel_button.set_tooltip_text("Cancel transcription (Ctrl+X)")
+        self.cancel_button.connect("clicked", self._on_cancel_clicked)
+        recording_panel_box.append(self.cancel_button)
+
         # Timer label
         self.timer_label = Gtk.Label(label="0:00")
         self.timer_label.add_css_class("title-1")
+        self.timer_label.set_margin_top(8)
         recording_panel_box.append(self.timer_label)
 
         # Level meter
         self.level_meter = LevelMeterPanel()
-        self.level_meter.set_margin_top(12)
+        self.level_meter.set_margin_top(8)
+        self.level_meter.set_size_request(280, -1)  # Fixed width for level meter
         recording_panel_box.append(self.level_meter)
 
         left_box.append(recording_panel_box)
@@ -153,10 +184,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # Separator
         left_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
-        # Transcription view placeholder
-        transcription_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        transcription_box.set_margin_start(24)
-        transcription_box.set_margin_end(24)
+        # Transcription view
+        transcription_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        transcription_box.set_margin_start(16)
+        transcription_box.set_margin_end(16)
         transcription_box.set_margin_top(12)
         transcription_box.set_margin_bottom(12)
         transcription_box.set_vexpand(True)
@@ -197,13 +228,14 @@ class MainWindow(Gtk.ApplicationWindow):
         transcription_box.append(button_box)
         left_box.append(transcription_box)
 
-        # Add left box to paned
-        self.paned.set_start_child(left_box)
-        
-        # Right side: History Panel (placeholder until initialized)
+        # Left side: History Panel (placeholder until initialized)
         self.history_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.history_container.set_size_request(250, -1)
-        self.paned.set_end_child(self.history_container)
+        self.history_container.set_size_request(240, -1)
+        self.paned.set_start_child(self.history_container)
+
+        # Right side: Main recording/transcription panel
+        left_box.set_size_request(400, -1)  # Minimum width for main content
+        self.paned.set_end_child(left_box)
 
         # Status bar
         self.status_bar = StatusBar()
@@ -262,6 +294,22 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._on_clear_clicked(None)
                 return True
 
+        # Ctrl+X: Cancel transcription (if in transcribing state)
+        if ctrl_pressed and keyval == Gdk.KEY_x:
+            if self._state == AppState.TRANSCRIBING:
+                self._on_cancel_clicked(None)
+                return True
+
+        # F1: Show keyboard shortcuts
+        if keyval == Gdk.KEY_F1:
+            self._on_help_clicked(None)
+            return True
+
+        # Ctrl+,: Open settings
+        if ctrl_pressed and keyval == Gdk.KEY_comma:
+            self._on_settings_clicked(None)
+            return True
+
         return False
 
     def _init_components_async(self) -> bool:
@@ -271,6 +319,9 @@ class MainWindow(Gtk.ApplicationWindow):
         Returns:
             False to remove this idle callback
         """
+        # Show loading dialog
+        self._show_loading_dialog()
+
         def _load_in_thread():
             """Load components in background thread."""
             try:
@@ -287,7 +338,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     level_callback=self._on_audio_level
                 )
                 self.clipboard_manager = ClipboardManager(self.config.clipboard)
-                
+
                 # Initialize history manager
                 import uuid
                 self.session_id = str(uuid.uuid4())
@@ -303,6 +354,85 @@ class MainWindow(Gtk.ApplicationWindow):
         threading.Thread(target=_load_in_thread, daemon=True).start()
         return False
 
+    def _model_cache_exists(self) -> bool:
+        """Check if model is already cached in HuggingFace cache."""
+        from pathlib import Path
+        cache_dir = Path.home() / ".cache/huggingface/hub"
+        if not cache_dir.exists():
+            return False
+        # Look for any whisper model files
+        model_name = self.config.model.name if self.config else "base"
+        # Check for common model directory patterns
+        for pattern in [f"*whisper*{model_name}*", "*faster-whisper*"]:
+            if any(cache_dir.glob(pattern)):
+                return True
+        return False
+
+    def _show_loading_dialog(self) -> None:
+        """Show a loading dialog during model initialization."""
+        is_first_run = not self._model_cache_exists()
+
+        self._loading_dialog = Gtk.Window()
+        self._loading_dialog.set_modal(True)
+        self._loading_dialog.set_transient_for(self)
+        self._loading_dialog.set_title("WhisperAloud")
+        self._loading_dialog.set_default_size(400, 150)
+        self._loading_dialog.set_resizable(False)
+        self._loading_dialog.set_deletable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+        box.set_margin_top(24)
+        box.set_margin_bottom(24)
+
+        if is_first_run:
+            # First run - show welcome message
+            title = Gtk.Label(label="Welcome to WhisperAloud!")
+            title.add_css_class("title-2")
+            box.append(title)
+
+            msg = Gtk.Label(label="Downloading AI model (~140MB).\nThis only happens once and may take a few minutes.")
+            msg.set_wrap(True)
+            msg.set_justify(Gtk.Justification.CENTER)
+            box.append(msg)
+        else:
+            # Regular load
+            msg = Gtk.Label(label="Loading Whisper model...")
+            msg.add_css_class("title-3")
+            box.append(msg)
+
+        # Progress bar (indeterminate/pulsing)
+        self._loading_progress = Gtk.ProgressBar()
+        self._loading_progress.set_show_text(False)
+        box.append(self._loading_progress)
+
+        self._loading_dialog.set_child(box)
+        self._loading_dialog.present()
+
+        # Start progress bar animation
+        self._loading_pulse_id = GLib.timeout_add(100, self._pulse_loading_progress)
+
+    def _pulse_loading_progress(self) -> bool:
+        """Pulse the loading progress bar."""
+        if hasattr(self, '_loading_progress') and self._loading_progress:
+            self._loading_progress.pulse()
+            return True  # Continue pulsing
+        return False  # Stop if progress bar no longer exists
+
+    def _hide_loading_dialog(self) -> None:
+        """Hide and destroy the loading dialog."""
+        # Stop the pulse animation
+        if hasattr(self, '_loading_pulse_id') and self._loading_pulse_id:
+            GLib.source_remove(self._loading_pulse_id)
+            self._loading_pulse_id = None
+
+        # Close the dialog
+        if hasattr(self, '_loading_dialog') and self._loading_dialog:
+            self._loading_dialog.close()
+            self._loading_dialog = None
+            self._loading_progress = None
+
     def _on_components_loaded(self) -> bool:
         """
         Called when components finish loading (main thread).
@@ -310,11 +440,20 @@ class MainWindow(Gtk.ApplicationWindow):
         Returns:
             False to remove this idle callback
         """
+        # Hide loading dialog
+        self._hide_loading_dialog()
+
         logger.info("Components loaded successfully")
         self.status_label.set_text("Ready")
         self.record_button.set_sensitive(True)
         self.set_state(AppState.IDLE)
-        
+
+        # Update language dropdown from config
+        if self.config and self.config.transcription.language:
+            current_lang = self.config.transcription.language
+            if current_lang in self._language_codes:
+                self.lang_dropdown.set_selected(self._language_codes.index(current_lang))
+
         # Initialize History Panel
         if self.history_manager:
             self.history_panel = HistoryPanel(self.history_manager)
@@ -372,6 +511,9 @@ class MainWindow(Gtk.ApplicationWindow):
         Args:
             error_msg: Error message
         """
+        # Hide loading dialog
+        self._hide_loading_dialog()
+
         logger.error(f"Component load error: {error_msg}")
         self.status_label.set_text("Error loading components")
         self.set_state(AppState.ERROR)
@@ -399,13 +541,20 @@ class MainWindow(Gtk.ApplicationWindow):
         Args:
             new_state: The new state to transition to
         """
-        logger.info(f"State transition: {self._state.value} -> {new_state.value}")
+        old_state = self._state
+        logger.info(f"State transition: {old_state.value} -> {new_state.value}")
         self._state = new_state
+
+        # Play sound feedback for state transitions
+        self._play_state_sound(old_state, new_state)
 
         try:
             # Update UI based on state
             if new_state == AppState.IDLE:
                 logger.debug("Setting UI for IDLE state")
+                # Show record button, hide cancel button
+                self.cancel_button.set_visible(False)
+                self.record_button.set_visible(True)
                 self.record_button.set_label("Start Recording")
                 self.record_button.set_sensitive(True)
                 self.record_button.remove_css_class("destructive-action")
@@ -421,12 +570,24 @@ class MainWindow(Gtk.ApplicationWindow):
 
             elif new_state == AppState.TRANSCRIBING:
                 logger.debug("Setting UI for TRANSCRIBING state")
-                self.record_button.set_label("Transcribing...")
-                self.record_button.set_sensitive(False)
-                self.status_label.set_text("Transcribing...")
+                # Hide record button, show cancel button
+                self.record_button.set_visible(False)
+                self.cancel_button.set_visible(True)
+                self.cancel_button.set_sensitive(True)
+                self.cancel_button.set_label("Cancel Transcription")
+                self.status_label.set_text("Transcribing... (press Ctrl+X to cancel)")
+
+            elif new_state == AppState.CANCELLING:
+                logger.debug("Setting UI for CANCELLING state")
+                self.cancel_button.set_label("Cancelling...")
+                self.cancel_button.set_sensitive(False)
+                self.status_label.set_text("Cancelling transcription...")
 
             elif new_state == AppState.READY:
                 logger.debug("Setting UI for READY state")
+                # Show record button, hide cancel button
+                self.cancel_button.set_visible(False)
+                self.record_button.set_visible(True)
                 self.record_button.set_label("Record Again")
                 self.record_button.set_sensitive(True)
                 self.record_button.remove_css_class("destructive-action")
@@ -437,12 +598,37 @@ class MainWindow(Gtk.ApplicationWindow):
 
             elif new_state == AppState.ERROR:
                 logger.debug("Setting UI for ERROR state")
+                # Show record button, hide cancel button
+                self.cancel_button.set_visible(False)
+                self.record_button.set_visible(True)
                 self.record_button.set_label("Try Again")
                 self.record_button.set_sensitive(True)
                 self.record_button.remove_css_class("destructive-action")
                 self.record_button.add_css_class("suggested-action")
         except Exception as e:
             logger.error(f"Error in set_state: {e}", exc_info=True)
+
+    def _play_state_sound(self, old_state: AppState, new_state: AppState) -> None:
+        """
+        Play appropriate sound feedback for state transition.
+
+        Args:
+            old_state: Previous state
+            new_state: New state
+        """
+        try:
+            if new_state == AppState.RECORDING:
+                self.sound_feedback.play_recording_start()
+            elif new_state == AppState.TRANSCRIBING and old_state == AppState.RECORDING:
+                self.sound_feedback.play_recording_stop()
+            elif new_state == AppState.READY:
+                self.sound_feedback.play_transcription_complete()
+            elif new_state == AppState.ERROR:
+                self.sound_feedback.play_error()
+            elif new_state == AppState.CANCELLING:
+                self.sound_feedback.play_cancel()
+        except Exception as e:
+            logger.debug(f"Sound feedback failed: {e}")
 
     def _on_record_button_clicked(self, button: Gtk.Button) -> None:
         """
@@ -697,35 +883,77 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._state == AppState.READY:
             self.set_state(AppState.IDLE)
 
-    def _on_language_toggle_clicked(self, button: Gtk.Button) -> None:
+    def _on_cancel_clicked(self, button: Gtk.Button) -> None:
         """
-        Handle language toggle button click.
-        
+        Handle cancel transcription button click.
+
         Args:
             button: The button that was clicked
         """
+        logger.info("Cancel transcription button clicked")
+
+        if self._state != AppState.TRANSCRIBING:
+            return
+
+        # Set UI to cancelling state
+        self.set_state(AppState.CANCELLING)
+
+        # Signal the transcriber to stop
+        if self.transcriber:
+            self.transcriber.cancel_transcription()
+
+    def _on_language_changed(self, dropdown: Gtk.DropDown, param) -> None:
+        """
+        Handle language dropdown selection change.
+
+        Args:
+            dropdown: The dropdown widget
+            param: The parameter that changed
+        """
+        selected_idx = dropdown.get_selected()
+        if selected_idx < 0 or selected_idx >= len(self._language_codes):
+            return
+
+        # Guard: don't change language if config not loaded yet
+        if not self.config:
+            return
+
+        new_lang = self._language_codes[selected_idx]
+        # "auto" means None for transcription config
+        new_lang_config = None if new_lang == "auto" else new_lang
         current_lang = self.config.transcription.language
-        new_lang = "en" if current_lang == "es" else "es"
-        
-        logger.info(f"Toggling language: {current_lang} -> {new_lang}")
-        
+
+        # Skip if same language
+        if new_lang_config == current_lang:
+            return
+
+        logger.info(f"Language changed: {current_lang} -> {new_lang}")
+
         # Update config
-        self.config.transcription.language = new_lang
+        self.config.transcription.language = new_lang_config
 
         # Save config to file
         try:
             save_config_to_file(self.config)
-
-            # Update UI
-            self.lang_button.set_label(new_lang.upper())
             self._update_model_info()
 
-            # Reload model in background
+            # Reload model in background with new language
             logger.info("Reloading model with new language")
             threading.Thread(target=self._reload_model, daemon=True).start()
 
         except Exception as e:
-            logger.error(f"Failed to toggle language: {e}", exc_info=True)
+            logger.error(f"Failed to change language: {e}", exc_info=True)
+
+    def _on_help_clicked(self, button: Gtk.Button) -> None:
+        """
+        Handle help/shortcuts button click.
+
+        Args:
+            button: The button that was clicked
+        """
+        logger.info("Opening shortcuts window")
+        shortcuts = ShortcutsWindow(self)
+        shortcuts.present()
 
     def _on_settings_clicked(self, button: Gtk.Button) -> None:
         """
@@ -872,11 +1100,12 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle history toggle button."""
         is_visible = button.get_active()
         button.set_icon_name("sidebar-show-symbolic" if is_visible else "sidebar-hide-symbolic")
-        
+
+        # History panel is on the left (start_child)
         if is_visible:
-            self.paned.set_end_child(self.history_container)
+            self.paned.set_start_child(self.history_container)
         else:
-            self.paned.set_end_child(None)
+            self.paned.set_start_child(None)
 
     def _on_history_entry_selected(self, panel, entry):
         """Handle history entry selection."""
@@ -902,9 +1131,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self.config.transcription.language
         )
 
-        # Update language button
+        # Update language dropdown selection
         lang = self.config.transcription.language or "auto"
-        self.lang_button.set_label(lang.upper())
+        if lang in self._language_codes:
+            self.lang_dropdown.set_selected(self._language_codes.index(lang))
 
     def cleanup(self) -> None:
         """Clean up resources before shutdown."""

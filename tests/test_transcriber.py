@@ -125,13 +125,14 @@ def test_process_segments_method():
         Mock(text="world", start=1.0, end=2.0, avg_logprob=-0.2),
     ]
 
-    text, segment_list, confidence = transcriber._process_segments(mock_segments, 2.0)
+    text, segment_list, confidence, was_cancelled = transcriber._process_segments(mock_segments, 2.0)
 
     assert text == "Helloworld"
     assert len(segment_list) == 2
     assert segment_list[0]["text"] == "Hello"
     assert segment_list[0]["confidence"] == pytest.approx(math.exp(-0.1))
     assert confidence == pytest.approx(math.exp((-0.1 - 0.2) / 2))
+    assert was_cancelled is False
 
 
 def test_process_segments_empty():
@@ -139,11 +140,12 @@ def test_process_segments_empty():
     config = WhisperAloudConfig.load()
     transcriber = Transcriber(config)
 
-    text, segment_list, confidence = transcriber._process_segments([], 0.0)
+    text, segment_list, confidence, was_cancelled = transcriber._process_segments([], 0.0)
 
     assert text == ""
     assert segment_list == []
     assert confidence == 0.0
+    assert was_cancelled is False
 
 
 def test_process_segments_none_logprob():
@@ -155,11 +157,12 @@ def test_process_segments_none_logprob():
         Mock(text="test", start=0.0, end=1.0, avg_logprob=None),
     ]
 
-    text, segment_list, confidence = transcriber._process_segments(mock_segments, 1.0)
+    text, segment_list, confidence, was_cancelled = transcriber._process_segments(mock_segments, 1.0)
 
     assert text == "test"
     assert segment_list[0]["confidence"] == 0.0
     assert confidence == 0.0
+    assert was_cancelled is False
 
 
 @patch('whisper_aloud.transcriber.WhisperModel')

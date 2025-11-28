@@ -13,6 +13,7 @@ class AppState(Enum):
     IDLE = "idle"                    # Ready to start recording
     RECORDING = "recording"          # Currently recording audio
     TRANSCRIBING = "transcribing"    # Processing audio (model inference)
+    CANCELLING = "cancelling"        # User requested cancellation of transcription
     READY = "ready"                  # Transcription complete, ready for next recording
     ERROR = "error"                  # Error state
 

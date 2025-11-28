@@ -86,32 +86,35 @@ class SettingsDialog(Gtk.Window):
         stack_switcher.set_margin_bottom(12)
         main_box.append(stack_switcher)
 
-        # Add pages
-        self._add_model_page()
-        self._add_audio_page()
-        self._add_clipboard_page()
-        self._add_history_page()
+        # Add pages (simplified 2-tab layout)
+        self._add_general_page()
+        self._add_advanced_page()
 
         main_box.append(self.stack)
 
-    def _add_model_page(self) -> None:
-        """Add model configuration page."""
+    def _add_general_page(self) -> None:
+        """Add general settings page with common options."""
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         page.set_margin_start(24)
         page.set_margin_end(24)
         page.set_margin_top(24)
         page.set_margin_bottom(24)
 
-        # Model name
+        # --- Model Section ---
+        model_section = Gtk.Label(label="Transcription")
+        model_section.set_halign(Gtk.Align.START)
+        model_section.add_css_class("heading")
+        page.append(model_section)
+
+        # Model selector
         model_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         model_label = Gtk.Label(label="Model:")
         model_label.set_halign(Gtk.Align.START)
         model_label.set_hexpand(True)
 
         self.model_dropdown = Gtk.DropDown.new_from_strings([
-            "tiny", "base", "small", "medium", "large"
+            "tiny (fastest)", "base", "small", "medium", "large (most accurate)"
         ])
-        # Set current value
         models = ["tiny", "base", "small", "medium", "large"]
         if self._config.model.name in models:
             self.model_dropdown.set_selected(models.index(self._config.model.name))
@@ -120,73 +123,32 @@ class SettingsDialog(Gtk.Window):
         model_box.append(self.model_dropdown)
         page.append(model_box)
 
-        # Language
-        lang_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        lang_label = Gtk.Label(label="Language:")
-        lang_label.set_halign(Gtk.Align.START)
-        lang_label.set_hexpand(True)
-
+        # Language (hidden - managed by main window dropdown now)
         self.language_entry = Gtk.Entry()
         self.language_entry.set_text(self._config.transcription.language or "")
-        self.language_entry.set_placeholder_text("Auto-detect")
+        self.language_entry.set_visible(False)  # Hidden, managed by main window
 
-        lang_box.append(lang_label)
-        lang_box.append(self.language_entry)
-        page.append(lang_box)
+        # --- Audio Section ---
+        audio_section = Gtk.Label(label="Audio Input")
+        audio_section.set_halign(Gtk.Align.START)
+        audio_section.add_css_class("heading")
+        audio_section.set_margin_top(12)
+        page.append(audio_section)
 
-        # Device (CPU/CUDA)
+        # Input device selector
         device_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        device_label = Gtk.Label(label="Compute Device:")
+        device_label = Gtk.Label(label="Microphone:")
         device_label.set_halign(Gtk.Align.START)
         device_label.set_hexpand(True)
 
-        self.compute_device_dropdown = Gtk.DropDown.new_from_strings(["cpu", "cuda"])
-        if self._config.model.device == "cuda":
-            self.compute_device_dropdown.set_selected(1)
-
-        device_box.append(device_label)
-        device_box.append(self.compute_device_dropdown)
-        page.append(device_box)
-
-        # Help text
-        help_label = Gtk.Label()
-        help_label.set_markup(
-            "<small>Model sizes: tiny (fastest), base, small, medium, large (most accurate)\n"
-            "Language: Leave blank for auto-detection or use ISO 639-1 code (e.g., 'en', 'es')\n"
-            "CUDA requires NVIDIA GPU with drivers installed</small>"
-        )
-        help_label.set_halign(Gtk.Align.START)
-        help_label.add_css_class("dim-label")
-        page.append(help_label)
-
-        self.stack.add_titled(page, "model", "Model")
-
-    def _add_audio_page(self) -> None:
-        """Add audio configuration page."""
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_margin_start(24)
-        page.set_margin_end(24)
-        page.set_margin_top(24)
-        page.set_margin_bottom(24)
-
-        # Input device selector
-        device_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-
-        device_label = Gtk.Label(label="Input Device:")
-        device_label.set_halign(Gtk.Align.START)
-        device_box.append(device_label)
-
-        # Get available devices
         self._devices = DeviceManager.list_input_devices()
         device_names = [
-            f"{d.name} ({d.channels}ch, {d.sample_rate}Hz)"
-            + (" [DEFAULT]" if d.is_default else "")
+            f"{d.name}" + (" ⭐" if d.is_default else "")
             for d in self._devices
         ]
 
         self.audio_device_dropdown = Gtk.DropDown.new_from_strings(device_names)
 
-        # Set current device
         current_device_id = self._config.audio.device_id
         if current_device_id is not None:
             for i, device in enumerate(self._devices):
@@ -194,94 +156,28 @@ class SettingsDialog(Gtk.Window):
                     self.audio_device_dropdown.set_selected(i)
                     break
         else:
-            # Find default device
             for i, device in enumerate(self._devices):
                 if device.is_default:
                     self.audio_device_dropdown.set_selected(i)
                     break
 
+        device_box.append(device_label)
         device_box.append(self.audio_device_dropdown)
         page.append(device_box)
 
-        # Sample rate
-        rate_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        rate_label = Gtk.Label(label="Sample Rate:")
-        rate_label.set_halign(Gtk.Align.START)
-        rate_label.set_hexpand(True)
-
-        self.sample_rate_entry = Gtk.Entry()
-        self.sample_rate_entry.set_text(str(self._config.audio.sample_rate))
-
-        rate_box.append(rate_label)
-        rate_box.append(self.sample_rate_entry)
-        page.append(rate_box)
-
-        # VAD enabled
-        self.vad_switch = Gtk.Switch()
-        self.vad_switch.set_active(self._config.audio.vad_enabled)
-
-        vad_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        vad_label = Gtk.Label(label="Voice Activity Detection:")
-        vad_label.set_halign(Gtk.Align.START)
-        vad_label.set_hexpand(True)
-
-        vad_box.append(vad_label)
-        vad_box.append(self.vad_switch)
-        page.append(vad_box)
-
-        # VAD threshold
-        threshold_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        threshold_label = Gtk.Label(label="VAD Threshold:")
-        threshold_label.set_halign(Gtk.Align.START)
-        threshold_label.set_hexpand(True)
-
-        self.vad_threshold_entry = Gtk.Entry()
-        self.vad_threshold_entry.set_text(str(self._config.audio.vad_threshold))
-
-        threshold_box.append(threshold_label)
-        threshold_box.append(self.vad_threshold_entry)
-        page.append(threshold_box)
-
-        # Normalize audio
-        self.normalize_switch = Gtk.Switch()
-        self.normalize_switch.set_active(self._config.audio.normalize_audio)
-
-        normalize_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        normalize_label = Gtk.Label(label="Normalize Audio:")
-        normalize_label.set_halign(Gtk.Align.START)
-        normalize_label.set_hexpand(True)
-
-        normalize_box.append(normalize_label)
-        normalize_box.append(self.normalize_switch)
-        page.append(normalize_box)
-
-        # Help text
-        help_label = Gtk.Label()
-        help_label.set_markup(
-            "<small>Sample rate: 16000 Hz recommended for Whisper\n"
-            "VAD: Filters out silent portions of audio\n"
-            "Normalize: Adjust volume levels automatically</small>"
-        )
-        help_label.set_halign(Gtk.Align.START)
-        help_label.add_css_class("dim-label")
-        page.append(help_label)
-
-        self.stack.add_titled(page, "audio", "Audio")
-
-    def _add_clipboard_page(self) -> None:
-        """Add clipboard configuration page."""
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_margin_start(24)
-        page.set_margin_end(24)
-        page.set_margin_top(24)
-        page.set_margin_bottom(24)
+        # --- Clipboard Section ---
+        clipboard_section = Gtk.Label(label="Clipboard")
+        clipboard_section.set_halign(Gtk.Align.START)
+        clipboard_section.add_css_class("heading")
+        clipboard_section.set_margin_top(12)
+        page.append(clipboard_section)
 
         # Auto-copy
         self.auto_copy_switch = Gtk.Switch()
         self.auto_copy_switch.set_active(self._config.clipboard.auto_copy)
 
         auto_copy_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        auto_copy_label = Gtk.Label(label="Auto-copy to Clipboard:")
+        auto_copy_label = Gtk.Label(label="Auto-copy to clipboard:")
         auto_copy_label.set_halign(Gtk.Align.START)
         auto_copy_label.set_hexpand(True)
 
@@ -294,7 +190,7 @@ class SettingsDialog(Gtk.Window):
         self.auto_paste_switch.set_active(self._config.clipboard.auto_paste)
 
         auto_paste_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        auto_paste_label = Gtk.Label(label="Auto-paste (Ctrl+V simulation):")
+        auto_paste_label = Gtk.Label(label="Auto-paste after transcription:")
         auto_paste_label.set_halign(Gtk.Align.START)
         auto_paste_label.set_hexpand(True)
 
@@ -302,9 +198,103 @@ class SettingsDialog(Gtk.Window):
         auto_paste_box.append(self.auto_paste_switch)
         page.append(auto_paste_box)
 
+        self.stack.add_titled(page, "general", "General")
+
+    def _add_advanced_page(self) -> None:
+        """Add advanced settings page."""
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)
+
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(24)
+        page.set_margin_end(24)
+        page.set_margin_top(24)
+        page.set_margin_bottom(24)
+        scrolled.set_child(page)
+
+        # --- Performance Section ---
+        perf_section = Gtk.Label(label="Performance")
+        perf_section.set_halign(Gtk.Align.START)
+        perf_section.add_css_class("heading")
+        page.append(perf_section)
+
+        # Compute device
+        device_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        device_label = Gtk.Label(label="Compute device:")
+        device_label.set_halign(Gtk.Align.START)
+        device_label.set_hexpand(True)
+
+        self.compute_device_dropdown = Gtk.DropDown.new_from_strings(["CPU", "CUDA (GPU)"])
+        if self._config.model.device == "cuda":
+            self.compute_device_dropdown.set_selected(1)
+
+        device_box.append(device_label)
+        device_box.append(self.compute_device_dropdown)
+        page.append(device_box)
+
+        # --- Audio Processing Section ---
+        audio_section = Gtk.Label(label="Audio Processing")
+        audio_section.set_halign(Gtk.Align.START)
+        audio_section.add_css_class("heading")
+        audio_section.set_margin_top(12)
+        page.append(audio_section)
+
+        # Sample rate
+        rate_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        rate_label = Gtk.Label(label="Sample rate (Hz):")
+        rate_label.set_halign(Gtk.Align.START)
+        rate_label.set_hexpand(True)
+
+        self.sample_rate_entry = Gtk.Entry()
+        self.sample_rate_entry.set_text(str(self._config.audio.sample_rate))
+
+        rate_box.append(rate_label)
+        rate_box.append(self.sample_rate_entry)
+        page.append(rate_box)
+
+        # VAD
+        self.vad_switch = Gtk.Switch()
+        self.vad_switch.set_active(self._config.audio.vad_enabled)
+
+        vad_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        vad_label = Gtk.Label(label="Voice activity detection:")
+        vad_label.set_halign(Gtk.Align.START)
+        vad_label.set_hexpand(True)
+
+        vad_box.append(vad_label)
+        vad_box.append(self.vad_switch)
+        page.append(vad_box)
+
+        # VAD threshold
+        threshold_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        threshold_label = Gtk.Label(label="VAD threshold:")
+        threshold_label.set_halign(Gtk.Align.START)
+        threshold_label.set_hexpand(True)
+
+        self.vad_threshold_entry = Gtk.Entry()
+        self.vad_threshold_entry.set_text(str(self._config.audio.vad_threshold))
+
+        threshold_box.append(threshold_label)
+        threshold_box.append(self.vad_threshold_entry)
+        page.append(threshold_box)
+
+        # Normalize
+        self.normalize_switch = Gtk.Switch()
+        self.normalize_switch.set_active(self._config.audio.normalize_audio)
+
+        normalize_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        normalize_label = Gtk.Label(label="Normalize audio:")
+        normalize_label.set_halign(Gtk.Align.START)
+        normalize_label.set_hexpand(True)
+
+        normalize_box.append(normalize_label)
+        normalize_box.append(self.normalize_switch)
+        page.append(normalize_box)
+
         # Paste delay
         delay_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        delay_label = Gtk.Label(label="Paste Delay (ms):")
+        delay_label = Gtk.Label(label="Paste delay (ms):")
         delay_label.set_halign(Gtk.Align.START)
         delay_label.set_hexpand(True)
 
@@ -315,80 +305,58 @@ class SettingsDialog(Gtk.Window):
         delay_box.append(self.paste_delay_entry)
         page.append(delay_box)
 
-        # Help text
-        help_label = Gtk.Label()
-        help_label.set_markup(
-            "<small>Auto-copy: Automatically copy transcription to clipboard\n"
-            "Auto-paste: Simulate Ctrl+V after copying (requires ydotool/xdotool)\n"
-            "Paste delay: Time to wait before simulating paste</small>"
-        )
-        help_label.set_halign(Gtk.Align.START)
-        help_label.add_css_class("dim-label")
-        page.append(help_label)
+        # --- History Section ---
+        history_section = Gtk.Label(label="History & Storage")
+        history_section.set_halign(Gtk.Align.START)
+        history_section.add_css_class("heading")
+        history_section.set_margin_top(12)
+        page.append(history_section)
 
-        self.stack.add_titled(page, "clipboard", "Clipboard")
-
-    def _add_history_page(self) -> None:
-        """Add history/persistence configuration page."""
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_margin_start(24)
-        page.set_margin_end(24)
-        page.set_margin_top(24)
-        page.set_margin_bottom(24)
-
-        # Scrolled window for long content
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_vexpand(True)
-
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        scrolled.set_child(content_box)
-
-        # Save audio switch
+        # Save audio
         self.save_audio_switch = Gtk.Switch()
         if self._config.persistence:
             self.save_audio_switch.set_active(self._config.persistence.save_audio)
 
         save_audio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        save_audio_label = Gtk.Label(label="Save Audio Archives:")
+        save_audio_label = Gtk.Label(label="Save audio recordings:")
         save_audio_label.set_halign(Gtk.Align.START)
         save_audio_label.set_hexpand(True)
 
         save_audio_box.append(save_audio_label)
         save_audio_box.append(self.save_audio_switch)
-        content_box.append(save_audio_box)
+        page.append(save_audio_box)
 
-        # Deduplicate audio switch
+        # Deduplicate
         self.deduplicate_audio_switch = Gtk.Switch()
         if self._config.persistence:
             self.deduplicate_audio_switch.set_active(self._config.persistence.deduplicate_audio)
 
         dedupe_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        dedupe_label = Gtk.Label(label="Deduplicate Audio Files:")
+        dedupe_label = Gtk.Label(label="Deduplicate audio:")
         dedupe_label.set_halign(Gtk.Align.START)
         dedupe_label.set_hexpand(True)
 
         dedupe_box.append(dedupe_label)
         dedupe_box.append(self.deduplicate_audio_switch)
-        content_box.append(dedupe_box)
+        page.append(dedupe_box)
 
-        # Auto-cleanup switch
+        # Auto-cleanup
         self.auto_cleanup_switch = Gtk.Switch()
         if self._config.persistence:
             self.auto_cleanup_switch.set_active(self._config.persistence.auto_cleanup_enabled)
 
         cleanup_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        cleanup_label = Gtk.Label(label="Auto-cleanup Old Entries:")
+        cleanup_label = Gtk.Label(label="Auto-cleanup old entries:")
         cleanup_label.set_halign(Gtk.Align.START)
         cleanup_label.set_hexpand(True)
 
         cleanup_box.append(cleanup_label)
         cleanup_box.append(self.auto_cleanup_switch)
-        content_box.append(cleanup_box)
+        page.append(cleanup_box)
 
-        # Cleanup days entry
+        # Cleanup days
         cleanup_days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        cleanup_days_label = Gtk.Label(label="Cleanup After (days):")
+        cleanup_days_label = Gtk.Label(label="Cleanup after (days):")
         cleanup_days_label.set_halign(Gtk.Align.START)
         cleanup_days_label.set_hexpand(True)
 
@@ -400,11 +368,11 @@ class SettingsDialog(Gtk.Window):
 
         cleanup_days_box.append(cleanup_days_label)
         cleanup_days_box.append(self.cleanup_days_entry)
-        content_box.append(cleanup_days_box)
+        page.append(cleanup_days_box)
 
         # Max entries
         max_entries_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        max_entries_label = Gtk.Label(label="Maximum Entries:")
+        max_entries_label = Gtk.Label(label="Maximum entries:")
         max_entries_label.set_halign(Gtk.Align.START)
         max_entries_label.set_hexpand(True)
 
@@ -416,11 +384,11 @@ class SettingsDialog(Gtk.Window):
 
         max_entries_box.append(max_entries_label)
         max_entries_box.append(self.max_entries_entry)
-        content_box.append(max_entries_box)
+        page.append(max_entries_box)
 
         # Database path
         db_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        db_path_label = Gtk.Label(label="Database Path:")
+        db_path_label = Gtk.Label(label="Database path:")
         db_path_label.set_halign(Gtk.Align.START)
         db_path_label.set_hexpand(True)
 
@@ -434,11 +402,11 @@ class SettingsDialog(Gtk.Window):
 
         db_path_box.append(db_path_label)
         db_path_box.append(self.db_path_entry)
-        content_box.append(db_path_box)
+        page.append(db_path_box)
 
         # Audio archive path
         audio_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        audio_path_label = Gtk.Label(label="Audio Archive Path:")
+        audio_path_label = Gtk.Label(label="Audio archive path:")
         audio_path_label.set_halign(Gtk.Align.START)
         audio_path_label.set_hexpand(True)
 
@@ -452,23 +420,9 @@ class SettingsDialog(Gtk.Window):
 
         audio_path_box.append(audio_path_label)
         audio_path_box.append(self.audio_archive_entry)
-        content_box.append(audio_path_box)
+        page.append(audio_path_box)
 
-        # Help text
-        help_label = Gtk.Label()
-        help_label.set_markup(
-            "<small>Save Audio: Archive audio recordings with transcriptions (requires disk space)\n"
-            "Deduplicate: Reuse identical audio files to save space\n"
-            "Auto-cleanup: Automatically remove entries older than specified days\n"
-            "Paths: Leave empty to use default XDG-compliant paths</small>"
-        )
-        help_label.set_halign(Gtk.Align.START)
-        help_label.add_css_class("dim-label")
-        help_label.set_wrap(True)
-        content_box.append(help_label)
-
-        page.append(scrolled)
-        self.stack.add_titled(page, "history", "History")
+        self.stack.add_titled(scrolled, "advanced", "Advanced")
 
     def _on_save_clicked(self, button: Gtk.Button) -> None:
         """

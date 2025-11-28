@@ -251,11 +251,31 @@ class HistoryPanel(Gtk.Box):
             self.refresh_recent()
 
     def _on_delete_requested(self, item, entry_id):
-        """Handle delete request from item."""
-        # Confirm dialog could go here, but for now just delete
-        success = self.history_manager.delete(entry_id)
-        if success:
-            self.refresh_recent()
+        """Handle delete request from item with confirmation dialog."""
+        dialog = Gtk.MessageDialog(
+            transient_for=self.get_root(),
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Delete Transcription?",
+        )
+        dialog.format_secondary_text(
+            "This action cannot be undone. The transcription will be permanently removed."
+        )
+
+        cancel_btn = dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        delete_btn = dialog.add_button("Delete", Gtk.ResponseType.ACCEPT)
+        delete_btn.add_css_class("destructive-action")
+
+        def on_response(d, response):
+            if response == Gtk.ResponseType.ACCEPT:
+                success = self.history_manager.delete(entry_id)
+                if success:
+                    self.refresh_recent()
+            d.close()
+
+        dialog.connect("response", on_response)
+        dialog.present()
 
     def _on_export_clicked(self, button):
         """Handle export button click."""
