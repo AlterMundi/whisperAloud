@@ -70,7 +70,8 @@ class HistoryPanel(Gtk.Box):
         search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         
         self.search_entry = Gtk.SearchEntry()
-        self.search_entry.set_placeholder_text("Search transcriptions...")
+        # Use props for GTK4 version compatibility
+        self.search_entry.props.placeholder_text = "Search transcriptions..."
         self.search_entry.set_hexpand(True)
         self.search_entry.connect("search-changed", self._on_search_changed)
         search_box.append(self.search_entry)
