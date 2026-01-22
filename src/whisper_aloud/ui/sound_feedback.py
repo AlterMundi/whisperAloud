@@ -19,11 +19,11 @@ except (ImportError, ValueError) as e:
 
 class SoundEvent(Enum):
     """Sound events for feedback."""
-    RECORDING_START = "audio-channel-front-left"  # Click sound
-    RECORDING_STOP = "audio-channel-front-right"  # Click sound
-    TRANSCRIPTION_COMPLETE = "complete"  # Success sound
-    ERROR = "dialog-error"  # Error sound
-    CANCEL = "dialog-cancel"  # Cancel sound
+    RECORDING_START = "dialog-warning"  # Click sound
+    RECORDING_STOP = "dialog-warning"  # Click sound
+    TRANSCRIPTION_COMPLETE = "dialog-information"  # Success sound
+    ERROR = "dialog-information"  # Error sound
+    CANCEL = "dialog-information"  # Cancel sound
 
 
 class SoundFeedback:
@@ -31,11 +31,11 @@ class SoundFeedback:
 
     # Map of events to freedesktop sound theme IDs
     SOUND_IDS = {
-        SoundEvent.RECORDING_START: "audio-channel-front-left",
-        SoundEvent.RECORDING_STOP: "audio-channel-front-right",
-        SoundEvent.TRANSCRIPTION_COMPLETE: "complete",
-        SoundEvent.ERROR: "dialog-error",
-        SoundEvent.CANCEL: "window-close",
+        SoundEvent.RECORDING_START: "dialog-warning",
+        SoundEvent.RECORDING_STOP: "dialog-warning",
+        SoundEvent.TRANSCRIPTION_COMPLETE: "dialog-information",
+        SoundEvent.ERROR: "dialog-information",
+        SoundEvent.CANCEL: "dialog-information",
     }
 
     def __init__(self, enabled: bool = True):
