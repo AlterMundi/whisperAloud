@@ -121,3 +121,28 @@ class TestAGC:
         agc.process(quiet, sample_rate=sr)
         # After processing quiet audio, gain should be > 1.0
         assert agc._current_gain > 1.0, "AGC should have boosted gain after quiet audio"
+
+    def test_agc_handles_short_chunks(self):
+        """AGC should not crash on chunks shorter than window_samples."""
+        from whisper_aloud.audio.audio_processor import AGC
+        agc = AGC(window_ms=300.0)
+        short = np.ones(10, dtype=np.float32) * 0.3
+        result = agc.process(short, sample_rate=16000)
+        assert result.shape == short.shape
+
+    def test_agc_respects_min_gain(self):
+        """Gain should not go below min_gain_db (attenuation limit)."""
+        from whisper_aloud.audio.audio_processor import AGC
+        agc = AGC(target_db=-18.0, min_gain_db=-6.0)
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        # Very loud signal
+        loud = (np.sin(2 * np.pi * 440 * t) * 0.9).astype(np.float32)
+        result = agc.process(loud, sample_rate=sr)
+        min_gain_linear = 10 ** (-6.0 / 20.0)  # ~0.5x
+        # Output should not be more attenuated than min_gain allows
+        # At the settled portion, the gain should be at or above min_gain
+        output_rms = np.sqrt(np.mean(result[sr // 2:] ** 2))
+        input_rms = np.sqrt(np.mean(loud[sr // 2:] ** 2))
+        effective_gain = output_rms / input_rms
+        assert effective_gain >= min_gain_linear * 0.9, f"Gain {effective_gain} below min {min_gain_linear}"

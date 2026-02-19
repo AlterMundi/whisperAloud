@@ -130,20 +130,29 @@ class AGC:
         attack_coeff = np.exp(-1.0 / max(1.0, self.attack_ms * sample_rate / 1000.0))
         release_coeff = np.exp(-1.0 / max(1.0, self.release_ms * sample_rate / 1000.0))
 
+        # Precompute per-sample RMS using cumulative sum (O(n))
+        sq = audio.astype(np.float64) ** 2
+        cumsum = np.cumsum(sq)
+        rms_arr = np.empty(n, dtype=np.float64)
+        if n <= window_samples:
+            rms_arr[:] = np.sqrt(cumsum / np.arange(1, n + 1))
+        else:
+            rms_arr[:window_samples] = np.sqrt(cumsum[:window_samples] / np.arange(1, window_samples + 1))
+            rms_arr[window_samples:] = np.sqrt(
+                (cumsum[window_samples:] - cumsum[:-window_samples]) / window_samples
+            )
+
         result = np.copy(audio)
         gain = self._current_gain
 
         for i in range(n):
-            # Compute local RMS over window
-            start = max(0, i - window_samples)
-            window = audio[start:i + 1]
-            rms = np.sqrt(np.mean(window.astype(np.float64) ** 2))
+            rms = rms_arr[i]
 
             if rms > 1e-8:
                 desired_gain = self.target_linear / rms
                 desired_gain = np.clip(desired_gain, self.min_gain, self.max_gain)
             else:
-                desired_gain = self._current_gain  # Hold current gain for silence
+                desired_gain = gain  # Hold current running gain for silence
 
             # Smooth gain changes: attack (reducing) is faster than release (boosting)
             if desired_gain < gain:
