@@ -345,3 +345,97 @@ class TestAudioProcessingConfig:
         restored = WhisperAloudConfig.from_dict(d)
         assert restored.audio_processing.agc_target_db == -12.0
         assert restored.audio_processing.noise_gate_enabled is False
+
+
+class TestRecorderPipelineIntegration:
+    """Tests for AudioPipeline integration in AudioRecorder."""
+
+    def test_recorder_accepts_processing_config(self):
+        """AudioRecorder should accept AudioProcessingConfig."""
+        from whisper_aloud.audio.recorder import AudioRecorder
+        from whisper_aloud.config import AudioConfig, AudioProcessingConfig
+        from unittest.mock import patch
+
+        config = AudioConfig()
+        proc_config = AudioProcessingConfig(agc_enabled=True)
+        recorder = AudioRecorder(config, processing_config=proc_config)
+        assert recorder._pipeline is not None
+
+    def test_recorder_creates_pipeline_from_config(self):
+        """Recorder should create AudioPipeline with given config."""
+        from whisper_aloud.audio.recorder import AudioRecorder
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioConfig, AudioProcessingConfig
+
+        config = AudioConfig()
+        proc_config = AudioProcessingConfig(agc_enabled=False, noise_gate_enabled=False)
+        recorder = AudioRecorder(config, processing_config=proc_config)
+        assert isinstance(recorder._pipeline, AudioPipeline)
+        assert recorder._pipeline._agc is None
+        assert recorder._pipeline._gate is None
+
+    def test_recorder_works_without_processing_config(self):
+        """Recorder should work with default pipeline if no config given."""
+        from whisper_aloud.audio.recorder import AudioRecorder
+        from whisper_aloud.config import AudioConfig
+
+        config = AudioConfig()
+        recorder = AudioRecorder(config)
+        assert recorder._pipeline is not None
+
+    def test_recorder_stop_uses_pipeline(self):
+        """Recorder.stop() should use AudioPipeline.process() instead of process_recording()."""
+        from whisper_aloud.audio.recorder import AudioRecorder, RecordingState
+        from whisper_aloud.config import AudioConfig, AudioProcessingConfig
+        from unittest.mock import MagicMock
+
+        config = AudioConfig()
+        proc_config = AudioProcessingConfig(
+            noise_gate_enabled=False, agc_enabled=False,
+            denoising_enabled=False, limiter_enabled=False,
+        )
+        recorder = AudioRecorder(config, processing_config=proc_config)
+
+        # Mock pipeline.process to verify it gets called
+        recorder._pipeline = MagicMock()
+        recorder._pipeline.process.return_value = np.zeros(1600, dtype=np.float32)
+
+        # Put recorder into recording state and add frames
+        recorder._set_state(RecordingState.RECORDING)
+        recorder._frames = [np.zeros(1600, dtype=np.float32)]
+        recorder._start_time = 0.0
+
+        audio = recorder.stop()
+        recorder._pipeline.process.assert_called_once()
+
+    def test_recorder_stop_applies_mono_and_resample(self):
+        """Recorder.stop() should convert stereo to mono and resample before pipeline."""
+        from whisper_aloud.audio.recorder import AudioRecorder, RecordingState
+        from whisper_aloud.config import AudioConfig, AudioProcessingConfig
+        from unittest.mock import MagicMock
+
+        # Use 48kHz stereo config
+        config = AudioConfig(sample_rate=48000, channels=2)
+        proc_config = AudioProcessingConfig(
+            noise_gate_enabled=False, agc_enabled=False,
+            denoising_enabled=False, limiter_enabled=False,
+        )
+        recorder = AudioRecorder(config, processing_config=proc_config)
+
+        # Mock pipeline
+        recorder._pipeline = MagicMock()
+        recorder._pipeline.process.side_effect = lambda audio, sample_rate: audio
+
+        # Put recorder into recording state with stereo frames
+        recorder._set_state(RecordingState.RECORDING)
+        stereo_frame = np.zeros((4800, 2), dtype=np.float32)
+        recorder._frames = [stereo_frame]
+        recorder._start_time = 0.0
+
+        audio = recorder.stop()
+
+        # Pipeline should have been called with mono, 16kHz audio
+        call_args = recorder._pipeline.process.call_args
+        passed_audio = call_args[0][0] if call_args[0] else call_args[1]['audio']
+        assert passed_audio.ndim == 1, "Audio should be mono"
+        assert call_args[1].get('sample_rate', call_args[0][1] if len(call_args[0]) > 1 else None) == 16000

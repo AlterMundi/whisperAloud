@@ -179,10 +179,10 @@ def test_stop_with_no_frames(mock_stream, mock_validate):
     assert len(audio) == 0
 
 
-@patch('whisper_aloud.audio.audio_processor.AudioProcessor.process_recording')
+@patch('whisper_aloud.audio.audio_processor.AudioPipeline.process')
 @patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
 @patch('sounddevice.InputStream')
-def test_stop_processing_failure(mock_process, mock_stream, mock_validate):
+def test_stop_processing_failure(mock_stream, mock_validate, mock_pipeline_process):
     """Test stop handles processing failures."""
     mock_device = Mock()
     mock_validate.return_value = mock_device
@@ -191,7 +191,7 @@ def test_stop_processing_failure(mock_process, mock_stream, mock_validate):
     mock_stream.return_value = mock_stream_instance
 
     # Mock processing failure
-    mock_process.side_effect = Exception("Processing error")
+    mock_pipeline_process.side_effect = Exception("Processing error")
 
     config = AudioConfig()
     recorder = AudioRecorder(config)

@@ -10,11 +10,11 @@ from typing import Callable, List, Optional
 import numpy as np
 import sounddevice as sd
 
-from ..config import AudioConfig
+from ..config import AudioConfig, AudioProcessingConfig
 from ..exceptions import AudioRecordingError, AudioDeviceError
 from .device_manager import DeviceManager, AudioDevice
 from .level_meter import LevelMeter, AudioLevel
-from .audio_processor import AudioProcessor
+from .audio_processor import AudioProcessor, AudioPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,8 @@ class AudioRecorder:
     def __init__(
         self,
         config: AudioConfig,
-        level_callback: Optional[Callable[[AudioLevel], None]] = None
+        level_callback: Optional[Callable[[AudioLevel], None]] = None,
+        processing_config: Optional[AudioProcessingConfig] = None
     ):
         """
         Initialize recorder.
@@ -51,6 +52,7 @@ class AudioRecorder:
         Args:
             config: Audio configuration
             level_callback: Optional callback for real-time level updates
+            processing_config: Optional audio processing pipeline config
         """
         self.config = config
         self.level_callback = level_callback
@@ -67,7 +69,8 @@ class AudioRecorder:
 
         # Components
         self._level_meter = LevelMeter(smoothing=0.3)
-        self._processor = AudioProcessor()
+        self._processor = AudioProcessor()  # Keep for format conversion utilities
+        self._pipeline = AudioPipeline(processing_config or AudioProcessingConfig())
 
         logger.info("AudioRecorder initialized")
 
@@ -213,15 +216,19 @@ class AudioRecorder:
             raw_audio = np.concatenate(self._frames)
             logger.info(f"Recorded {len(raw_audio) / self.config.sample_rate:.2f}s of audio")
 
-            # Process audio
-            processed_audio = self._processor.process_recording(
-                raw_audio,
-                sample_rate=self.config.sample_rate,
-                target_rate=16000,  # Whisper's native rate
-                normalize=self.config.normalize_audio,
-                trim_silence_enabled=self.config.vad_enabled,
-                vad_threshold=self.config.vad_threshold
-            )
+            # Format conversion (mono, resample)
+            audio = raw_audio
+            if audio.ndim > 1:
+                audio = AudioProcessor.stereo_to_mono(audio)
+            if self.config.sample_rate != 16000:
+                audio = AudioProcessor.resample(audio, self.config.sample_rate, 16000)
+
+            # Trim silence if VAD enabled
+            if self.config.vad_enabled:
+                audio, _, _ = AudioProcessor.trim_silence(audio, 16000, self.config.vad_threshold)
+
+            # Apply processing pipeline (gate, AGC, denoise, limit)
+            processed_audio = self._pipeline.process(audio, sample_rate=16000)
 
             # Reset state
             self._set_state(RecordingState.IDLE)
