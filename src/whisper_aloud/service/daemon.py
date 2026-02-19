@@ -12,6 +12,7 @@ from gi.repository import GLib
 from pydbus import SessionBus
 
 from ..audio.recorder import AudioRecorder, RecordingState
+from ..clipboard import ClipboardManager
 from ..config import WhisperAloudConfig
 from ..exceptions import WhisperAloudError
 from ..transcriber import Transcriber
@@ -105,6 +106,10 @@ class WhisperAloudService:
         self._transcribing = False
         self._loop = None
 
+        # Level tracking (throttled at 10Hz)
+        self._peak_level = 0.0
+        self._level_timer_id = None
+
         # GNOME integration
         self.notifications: Optional[NotificationManager] = None
 
@@ -122,12 +127,22 @@ class WhisperAloudService:
         self.session_id = str(uuid.uuid4())
         logger.info(f"Daemon session ID: {self.session_id}")
 
+        # Initialize clipboard manager
+        try:
+            self.clipboard_manager = ClipboardManager(self.config.clipboard)
+        except Exception as e:
+            logger.warning(f"Failed to initialize clipboard: {e}")
+            self.clipboard_manager = None
+
         logger.info("WhisperAloudService initialized")
 
     def _init_components(self) -> None:
         """Initialize recorder and transcriber."""
         try:
-            self.recorder = AudioRecorder(self.config.audio)
+            self.recorder = AudioRecorder(
+                self.config.audio,
+                level_callback=self._on_level,
+            )
             self.transcriber = Transcriber(self.config)
             self.transcriber.load_model()
             logger.info("Components initialized successfully")
@@ -144,12 +159,8 @@ class WhisperAloudService:
             logger.info("D-Bus service published as org.fede.whisperaloud")
 
             # Keep the service running
-            def signal_handler(signum, frame):
-                logger.info("Received signal, shutting down")
-                self.Quit()
-
-            signal_module.signal(signal_module.SIGTERM, signal_handler)
-            signal_module.signal(signal_module.SIGINT, signal_handler)
+            signal_module.signal(signal_module.SIGTERM, self._signal_handler)
+            signal_module.signal(signal_module.SIGINT, self._signal_handler)
 
             # Use GLib main loop
             loop = GLib.MainLoop()
@@ -174,6 +185,7 @@ class WhisperAloudService:
 
         try:
             self.recorder.start()
+            self._start_level_timer()
             self.RecordingStarted()
             self.StatusChanged("recording")
             if self.notifications:
@@ -191,6 +203,7 @@ class WhisperAloudService:
             return "error"
 
         try:
+            self._stop_level_timer()
             audio_data = self.recorder.stop()
             self.RecordingStopped()
             self.StatusChanged("transcribing")
@@ -222,6 +235,7 @@ class WhisperAloudService:
         """Cancel active recording without transcribing."""
         if not self.recorder or not self.recorder.is_recording:
             return False
+        self._stop_level_timer()
         self.recorder.cancel()
         self.StatusChanged("idle")
         return True
@@ -331,6 +345,48 @@ class WhisperAloudService:
             os._exit(0)
         return True
 
+    # ─── Level tracking ────────────────────────────────────────────────
+
+    def _on_level(self, level):
+        """Track peak level from audio callback."""
+        self._peak_level = max(self._peak_level, level.peak)
+
+    def _start_level_timer(self):
+        """Start 10Hz level emission timer."""
+        if self._level_timer_id is None:
+            self._level_timer_id = GLib.timeout_add(100, self._emit_level)
+
+    def _stop_level_timer(self):
+        """Stop level emission timer."""
+        if self._level_timer_id is not None:
+            GLib.source_remove(self._level_timer_id)
+            self._level_timer_id = None
+
+    def _emit_level(self):
+        """Emit throttled level update (called at 10Hz by GLib)."""
+        level = self._peak_level
+        self._peak_level = 0.0
+        self.LevelUpdate(level)
+        return True  # Keep timer running
+
+    # ─── Signal handling ─────────────────────────────────────────────────
+
+    def _signal_handler(self, signum, frame):
+        """Handle SIGTERM/SIGINT for clean shutdown."""
+        logger.info(f"Received signal {signum}, shutting down")
+        # If recording, stop without transcribing
+        if self.recorder and self.recorder.is_recording:
+            try:
+                self.recorder.cancel()
+            except Exception as e:
+                logger.warning(f"Error during shutdown recording stop: {e}")
+
+        self.StatusChanged("shutdown")
+        self._stop_level_timer()
+        self._shutdown = True
+        if hasattr(self, '_loop') and self._loop:
+            self._loop.quit()
+
     # ─── Internal helpers ────────────────────────────────────────────────
 
     def _transcribe_audio(self, audio_data):
@@ -365,6 +421,14 @@ class WhisperAloudService:
             self.StatusChanged("idle")
             self.TranscriptionReady(result.text, meta)
 
+            # Auto-copy to clipboard
+            if self.config.clipboard.auto_copy and self.clipboard_manager:
+                try:
+                    self.clipboard_manager.copy(result.text)
+                    logger.info("Transcription copied to clipboard")
+                except Exception as e:
+                    logger.warning(f"Failed to copy to clipboard: {e}")
+
             if self.notifications:
                 self.notifications.show_transcription_completed(result.text)
             logger.info("Transcription completed and signals emitted")
@@ -380,6 +444,8 @@ class WhisperAloudService:
     def _cleanup(self) -> None:
         """Clean up resources."""
         logger.info("Cleaning up service resources")
+
+        self._stop_level_timer()
 
         # Shutdown executor
         self.executor.shutdown(wait=True)
