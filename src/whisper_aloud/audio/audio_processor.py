@@ -86,6 +86,78 @@ class NoiseGate:
         return (audio * gain).astype(audio.dtype)
 
 
+class AGC:
+    """Automatic Gain Control using sliding-window RMS.
+
+    Args:
+        target_db: Target output level in dBFS (default -18.0).
+        max_gain_db: Maximum gain boost in dB (default 30.0).
+        min_gain_db: Minimum gain (attenuation) in dB (default -10.0).
+        attack_ms: Attack time constant in ms for gain reduction (default 10.0).
+        release_ms: Release time constant in ms for gain increase (default 100.0).
+        window_ms: RMS measurement window in ms (default 300.0).
+    """
+
+    def __init__(
+        self,
+        target_db: float = -18.0,
+        max_gain_db: float = 30.0,
+        min_gain_db: float = -10.0,
+        attack_ms: float = 10.0,
+        release_ms: float = 100.0,
+        window_ms: float = 300.0,
+    ):
+        self.target_linear = 10 ** (target_db / 20.0)
+        self.max_gain = 10 ** (max_gain_db / 20.0)
+        self.min_gain = 10 ** (min_gain_db / 20.0)
+        self.attack_ms = attack_ms
+        self.release_ms = release_ms
+        self.window_ms = window_ms
+        self._current_gain = 1.0
+
+    def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply AGC to audio chunk.
+
+        Uses a sliding RMS window to estimate signal level, then smoothly
+        adjusts gain toward the target level. Attack (gain decrease) is faster
+        than release (gain increase) to prevent clipping on transients.
+        """
+        if audio.size == 0:
+            return audio
+
+        n = len(audio)
+        window_samples = max(1, int(self.window_ms * sample_rate / 1000.0))
+        attack_coeff = np.exp(-1.0 / max(1.0, self.attack_ms * sample_rate / 1000.0))
+        release_coeff = np.exp(-1.0 / max(1.0, self.release_ms * sample_rate / 1000.0))
+
+        result = np.copy(audio)
+        gain = self._current_gain
+
+        for i in range(n):
+            # Compute local RMS over window
+            start = max(0, i - window_samples)
+            window = audio[start:i + 1]
+            rms = np.sqrt(np.mean(window.astype(np.float64) ** 2))
+
+            if rms > 1e-8:
+                desired_gain = self.target_linear / rms
+                desired_gain = np.clip(desired_gain, self.min_gain, self.max_gain)
+            else:
+                desired_gain = self._current_gain  # Hold current gain for silence
+
+            # Smooth gain changes: attack (reducing) is faster than release (boosting)
+            if desired_gain < gain:
+                coeff = attack_coeff
+            else:
+                coeff = release_coeff
+            gain = coeff * gain + (1 - coeff) * desired_gain
+
+            result[i] *= gain
+
+        self._current_gain = gain
+        return result.astype(np.float32)
+
+
 class AudioProcessor:
     """Audio processing operations."""
 

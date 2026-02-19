@@ -66,3 +66,58 @@ class TestNoiseGate:
         # Check for no sudden jumps > 0.1 between consecutive samples
         diffs = np.abs(np.diff(result))
         assert np.max(diffs) < 0.15, f"Click detected: max diff {np.max(diffs)}"
+
+
+class TestAGC:
+    """Tests for automatic gain control."""
+
+    def test_agc_boosts_quiet_audio(self):
+        """Quiet audio should be boosted toward target."""
+        from whisper_aloud.audio.audio_processor import AGC
+
+        agc = AGC(target_db=-18.0, max_gain_db=30.0)
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        # Very quiet signal at ~-50 dBFS
+        quiet = (np.sin(2 * np.pi * 440 * t) * 0.003).astype(np.float32)
+        result = agc.process(quiet, sample_rate=sr)
+        input_rms = np.sqrt(np.mean(quiet ** 2))
+        output_rms = np.sqrt(np.mean(result ** 2))
+        assert output_rms > input_rms * 5, f"AGC should boost quiet audio: in={input_rms}, out={output_rms}"
+
+    def test_agc_attenuates_loud_audio(self):
+        """Loud audio should be reduced toward target."""
+        from whisper_aloud.audio.audio_processor import AGC
+
+        agc = AGC(target_db=-18.0)
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        # Loud signal at ~-3 dBFS
+        loud = (np.sin(2 * np.pi * 440 * t) * 0.7).astype(np.float32)
+        result = agc.process(loud, sample_rate=sr)
+        input_rms = np.sqrt(np.mean(loud ** 2))
+        output_rms = np.sqrt(np.mean(result ** 2))
+        assert output_rms < input_rms * 0.8, f"AGC should attenuate loud audio: in={input_rms}, out={output_rms}"
+
+    def test_agc_respects_max_gain(self):
+        """Gain should not exceed max_gain_db."""
+        from whisper_aloud.audio.audio_processor import AGC
+
+        agc = AGC(target_db=-18.0, max_gain_db=10.0)
+        # Near-silent signal
+        silent = np.ones(16000, dtype=np.float32) * 0.0001
+        result = agc.process(silent, sample_rate=16000)
+        max_gain_linear = 10 ** (10.0 / 20.0)  # ~3.16x
+        assert np.max(np.abs(result)) <= np.max(np.abs(silent)) * max_gain_linear * 1.1
+
+    def test_agc_maintains_state_across_chunks(self):
+        """AGC gain state should persist between process() calls."""
+        from whisper_aloud.audio.audio_processor import AGC
+
+        agc = AGC(target_db=-18.0)
+        sr = 16000
+        t = np.arange(1600, dtype=np.float32) / sr
+        quiet = (np.sin(2 * np.pi * 440 * t) * 0.01).astype(np.float32)
+        agc.process(quiet, sample_rate=sr)
+        # After processing quiet audio, gain should be > 1.0
+        assert agc._current_gain > 1.0, "AGC should have boosted gain after quiet audio"
