@@ -9,6 +9,7 @@ from .config import (
     TranscriptionConfig,
     AudioConfig,
     ClipboardConfig,
+    AudioProcessingConfig,
 )
 from .exceptions import (
     WhisperAloudError,
@@ -47,6 +48,7 @@ __all__ = [
     "TranscriptionConfig",
     "AudioConfig",
     "ClipboardConfig",
+    "AudioProcessingConfig",
     # Exceptions
     "WhisperAloudError",
     "ModelLoadError",

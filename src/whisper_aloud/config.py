@@ -150,6 +150,20 @@ class PersistenceConfig:
             self.audio_archive_path = DATA_DIR / "audio"
 
 
+@dataclass
+class AudioProcessingConfig:
+    """Configuration for audio processing pipeline."""
+    noise_gate_enabled: bool = True
+    noise_gate_threshold_db: float = -40.0
+    agc_enabled: bool = True
+    agc_target_db: float = -18.0
+    agc_max_gain_db: float = 30.0
+    denoising_enabled: bool = True
+    denoising_strength: float = 0.5
+    limiter_enabled: bool = True
+    limiter_ceiling_db: float = -1.0
+
+
 # =============================================================================
 # Main Configuration Class
 # =============================================================================
@@ -162,6 +176,7 @@ class WhisperAloudConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     clipboard: ClipboardConfig = field(default_factory=ClipboardConfig)
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+    audio_processing: AudioProcessingConfig = field(default_factory=AudioProcessingConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for serialization."""
@@ -207,6 +222,17 @@ class WhisperAloudConfig:
                 "auto_cleanup_days": self.persistence.auto_cleanup_days,
                 "max_entries": self.persistence.max_entries,
             },
+            "audio_processing": {
+                "noise_gate_enabled": self.audio_processing.noise_gate_enabled,
+                "noise_gate_threshold_db": self.audio_processing.noise_gate_threshold_db,
+                "agc_enabled": self.audio_processing.agc_enabled,
+                "agc_target_db": self.audio_processing.agc_target_db,
+                "agc_max_gain_db": self.audio_processing.agc_max_gain_db,
+                "denoising_enabled": self.audio_processing.denoising_enabled,
+                "denoising_strength": self.audio_processing.denoising_strength,
+                "limiter_enabled": self.audio_processing.limiter_enabled,
+                "limiter_ceiling_db": self.audio_processing.limiter_ceiling_db,
+            },
         }
 
     @classmethod
@@ -240,6 +266,11 @@ class WhisperAloudConfig:
                     if key in ("db_path", "audio_archive_path") and value:
                         value = Path(value)
                     setattr(config.persistence, key, value)
+
+        if "audio_processing" in data:
+            for key, value in data["audio_processing"].items():
+                if hasattr(config.audio_processing, key):
+                    setattr(config.audio_processing, key, value)
 
         return config
 

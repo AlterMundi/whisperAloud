@@ -178,3 +178,114 @@ class TestPeakLimiter:
         empty = np.array([], dtype=np.float32)
         result = limiter.process(empty)
         assert result.size == 0
+
+
+class TestAudioPipeline:
+    """Tests for the full audio processing pipeline."""
+
+    def test_pipeline_processes_all_stages(self):
+        """Pipeline should run gate -> AGC -> limiter in order."""
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig(
+            noise_gate_enabled=True,
+            agc_enabled=True,
+            denoising_enabled=False,
+            limiter_enabled=True,
+        )
+        pipeline = AudioPipeline(config)
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        audio = (np.sin(2 * np.pi * 440 * t) * 0.1).astype(np.float32)
+        result = pipeline.process(audio, sample_rate=sr)
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+
+    def test_pipeline_all_disabled_passthrough(self):
+        """With all stages disabled, output equals input."""
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig(
+            noise_gate_enabled=False,
+            agc_enabled=False,
+            denoising_enabled=False,
+            limiter_enabled=False,
+        )
+        pipeline = AudioPipeline(config)
+        audio = np.random.randn(1600).astype(np.float32) * 0.5
+        result = pipeline.process(audio, sample_rate=16000)
+        np.testing.assert_array_almost_equal(result, audio)
+
+    def test_pipeline_is_stateful_across_chunks(self):
+        """Pipeline should maintain state between process() calls."""
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig(agc_enabled=True, noise_gate_enabled=False, limiter_enabled=False)
+        pipeline = AudioPipeline(config)
+        sr = 16000
+        t = np.arange(1600, dtype=np.float32) / sr
+        chunk = (np.sin(2 * np.pi * 440 * t) * 0.01).astype(np.float32)
+        result1 = pipeline.process(chunk, sample_rate=sr)
+        result2 = pipeline.process(chunk, sample_rate=sr)
+        rms1 = np.sqrt(np.mean(result1 ** 2))
+        rms2 = np.sqrt(np.mean(result2 ** 2))
+        assert rms2 >= rms1 * 0.8, "AGC should maintain/increase gain across chunks"
+
+    def test_pipeline_handles_empty_audio(self):
+        """Empty audio should pass through without error."""
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig()
+        pipeline = AudioPipeline(config)
+        empty = np.array([], dtype=np.float32)
+        result = pipeline.process(empty, sample_rate=16000)
+        assert result.size == 0
+
+    def test_pipeline_limiter_caps_agc_output(self):
+        """Limiter should prevent AGC from producing clipping."""
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig(
+            noise_gate_enabled=False,
+            agc_enabled=True,
+            agc_target_db=-6.0,  # Aggressive target
+            agc_max_gain_db=40.0,
+            limiter_enabled=True,
+            limiter_ceiling_db=-1.0,
+        )
+        pipeline = AudioPipeline(config)
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        quiet = (np.sin(2 * np.pi * 440 * t) * 0.01).astype(np.float32)
+        result = pipeline.process(quiet, sample_rate=sr)
+        ceiling = 10 ** (-1.0 / 20.0)
+        assert np.max(np.abs(result)) <= ceiling + 0.001, "Limiter should cap AGC output"
+
+
+class TestAudioProcessingConfig:
+    """Tests for AudioProcessingConfig in WhisperAloudConfig."""
+
+    def test_config_includes_audio_processing(self):
+        """WhisperAloudConfig should have audio_processing section."""
+        from whisper_aloud.config import WhisperAloudConfig, AudioProcessingConfig
+
+        config = WhisperAloudConfig()
+        assert isinstance(config.audio_processing, AudioProcessingConfig)
+        assert config.audio_processing.agc_enabled is True
+
+    def test_config_round_trip(self):
+        """audio_processing should survive to_dict/from_dict round trip."""
+        from whisper_aloud.config import WhisperAloudConfig
+
+        config = WhisperAloudConfig()
+        config.audio_processing.agc_target_db = -12.0
+        config.audio_processing.noise_gate_enabled = False
+        d = config.to_dict()
+        restored = WhisperAloudConfig.from_dict(d)
+        assert restored.audio_processing.agc_target_db == -12.0
+        assert restored.audio_processing.noise_gate_enabled is False

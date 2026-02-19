@@ -6,6 +6,7 @@ from typing import Tuple
 import numpy as np
 from scipy import signal
 
+from ..config import AudioProcessingConfig
 from ..exceptions import AudioProcessingError
 
 logger = logging.getLogger(__name__)
@@ -375,3 +376,33 @@ class AudioProcessor:
 
         logger.info(f"Processed audio: {len(audio) / target_rate:.2f}s duration")
         return audio
+
+
+class AudioPipeline:
+    """Full audio processing pipeline: gate -> AGC -> denoising -> limiter.
+
+    Each stage is toggleable via config. The pipeline is stateful ---
+    call process() repeatedly with audio chunks for streaming use.
+
+    Args:
+        config: AudioProcessingConfig controlling which stages are active.
+    """
+
+    def __init__(self, config: AudioProcessingConfig):
+        self.config = config
+        self._gate = NoiseGate(threshold_db=config.noise_gate_threshold_db) if config.noise_gate_enabled else None
+        self._agc = AGC(target_db=config.agc_target_db, max_gain_db=config.agc_max_gain_db) if config.agc_enabled else None
+        self._limiter = PeakLimiter(ceiling_db=config.limiter_ceiling_db) if config.limiter_enabled else None
+        # Denoiser added in Task 1.5
+
+    def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Process audio through the pipeline."""
+        result = audio
+        if self._gate:
+            result = self._gate.process(result, sample_rate)
+        if self._agc:
+            result = self._agc.process(result, sample_rate)
+        # Denoiser slot: Task 1.5
+        if self._limiter:
+            result = self._limiter.process(result)
+        return result.astype(np.float32)
