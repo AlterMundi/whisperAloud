@@ -15,6 +15,21 @@ class NoiseGate:
     """Noise gate with smooth attack/release."""
 
     def __init__(self, threshold_db: float = -40.0, attack_ms: float = 5.0, release_ms: float = 50.0):
+        """Initialise the noise gate.
+
+        Args:
+            threshold_db: Gate open threshold in dBFS.  Audio whose RMS level
+                exceeds this value causes the gate to open; audio below it
+                causes the gate to close.
+            attack_ms: Time in milliseconds for the gain to ramp linearly from
+                0 to 1 once the signal crosses the threshold (linear ramp, not
+                an RC constant).
+            release_ms: RC time constant (1/e decay) in milliseconds for the
+                gain to fall after the signal drops below the threshold.  This
+                is *not* the time to reach silence: at t = release_ms the gain
+                has fallen to ~37 % of its starting value; at t = 3*release_ms
+                it is ~5 %.
+        """
         self.threshold_db = threshold_db
         self.attack_ms = attack_ms
         self.release_ms = release_ms
@@ -36,13 +51,18 @@ class NoiseGate:
         n = len(audio)
 
         # Step 1: Compute per-sample RMS level using a short sliding window
-        # to smooth over waveform zero-crossings
-        win = max(2, int(sample_rate * 0.002))  # ~2ms window
+        # to smooth over waveform zero-crossings.
+        # win is clamped to n so that chunks shorter than ~2ms do not crash.
+        win = min(max(2, int(sample_rate * 0.002)), n)
         sq = audio.astype(np.float64) ** 2
         cumsum = np.cumsum(sq)
         rms = np.empty(n, dtype=np.float64)
-        rms[:win] = np.sqrt(cumsum[:win] / np.arange(1, win + 1))
-        rms[win:] = np.sqrt((cumsum[win:] - cumsum[:-win]) / win)
+        if n <= win:
+            # Chunk is shorter than the RMS window: use a growing prefix average.
+            rms[:] = np.sqrt(cumsum / np.arange(1, n + 1))
+        else:
+            rms[:win] = np.sqrt(cumsum[:win] / np.arange(1, win + 1))
+            rms[win:] = np.sqrt((cumsum[win:] - cumsum[:-win]) / win)
 
         # Step 2: Determine gate target (1.0 = open, 0.0 = closed)
         gate_open = rms > threshold_linear
