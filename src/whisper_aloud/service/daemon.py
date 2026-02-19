@@ -18,6 +18,7 @@ from ..exceptions import WhisperAloudError
 from ..transcriber import Transcriber
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
+from .indicator import WhisperAloudIndicator
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,16 @@ class WhisperAloudService:
         # Initialize components
         self._init_components()
 
+        # Initialize system tray indicator
+        try:
+            self.indicator = WhisperAloudIndicator(
+                on_toggle=self.ToggleRecording,
+                on_quit=self.Quit,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize indicator: {e}")
+            self.indicator = None
+
         # Initialize notifications
         try:
             self.notifications = NotificationManager(self.config)
@@ -188,6 +199,8 @@ class WhisperAloudService:
             self._start_level_timer()
             self.RecordingStarted()
             self.StatusChanged("recording")
+            if self.indicator:
+                self.indicator.set_state("recording")
             if self.notifications:
                 self.notifications.show_recording_started()
             logger.info("Recording started via D-Bus")
@@ -207,6 +220,8 @@ class WhisperAloudService:
             audio_data = self.recorder.stop()
             self.RecordingStopped()
             self.StatusChanged("transcribing")
+            if self.indicator:
+                self.indicator.set_state("transcribing")
 
             # Start transcription in background thread (non-blocking)
             self._transcribing = True
@@ -238,6 +253,8 @@ class WhisperAloudService:
         self._stop_level_timer()
         self.recorder.cancel()
         self.StatusChanged("idle")
+        if self.indicator:
+            self.indicator.set_state("idle")
         return True
 
     def GetStatus(self) -> dict:
@@ -382,6 +399,8 @@ class WhisperAloudService:
                 logger.warning(f"Error during shutdown recording stop: {e}")
 
         self.StatusChanged("shutdown")
+        if self.indicator:
+            self.indicator.set_state("shutdown")
         self._stop_level_timer()
         self._shutdown = True
         if hasattr(self, '_loop') and self._loop:
@@ -419,6 +438,9 @@ class WhisperAloudService:
             }
             self._transcribing = False
             self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
+                self.indicator.set_last_text(result.text)
             self.TranscriptionReady(result.text, meta)
 
             # Auto-copy to clipboard
@@ -437,6 +459,8 @@ class WhisperAloudService:
             logger.error(f"Transcription failed: {e}")
             self._transcribing = False
             self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
             self.Error("transcription_failed", str(e))
             if self.notifications:
                 self.notifications.show_error(str(e))

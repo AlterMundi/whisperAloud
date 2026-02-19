@@ -42,7 +42,7 @@ sys.modules.setdefault('pydbus', _fake_pydbus)
 sys.modules.setdefault('pydbus.generic', _fake_pydbus_generic)
 
 
-def _make_daemon():
+def _make_daemon(indicator_fails=False):
     """Create a daemon instance with all external dependencies mocked."""
     with patch('whisper_aloud.service.daemon.SessionBus'), \
          patch('whisper_aloud.service.daemon.AudioRecorder'), \
@@ -50,15 +50,20 @@ def _make_daemon():
          patch('whisper_aloud.service.daemon.NotificationManager'), \
          patch('whisper_aloud.service.daemon.HistoryManager'), \
          patch('whisper_aloud.service.daemon.ClipboardManager'), \
+         patch('whisper_aloud.service.daemon.WhisperAloudIndicator') as mock_ind_cls, \
          patch('whisper_aloud.service.daemon.GLib') as mock_glib:
         # GLib.Variant passthrough for test assertions
         mock_glib.Variant = lambda t, v: v
+
+        if indicator_fails:
+            mock_ind_cls.side_effect = Exception("no tray available")
 
         from whisper_aloud.service.daemon import WhisperAloudService
         from whisper_aloud.config import WhisperAloudConfig
         config = WhisperAloudConfig()
         service = WhisperAloudService(config=config)
         service._mock_glib = mock_glib
+        service._mock_indicator_cls = mock_ind_cls
         return service
 
 
@@ -307,6 +312,54 @@ class TestDaemonMethods:
 
         daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
         daemon.clipboard_manager.copy.assert_not_called()
+
+
+    # ─── Task 3.2: Indicator integration tests ─────────────────────────
+
+    def test_daemon_creates_indicator(self, daemon):
+        """Indicator should be created during __init__."""
+        assert daemon.indicator is not None
+        daemon._mock_indicator_cls.assert_called_once_with(
+            on_toggle=daemon.ToggleRecording,
+            on_quit=daemon.Quit,
+        )
+
+    def test_indicator_state_updated_on_start_recording(self, daemon):
+        """StartRecording should call indicator.set_state('recording')."""
+        daemon.recorder.is_recording = False
+        daemon.StartRecording()
+        daemon.indicator.set_state.assert_called_with("recording")
+
+    def test_indicator_state_updated_on_stop(self, daemon):
+        """StopRecording should call indicator.set_state('transcribing')."""
+        daemon.recorder.stop.return_value = MagicMock()
+        daemon.StopRecording()
+        daemon.indicator.set_state.assert_any_call("transcribing")
+
+    def test_indicator_last_text_updated(self, daemon):
+        """set_last_text should be called after successful transcription."""
+        mock_result = MagicMock()
+        mock_result.text = "transcribed text"
+        mock_result.duration = 2.0
+        mock_result.language = "en"
+        mock_result.confidence = 0.9
+        daemon.transcriber.transcribe_numpy.return_value = mock_result
+        daemon.history_manager.add_transcription.return_value = 1
+
+        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+
+        daemon.indicator.set_last_text.assert_called_once_with("transcribed text")
+        daemon.indicator.set_state.assert_called_with("idle")
+
+    def test_daemon_runs_without_indicator(self):
+        """Daemon should work normally if indicator creation fails."""
+        daemon = _make_daemon(indicator_fails=True)
+        assert daemon.indicator is None
+        # Core operations should still work
+        daemon.recorder.is_recording = False
+        result = daemon.StartRecording()
+        assert result is True
+        daemon.recorder.start.assert_called_once()
 
 
 class TestDaemonIntrospection:
