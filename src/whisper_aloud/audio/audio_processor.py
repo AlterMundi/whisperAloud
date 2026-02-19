@@ -11,6 +11,61 @@ from ..exceptions import AudioProcessingError
 logger = logging.getLogger(__name__)
 
 
+class NoiseGate:
+    """Noise gate with smooth attack/release."""
+
+    def __init__(self, threshold_db: float = -40.0, attack_ms: float = 5.0, release_ms: float = 50.0):
+        self.threshold_db = threshold_db
+        self.attack_ms = attack_ms
+        self.release_ms = release_ms
+        self._envelope = 0.0
+
+    def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply noise gate to audio chunk.
+
+        Uses RMS-based level detection to determine gate open/close state,
+        then applies smooth exponential attack/release to the gain envelope.
+        """
+        if audio.size == 0:
+            return audio
+
+        threshold_linear = 10 ** (self.threshold_db / 20.0)
+        release_samples = max(1.0, self.release_ms * sample_rate / 1000.0)
+        release_coeff = np.exp(-1.0 / release_samples)
+
+        n = len(audio)
+
+        # Step 1: Compute per-sample RMS level using a short sliding window
+        # to smooth over waveform zero-crossings
+        win = max(2, int(sample_rate * 0.002))  # ~2ms window
+        sq = audio.astype(np.float64) ** 2
+        cumsum = np.cumsum(sq)
+        rms = np.empty(n, dtype=np.float64)
+        rms[:win] = np.sqrt(cumsum[:win] / np.arange(1, win + 1))
+        rms[win:] = np.sqrt((cumsum[win:] - cumsum[:-win]) / win)
+
+        # Step 2: Determine gate target (1.0 = open, 0.0 = closed)
+        gate_open = rms > threshold_linear
+
+        # Step 3: Apply smooth attack/release envelope
+        # Attack: fast ramp using linear interpolation over attack window
+        # Release: exponential decay for smooth fade-out
+        attack_samples = max(1, int(self.attack_ms * sample_rate / 1000.0))
+        envelope = self._envelope
+        gain = np.empty(n, dtype=np.float64)
+
+        for i in range(n):
+            if gate_open[i]:
+                # Linear ramp toward 1.0 over attack_samples
+                envelope = min(1.0, envelope + 1.0 / attack_samples)
+            else:
+                envelope = release_coeff * envelope
+            gain[i] = envelope
+
+        self._envelope = envelope
+        return (audio * gain).astype(audio.dtype)
+
+
 class AudioProcessor:
     """Audio processing operations."""
 
