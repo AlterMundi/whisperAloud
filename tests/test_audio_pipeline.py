@@ -146,3 +146,35 @@ class TestAGC:
         input_rms = np.sqrt(np.mean(loud[sr // 2:] ** 2))
         effective_gain = output_rms / input_rms
         assert effective_gain >= min_gain_linear * 0.9, f"Gain {effective_gain} below min {min_gain_linear}"
+
+
+class TestPeakLimiter:
+    """Tests for peak limiter."""
+
+    def test_limiter_clips_above_ceiling(self):
+        """Audio above ceiling should be limited."""
+        from whisper_aloud.audio.audio_processor import PeakLimiter
+
+        limiter = PeakLimiter(ceiling_db=-1.0)
+        ceiling_linear = 10 ** (-1.0 / 20.0)  # ~0.891
+        loud = np.ones(1600, dtype=np.float32) * 1.0  # 0 dBFS
+        result = limiter.process(loud)
+        assert np.max(np.abs(result)) <= ceiling_linear + 0.001
+
+    def test_limiter_passes_below_ceiling(self):
+        """Audio below ceiling should pass unchanged."""
+        from whisper_aloud.audio.audio_processor import PeakLimiter
+
+        limiter = PeakLimiter(ceiling_db=-1.0)
+        quiet = np.ones(1600, dtype=np.float32) * 0.5
+        result = limiter.process(quiet)
+        np.testing.assert_array_equal(result, quiet)
+
+    def test_limiter_handles_empty_audio(self):
+        """Empty audio should pass through."""
+        from whisper_aloud.audio.audio_processor import PeakLimiter
+
+        limiter = PeakLimiter()
+        empty = np.array([], dtype=np.float32)
+        result = limiter.process(empty)
+        assert result.size == 0

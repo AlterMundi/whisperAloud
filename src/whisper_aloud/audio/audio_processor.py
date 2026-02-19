@@ -167,6 +167,23 @@ class AGC:
         return result.astype(np.float32)
 
 
+class PeakLimiter:
+    """Hard peak limiter to prevent clipping.
+
+    Args:
+        ceiling_db: Maximum output level in dBFS (default -1.0).
+    """
+
+    def __init__(self, ceiling_db: float = -1.0):
+        self.ceiling = 10 ** (ceiling_db / 20.0)
+
+    def process(self, audio: np.ndarray) -> np.ndarray:
+        """Apply hard limiter."""
+        if audio.size == 0:
+            return audio
+        return np.clip(audio, -self.ceiling, self.ceiling)
+
+
 class AudioProcessor:
     """Audio processing operations."""
 
