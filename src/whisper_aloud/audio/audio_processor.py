@@ -185,6 +185,38 @@ class PeakLimiter:
         return np.clip(audio, -self.ceiling, self.ceiling)
 
 
+class Denoiser:
+    """Spectral denoising using noisereduce (optional dependency).
+
+    Args:
+        strength: Noise reduction strength from 0.0 (off) to 1.0 (maximum).
+            Maps to noisereduce's prop_decrease parameter.
+    """
+
+    def __init__(self, strength: float = 0.5):
+        self.strength = strength
+        self._noisereduce = None
+        try:
+            import noisereduce
+            self._noisereduce = noisereduce
+        except ImportError:
+            logger.info("noisereduce not installed, denoising disabled")
+
+    def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply spectral denoising. Falls back to passthrough if noisereduce unavailable."""
+        if self._noisereduce is None or audio.size == 0:
+            return audio
+        try:
+            return self._noisereduce.reduce_noise(
+                y=audio, sr=sample_rate,
+                prop_decrease=self.strength,
+                stationary=True,
+            ).astype(np.float32)
+        except Exception as e:
+            logger.warning(f"Denoising failed, passing through: {e}")
+            return audio
+
+
 class AudioProcessor:
     """Audio processing operations."""
 
@@ -393,7 +425,7 @@ class AudioPipeline:
         self._gate = NoiseGate(threshold_db=config.noise_gate_threshold_db) if config.noise_gate_enabled else None
         self._agc = AGC(target_db=config.agc_target_db, max_gain_db=config.agc_max_gain_db) if config.agc_enabled else None
         self._limiter = PeakLimiter(ceiling_db=config.limiter_ceiling_db) if config.limiter_enabled else None
-        # Denoiser added in Task 1.5
+        self._denoiser = Denoiser(strength=config.denoising_strength) if config.denoising_enabled else None
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Process audio through the pipeline."""
@@ -402,7 +434,8 @@ class AudioPipeline:
             result = self._gate.process(result, sample_rate)
         if self._agc:
             result = self._agc.process(result, sample_rate)
-        # Denoiser slot: Task 1.5
+        if self._denoiser:
+            result = self._denoiser.process(result, sample_rate)
         if self._limiter:
             result = self._limiter.process(result)
         return result.astype(np.float32)

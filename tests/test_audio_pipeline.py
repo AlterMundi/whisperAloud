@@ -266,6 +266,62 @@ class TestAudioPipeline:
         ceiling = 10 ** (-1.0 / 20.0)
         assert np.max(np.abs(result)) <= ceiling + 0.001, "Limiter should cap AGC output"
 
+    def test_pipeline_with_denoiser_enabled(self):
+        """Pipeline should include denoiser when enabled."""
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig(
+            noise_gate_enabled=False,
+            agc_enabled=False,
+            denoising_enabled=True,
+            denoising_strength=0.3,
+            limiter_enabled=False,
+        )
+        pipeline = AudioPipeline(config)
+        assert pipeline._denoiser is not None
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        audio = (np.sin(2 * np.pi * 440 * t) * 0.3).astype(np.float32)
+        result = pipeline.process(audio, sample_rate=sr)
+        assert result.shape == audio.shape
+
+
+class TestDenoiser:
+    """Tests for spectral denoising."""
+
+    def test_denoiser_processes_audio(self):
+        """Denoiser should process audio and return same shape."""
+        from whisper_aloud.audio.audio_processor import Denoiser
+
+        denoiser = Denoiser(strength=0.5)
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        audio = (np.sin(2 * np.pi * 440 * t) * 0.3 + np.random.randn(sr).astype(np.float32) * 0.05).astype(np.float32)
+        result = denoiser.process(audio, sample_rate=sr)
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+
+    def test_denoiser_graceful_without_noisereduce(self):
+        """If noisereduce not available, should pass through unchanged."""
+        from whisper_aloud.audio.audio_processor import Denoiser
+
+        denoiser = Denoiser(strength=0.5)
+        audio = np.random.randn(1600).astype(np.float32) * 0.3
+        # Simulate noisereduce not being available
+        denoiser._noisereduce = None
+        result = denoiser.process(audio, sample_rate=16000)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_denoiser_handles_empty_audio(self):
+        """Empty audio should pass through."""
+        from whisper_aloud.audio.audio_processor import Denoiser
+
+        denoiser = Denoiser()
+        empty = np.array([], dtype=np.float32)
+        result = denoiser.process(empty, sample_rate=16000)
+        assert result.size == 0
+
 
 class TestAudioProcessingConfig:
     """Tests for AudioProcessingConfig in WhisperAloudConfig."""
