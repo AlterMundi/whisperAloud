@@ -8,6 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
+from gi.repository import GLib
 from pydbus import SessionBus
 
 from ..audio.recorder import AudioRecorder, RecordingState
@@ -19,41 +20,74 @@ from ..persistence import HistoryManager
 
 logger = logging.getLogger(__name__)
 
+
 class WhisperAloudService:
     """
     <node>
-      <interface name="org.fede.whisperAloud.Control">
-        <method name="StartRecording"/>
+      <interface name="org.fede.whisperaloud.Control">
+        <method name="StartRecording">
+          <arg direction="out" type="b" name="success"/>
+        </method>
         <method name="StopRecording">
-          <arg type="s" direction="out"/>
+          <arg direction="out" type="s" name="text"/>
         </method>
         <method name="ToggleRecording">
-          <arg type="s" direction="out"/>
+          <arg direction="out" type="s" name="state"/>
+        </method>
+        <method name="CancelRecording">
+          <arg direction="out" type="b" name="success"/>
         </method>
         <method name="GetStatus">
-          <arg type="s" direction="out"/>
+          <arg direction="out" type="a{sv}" name="status"/>
         </method>
-        <method name="Quit"/>
-        <signal name="StatusChanged">
-          <arg type="s"/>
+        <method name="GetHistory">
+          <arg direction="in" type="u" name="limit"/>
+          <arg direction="out" type="aa{sv}" name="entries"/>
+        </method>
+        <method name="GetConfig">
+          <arg direction="out" type="a{sv}" name="config"/>
+        </method>
+        <method name="SetConfig">
+          <arg direction="in" type="a{sv}" name="changes"/>
+          <arg direction="out" type="b" name="success"/>
+        </method>
+        <method name="ReloadConfig">
+          <arg direction="out" type="b" name="success"/>
+        </method>
+        <method name="Quit">
+          <arg direction="out" type="b" name="success"/>
+        </method>
+        <signal name="RecordingStarted"/>
+        <signal name="RecordingStopped"/>
+        <signal name="TranscriptionReady">
+          <arg type="s" name="text"/>
+          <arg type="a{sv}" name="meta"/>
         </signal>
-        <signal name="TranscriptionCompleted">
-           <arg type="s"/>
-           <arg type="i"/>
-         </signal>
-         <signal name="HistoryUpdated">
-           <arg type="i"/>
-         </signal>
-         <method name="ReloadConfig">
-           <arg type="s" direction="out"/>
-         </method>
-         <signal name="ConfigReloaded"/>
-         <signal name="ErrorOccurred">
-           <arg type="s"/>
-         </signal>
+        <signal name="LevelUpdate">
+          <arg type="d" name="level"/>
+        </signal>
+        <signal name="StatusChanged">
+          <arg type="s" name="state"/>
+        </signal>
+        <signal name="ConfigChanged">
+          <arg type="a{sv}" name="changes"/>
+        </signal>
+        <signal name="Error">
+          <arg type="s" name="code"/>
+          <arg type="s" name="message"/>
+        </signal>
       </interface>
     </node>
     """
+
+    # pydbus signals
+    RecordingStarted = signal()
+    RecordingStopped = signal()
+    TranscriptionReady = signal()
+    LevelUpdate = signal()
+    StatusChanged = signal()
+    ConfigChanged = signal()
+    Error = signal()
 
     def __init__(self, config: Optional[WhisperAloudConfig] = None):
         """Initialize the service."""
@@ -69,13 +103,14 @@ class WhisperAloudService:
         # State
         self._shutdown = False
         self._transcribing = False
+        self._loop = None
 
         # GNOME integration
         self.notifications: Optional[NotificationManager] = None
 
         # Initialize components
         self._init_components()
-        
+
         # Initialize notifications
         try:
             self.notifications = NotificationManager(self.config)
@@ -105,8 +140,8 @@ class WhisperAloudService:
         try:
             # Publish service on D-Bus
             bus = SessionBus()
-            bus.publish("org.fede.whisperAloud", self)
-            logger.info("D-Bus service published")
+            bus.publish("org.fede.whisperaloud", self)
+            logger.info("D-Bus service published as org.fede.whisperaloud")
 
             # Keep the service running
             def signal_handler(signum, frame):
@@ -115,16 +150,11 @@ class WhisperAloudService:
 
             signal_module.signal(signal_module.SIGTERM, signal_handler)
             signal_module.signal(signal_module.SIGINT, signal_handler)
-            
-            # Use GLib main loop if available, otherwise pause
-            try:
-                from gi.repository import GLib
-                loop = GLib.MainLoop()
-                self._loop = loop
-                loop.run()
-            except ImportError:
-                logger.warning("GLib not available, using signal.pause()")
-                signal_module.pause()
+
+            # Use GLib main loop
+            loop = GLib.MainLoop()
+            self._loop = loop
+            loop.run()
 
         except Exception as e:
             import traceback
@@ -134,47 +164,53 @@ class WhisperAloudService:
         finally:
             self._cleanup()
 
-    def StartRecording(self) -> None:
+    # ─── D-Bus Methods ───────────────────────────────────────────────────
+
+    def StartRecording(self) -> bool:
         """Start audio recording."""
         if not self.recorder:
-            raise WhisperAloudError("Recorder not initialized")
+            self.Error("recorder_error", "Recorder not initialized")
+            return False
 
         try:
             self.recorder.start()
-            self.StatusChanged(self.recorder.state.value)
+            self.RecordingStarted()
+            self.StatusChanged("recording")
             if self.notifications:
                 self.notifications.show_recording_started()
             logger.info("Recording started via D-Bus")
+            return True
         except Exception as e:
-            self.ErrorOccurred(str(e))
-            raise
+            self.Error("recording_failed", str(e))
+            return False
 
     def StopRecording(self) -> str:
         """Stop recording and start async transcription."""
         if not self.recorder or not self.transcriber:
-            raise WhisperAloudError("Components not initialized")
+            self.Error("component_error", "Components not initialized")
+            return "error"
 
         try:
-            # Stop recording
             audio_data = self.recorder.stop()
-            self.StatusChanged(self.recorder.state.value)
+            self.RecordingStopped()
+            self.StatusChanged("transcribing")
 
             # Start transcription in background thread (non-blocking)
             self._transcribing = True
-            self.StatusChanged("transcribing")
             self.executor.submit(self._transcribe_and_emit, audio_data)
 
             # Return immediately - result will be emitted via signal
             return "transcribing"
 
         except Exception as e:
-            self.ErrorOccurred(str(e))
-            raise
+            self.Error("stop_failed", str(e))
+            return "error"
 
     def ToggleRecording(self) -> str:
         """Toggle recording state."""
         if not self.recorder:
-            raise WhisperAloudError("Recorder not initialized")
+            self.Error("recorder_error", "Recorder not initialized")
+            return "error"
 
         if self.recorder.is_recording:
             return self.StopRecording()
@@ -182,15 +218,79 @@ class WhisperAloudService:
             self.StartRecording()
             return "recording"
 
-    def GetStatus(self) -> str:
-        """Get current status."""
-        if not self.recorder:
-            return "error"
-        if self._transcribing:
-            return "transcribing"
-        return self.recorder.state.value
+    def CancelRecording(self) -> bool:
+        """Cancel active recording without transcribing."""
+        if not self.recorder or not self.recorder.is_recording:
+            return False
+        self.recorder.cancel()
+        self.StatusChanged("idle")
+        return True
 
-    def ReloadConfig(self) -> str:
+    def GetStatus(self) -> dict:
+        """Get current service status as a dict."""
+        from whisper_aloud import __version__
+        state = "transcribing" if self._transcribing else (
+            self.recorder.state.value if self.recorder else "error"
+        )
+        return {
+            "state": GLib.Variant("s", state),
+            "version": GLib.Variant("s", __version__),
+            "model": GLib.Variant("s", self.config.model.name),
+            "device": GLib.Variant("s", self.config.model.device),
+        }
+
+    def GetHistory(self, limit: int) -> list:
+        """Return recent history entries."""
+        entries = self.history_manager.get_recent(limit=limit)
+        return [
+            {
+                "id": GLib.Variant("i", e.id if e.id is not None else 0),
+                "text": GLib.Variant("s", e.text),
+                "timestamp": GLib.Variant("s", str(e.timestamp)),
+                "duration": GLib.Variant("d", e.duration or 0.0),
+                "language": GLib.Variant("s", e.language or ""),
+            }
+            for e in entries
+        ]
+
+    def GetConfig(self) -> dict:
+        """Return current configuration flattened to GLib variants."""
+        d = self.config.to_dict()
+        result = {}
+        for section, values in d.items():
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                flat_key = f"{section}.{key}"
+                if isinstance(value, bool):
+                    result[flat_key] = GLib.Variant("b", value)
+                elif isinstance(value, int):
+                    result[flat_key] = GLib.Variant("i", value)
+                elif isinstance(value, float):
+                    result[flat_key] = GLib.Variant("d", value)
+                elif value is not None:
+                    result[flat_key] = GLib.Variant("s", str(value))
+        return result
+
+    def SetConfig(self, changes: dict) -> bool:
+        """Apply configuration changes."""
+        try:
+            config_dict = self.config.to_dict()
+            for key, variant in changes.items():
+                section, field = key.split(".", 1)
+                if section in config_dict and field in config_dict[section]:
+                    config_dict[section][field] = variant
+            new_config = WhisperAloudConfig.from_dict(config_dict)
+            new_config.validate()
+            self.config = new_config
+            self.config.save()
+            self.ConfigChanged(changes)
+            return True
+        except Exception as e:
+            self.Error("config_invalid", str(e))
+            return False
+
+    def ReloadConfig(self) -> bool:
         """Reload configuration from file and apply changes."""
         try:
             logger.info("Reloading configuration...")
@@ -198,7 +298,7 @@ class WhisperAloudService:
 
             # Check if model config changed
             if (new_config.model.name != self.config.model.name or
-                new_config.model.device != self.config.model.device):
+                    new_config.model.device != self.config.model.device):
                 logger.info("Model config changed, reloading...")
                 self.transcriber = Transcriber(new_config)
                 self.transcriber.load_model()
@@ -208,31 +308,30 @@ class WhisperAloudService:
                 logger.info("Audio config changed, recreating recorder...")
                 self.recorder = AudioRecorder(new_config.audio)
 
+            old_config = self.config
             self.config = new_config
-            self.ConfigReloaded()
+            self.ConfigChanged({})
             logger.info("Configuration reloaded successfully")
-            return "OK"
+            return True
 
         except Exception as e:
             logger.error(f"Failed to reload config: {e}")
-            return f"ERROR: {e}"
+            self.Error("reload_failed", str(e))
+            return False
 
-    def Quit(self) -> None:
+    def Quit(self) -> bool:
         """Quit the service."""
         logger.info("Quit requested via D-Bus")
         self._shutdown = True
-        
-        if hasattr(self, '_loop'):
+
+        if self._loop:
             self._loop.quit()
         else:
             import os
             os._exit(0)
+        return True
 
-    StatusChanged = signal()
-    TranscriptionCompleted = signal()
-    HistoryUpdated = signal()
-    ConfigReloaded = signal()
-    ErrorOccurred = signal()
+    # ─── Internal helpers ────────────────────────────────────────────────
 
     def _transcribe_audio(self, audio_data):
         """Transcribe audio data (runs in thread)."""
@@ -252,30 +351,29 @@ class WhisperAloudService:
                     session_id=self.session_id
                 )
                 logger.info(f"Transcription saved to database: ID {entry_id}")
-
-                # Emit signals with entry ID
-                self._transcribing = False
-                self.StatusChanged("idle")
-                self.TranscriptionCompleted(result.text, entry_id)
-                self.HistoryUpdated(entry_id)  # Nueva señal para sincronización
-                if self.notifications:
-                    self.notifications.show_transcription_completed(result.text)
-                logger.info("Transcription completed and signals emitted")
-
             except Exception as e:
                 logger.error(f"Failed to save history: {e}")
-                # Continue with signal emission even if history save fails
-                self._transcribing = False
-                self.StatusChanged("idle")
-                self.TranscriptionCompleted(result.text, -1)  # -1 indicates save failed
-                if self.notifications:
-                    self.notifications.show_transcription_completed(result.text)
+                entry_id = -1
+
+            meta = {
+                "duration": GLib.Variant("d", result.duration),
+                "language": GLib.Variant("s", result.language),
+                "confidence": GLib.Variant("d", result.confidence),
+                "history_id": GLib.Variant("i", entry_id),
+            }
+            self._transcribing = False
+            self.StatusChanged("idle")
+            self.TranscriptionReady(result.text, meta)
+
+            if self.notifications:
+                self.notifications.show_transcription_completed(result.text)
+            logger.info("Transcription completed and signals emitted")
 
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             self._transcribing = False
             self.StatusChanged("idle")
-            self.ErrorOccurred(str(e))
+            self.Error("transcription_failed", str(e))
             if self.notifications:
                 self.notifications.show_error(str(e))
 
