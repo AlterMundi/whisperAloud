@@ -42,7 +42,7 @@ sys.modules.setdefault('pydbus', _fake_pydbus)
 sys.modules.setdefault('pydbus.generic', _fake_pydbus_generic)
 
 
-def _make_daemon(indicator_fails=False):
+def _make_daemon(indicator_fails=False, hotkey_fails=False):
     """Create a daemon instance with all external dependencies mocked."""
     with patch('whisper_aloud.service.daemon.SessionBus'), \
          patch('whisper_aloud.service.daemon.AudioRecorder'), \
@@ -51,6 +51,7 @@ def _make_daemon(indicator_fails=False):
          patch('whisper_aloud.service.daemon.HistoryManager'), \
          patch('whisper_aloud.service.daemon.ClipboardManager'), \
          patch('whisper_aloud.service.daemon.WhisperAloudIndicator') as mock_ind_cls, \
+         patch('whisper_aloud.service.daemon.HotkeyManager') as mock_hk_cls, \
          patch('whisper_aloud.service.daemon.GLib') as mock_glib:
         # GLib.Variant passthrough for test assertions
         mock_glib.Variant = lambda t, v: v
@@ -58,12 +59,19 @@ def _make_daemon(indicator_fails=False):
         if indicator_fails:
             mock_ind_cls.side_effect = Exception("no tray available")
 
+        if hotkey_fails:
+            mock_hk_cls.side_effect = Exception("hotkey init failed")
+        else:
+            mock_hk_cls.return_value.available = True
+            mock_hk_cls.return_value.backend = "keybinder"
+
         from whisper_aloud.service.daemon import WhisperAloudService
         from whisper_aloud.config import WhisperAloudConfig
         config = WhisperAloudConfig()
         service = WhisperAloudService(config=config)
         service._mock_glib = mock_glib
         service._mock_indicator_cls = mock_ind_cls
+        service._mock_hotkey_cls = mock_hk_cls
         return service
 
 
@@ -360,6 +368,41 @@ class TestDaemonMethods:
         result = daemon.StartRecording()
         assert result is True
         daemon.recorder.start.assert_called_once()
+
+    # ─── Task 4.4: Hotkey integration tests ──────────────────────────────
+
+    def test_daemon_creates_hotkey_manager(self, daemon):
+        """Hotkey manager should be created during __init__."""
+        assert daemon.hotkey_manager is not None
+        daemon._mock_hotkey_cls.assert_called_once()
+
+    def test_hotkey_manager_registers_toggle(self, daemon):
+        """Register should be called with config accel on available backend."""
+        daemon.hotkey_manager.register.assert_called_once_with(
+            daemon.config.hotkey.toggle_recording,
+            daemon.ToggleRecording,
+        )
+
+    def test_daemon_runs_without_hotkey(self):
+        """Daemon should work normally if hotkey manager fails to init."""
+        daemon = _make_daemon(hotkey_fails=True)
+        assert daemon.hotkey_manager is None
+        # Core operations should still work
+        daemon.recorder.is_recording = False
+        result = daemon.StartRecording()
+        assert result is True
+        daemon.recorder.start.assert_called_once()
+
+    def test_get_status_includes_hotkey_backend(self, daemon):
+        """GetStatus should include hotkey_backend key."""
+        daemon.recorder.state = MagicMock()
+        daemon.recorder.state.value = "idle"
+        daemon._transcribing = False
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            result = daemon.GetStatus()
+        assert "hotkey_backend" in result
+        assert result["hotkey_backend"] == "keybinder"
 
 
 class TestDaemonIntrospection:

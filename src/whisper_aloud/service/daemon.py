@@ -18,6 +18,7 @@ from ..exceptions import WhisperAloudError
 from ..transcriber import Transcriber
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
+from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,21 @@ class WhisperAloudService:
         except Exception as e:
             logger.warning(f"Failed to initialize indicator: {e}")
             self.indicator = None
+
+        # Initialize hotkey manager
+        try:
+            self.hotkey_manager = HotkeyManager()
+            if self.hotkey_manager.available:
+                self.hotkey_manager.register(
+                    self.config.hotkey.toggle_recording,
+                    self.ToggleRecording,
+                )
+                logger.info(f"Hotkey registered: {self.config.hotkey.toggle_recording} (backend: {self.hotkey_manager.backend})")
+            else:
+                logger.info("No hotkey backend available, D-Bus methods only")
+        except Exception as e:
+            logger.warning(f"Failed to initialize hotkey manager: {e}")
+            self.hotkey_manager = None
 
         # Initialize notifications
         try:
@@ -268,6 +284,7 @@ class WhisperAloudService:
             "version": GLib.Variant("s", __version__),
             "model": GLib.Variant("s", self.config.model.name),
             "device": GLib.Variant("s", self.config.model.device),
+            "hotkey_backend": GLib.Variant("s", self.hotkey_manager.backend if self.hotkey_manager else "none"),
         }
 
     def GetHistory(self, limit: int) -> list:
@@ -470,6 +487,10 @@ class WhisperAloudService:
         logger.info("Cleaning up service resources")
 
         self._stop_level_timer()
+
+        # Unregister hotkeys
+        if self.hotkey_manager:
+            self.hotkey_manager.unregister()
 
         # Shutdown executor
         self.executor.shutdown(wait=True)

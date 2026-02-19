@@ -151,6 +151,13 @@ class PersistenceConfig:
 
 
 @dataclass
+class HotkeyConfig:
+    """Configuration for global hotkey."""
+    toggle_recording: str = "<Super><Alt>r"
+    cancel_recording: str = "<Super><Alt>Escape"
+
+
+@dataclass
 class AudioProcessingConfig:
     """Configuration for audio processing pipeline."""
     noise_gate_enabled: bool = True
@@ -177,6 +184,7 @@ class WhisperAloudConfig:
     clipboard: ClipboardConfig = field(default_factory=ClipboardConfig)
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     audio_processing: AudioProcessingConfig = field(default_factory=AudioProcessingConfig)
+    hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for serialization."""
@@ -233,6 +241,10 @@ class WhisperAloudConfig:
                 "limiter_enabled": self.audio_processing.limiter_enabled,
                 "limiter_ceiling_db": self.audio_processing.limiter_ceiling_db,
             },
+            "hotkey": {
+                "toggle_recording": self.hotkey.toggle_recording,
+                "cancel_recording": self.hotkey.cancel_recording,
+            },
         }
 
     @classmethod
@@ -271,6 +283,11 @@ class WhisperAloudConfig:
             for key, value in data["audio_processing"].items():
                 if hasattr(config.audio_processing, key):
                     setattr(config.audio_processing, key, value)
+
+        if "hotkey" in data:
+            for key, value in data["hotkey"].items():
+                if hasattr(config.hotkey, key):
+                    setattr(config.hotkey, key, value)
 
         return config
 
