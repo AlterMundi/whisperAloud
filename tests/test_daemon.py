@@ -1,6 +1,7 @@
 """Tests for WhisperAloud D-Bus daemon service."""
 import sys
 import pytest
+import numpy as np
 from unittest.mock import MagicMock, patch
 
 
@@ -48,6 +49,7 @@ def _make_daemon():
          patch('whisper_aloud.service.daemon.Transcriber'), \
          patch('whisper_aloud.service.daemon.NotificationManager'), \
          patch('whisper_aloud.service.daemon.HistoryManager'), \
+         patch('whisper_aloud.service.daemon.ClipboardManager'), \
          patch('whisper_aloud.service.daemon.GLib') as mock_glib:
         # GLib.Variant passthrough for test assertions
         mock_glib.Variant = lambda t, v: v
@@ -206,6 +208,105 @@ class TestDaemonMethods:
         id_val = result[0]["id"]
         id_int = id_val if isinstance(id_val, int) else int(str(id_val))
         assert id_int == 1
+
+
+    # ─── Task 2.2: Level tracking tests ──────────────────────────────────
+
+    def test_start_recording_starts_level_timer(self, daemon):
+        """StartRecording should start the level emission timer."""
+        daemon.recorder.is_recording = False
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            daemon.StartRecording()
+            mock_glib.timeout_add.assert_called_once_with(100, daemon._emit_level)
+
+    def test_stop_recording_stops_level_timer(self, daemon):
+        """StopRecording should stop the level timer."""
+        daemon.recorder.is_recording = True
+        daemon.recorder.stop.return_value = np.zeros(16000, dtype=np.float32)
+        daemon._level_timer_id = 42
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            daemon.StopRecording()
+            mock_glib.source_remove.assert_called_once_with(42)
+        assert daemon._level_timer_id is None
+
+    def test_cancel_recording_stops_level_timer(self, daemon):
+        """CancelRecording should stop the level timer."""
+        daemon.recorder.is_recording = True
+        daemon._level_timer_id = 42
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            daemon.CancelRecording()
+            mock_glib.source_remove.assert_called_once_with(42)
+        assert daemon._level_timer_id is None
+
+    def test_level_callback_tracks_peak(self, daemon):
+        """Level callback should track peak level."""
+        from whisper_aloud.audio.level_meter import AudioLevel
+        level = AudioLevel(rms=-20.0, peak=0.8, db=-2.0)
+        daemon._on_level(level)
+        assert daemon._peak_level == 0.8
+        level2 = AudioLevel(rms=-25.0, peak=0.5, db=-6.0)
+        daemon._on_level(level2)
+        assert daemon._peak_level == 0.8  # Still 0.8 (peak tracking)
+
+    def test_emit_level_resets_peak(self, daemon):
+        """_emit_level should emit current peak and reset to 0."""
+        daemon._peak_level = 0.75
+        result = daemon._emit_level()
+        assert result is True  # Keep timer running
+        daemon.LevelUpdate.assert_called_once_with(0.75)
+        assert daemon._peak_level == 0.0
+
+    # ─── Task 2.3: SIGTERM handler + clipboard tests ─────────────────────
+
+    def test_cancel_recording_on_sigterm(self, daemon):
+        """SIGTERM during recording should cancel recording."""
+        daemon.recorder.is_recording = True
+        daemon._loop = MagicMock()
+        daemon._signal_handler(15, None)  # SIGTERM
+        daemon.recorder.cancel.assert_called_once()
+        daemon._loop.quit.assert_called_once()
+
+    def test_sigterm_when_not_recording(self, daemon):
+        """SIGTERM when idle should just quit cleanly."""
+        daemon.recorder.is_recording = False
+        daemon._loop = MagicMock()
+        daemon._signal_handler(15, None)
+        daemon.recorder.cancel.assert_not_called()
+        daemon._loop.quit.assert_called_once()
+
+    def test_clipboard_copy_after_transcription(self, daemon):
+        """Transcription should be copied to clipboard when auto_copy enabled."""
+        daemon.config.clipboard.auto_copy = True
+        daemon.clipboard_manager = MagicMock()
+        # Create a mock transcription result
+        mock_result = MagicMock()
+        mock_result.text = "Hello world"
+        mock_result.duration = 1.0
+        mock_result.language = "en"
+        mock_result.confidence = 0.95
+        daemon.transcriber.transcribe_numpy.return_value = mock_result
+        daemon.history_manager.add_transcription.return_value = 1
+
+        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+        daemon.clipboard_manager.copy.assert_called_once_with("Hello world")
+
+    def test_clipboard_not_called_when_disabled(self, daemon):
+        """Clipboard copy should be skipped when auto_copy is disabled."""
+        daemon.config.clipboard.auto_copy = False
+        daemon.clipboard_manager = MagicMock()
+        mock_result = MagicMock()
+        mock_result.text = "Hello world"
+        mock_result.duration = 1.0
+        mock_result.language = "en"
+        mock_result.confidence = 0.95
+        daemon.transcriber.transcribe_numpy.return_value = mock_result
+        daemon.history_manager.add_transcription.return_value = 1
+
+        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+        daemon.clipboard_manager.copy.assert_not_called()
 
 
 class TestDaemonIntrospection:
