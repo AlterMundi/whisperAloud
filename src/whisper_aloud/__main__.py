@@ -31,7 +31,7 @@ def check_service_running() -> bool:
             "/org/freedesktop/DBus",
             "org.freedesktop.DBus",
             "GetNameOwner",
-            GLib.Variant("(s)", ("org.fede.whisperAloud",)),
+            GLib.Variant("(s)", ("org.fede.whisperaloud",)),
             GLib.VariantType("(s)"),
             Gio.DBusCallFlags.NONE,
             -1,
@@ -47,7 +47,7 @@ def call_service_method(method_name: str, *args):
     try:
         from pydbus import SessionBus
         bus = SessionBus()
-        service = bus.get("org.fede.whisperAloud")
+        service = bus.get("org.fede.whisperaloud")
 
         # Call the method
         method = getattr(service, method_name)
@@ -94,6 +94,9 @@ def handle_daemon_command(args) -> int:
                 elif args.command == 'reload':
                     result = call_service_method("ReloadConfig")
                     print(f"Config reload: {result}")
+                elif args.command == 'cancel':
+                    result = call_service_method("CancelRecording")
+                    print("Recording cancelled" if result else "Not recording")
                 else:
                     print(f"Unknown command: {args.command}", file=sys.stderr)
                     return 1
@@ -223,6 +226,7 @@ Examples:
   whisper-aloud status
   whisper-aloud toggle
   whisper-aloud reload
+  whisper-aloud cancel
   whisper-aloud quit
 
   # Configuration
@@ -280,7 +284,7 @@ Examples:
         return handle_daemon_command(args)
 
     # Parse positional argument - could be command or audio file
-    daemon_commands = ['start', 'stop', 'status', 'toggle', 'quit', 'reload', 'config']
+    daemon_commands = ['start', 'stop', 'status', 'toggle', 'quit', 'reload', 'cancel', 'config']
 
     if args.positional:
         if args.positional in daemon_commands:

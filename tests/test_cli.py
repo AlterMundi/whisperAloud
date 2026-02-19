@@ -93,3 +93,12 @@ def test_cli_keyboard_interrupt(mock_transcriber_class):
         with patch.object(Path, 'exists', return_value=True):
             exit_code = main()
             assert exit_code == 130
+
+
+def test_cli_uses_correct_bus_name():
+    """CLI should use org.fede.whisperaloud bus name."""
+    import whisper_aloud.__main__ as cli
+    import inspect
+    source = inspect.getsource(cli)
+    assert "org.fede.whisperaloud" in source
+    assert "org.fede.whisperAloud" not in source
