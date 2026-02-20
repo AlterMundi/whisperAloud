@@ -2,7 +2,8 @@
 
 import logging
 import textwrap
-from gi.repository import Gtk, GObject, Pango, Gdk
+
+from gi.repository import Gdk, GObject, Gtk, Pango
 
 from ..persistence.models import HistoryEntry
 
@@ -149,7 +150,7 @@ class HistoryItem(Gtk.ListBoxRow):
         """
         is_active = button.get_active()
         button.set_icon_name("starred-symbolic" if is_active else "non-starred-symbolic")
-        
+
         # Only emit if state actually changed (avoid loops if updated externally)
         if is_active != self.entry.favorite:
             self.entry.favorite = is_active
@@ -158,13 +159,13 @@ class HistoryItem(Gtk.ListBoxRow):
     def _setup_context_menu(self) -> None:
         """Set up right-click context menu."""
         # Create popover menu
-        menu = Gtk.PopoverMenu()
-        
+        Gtk.PopoverMenu()
+
         # Create menu model
         # Note: In GTK4, we typically use Gio.Menu, but for simplicity in this custom widget
         # we might use a Gtk.Popover with buttons if Gio.Menu is too complex to set up here.
         # However, Gtk.ListBoxRow doesn't easily support right-click without an EventController.
-        
+
         controller = Gtk.GestureClick()
         controller.set_button(0)  # Listen to all buttons
         controller.connect("pressed", self._on_mouse_pressed)
@@ -173,7 +174,7 @@ class HistoryItem(Gtk.ListBoxRow):
     def _on_mouse_pressed(self, gesture, n_press, x, y):
         """Handle mouse press for context menu."""
         from gi.repository import Gdk
-        
+
         # Check for right click (button 3)
         button = gesture.get_current_button()
         if button == Gdk.BUTTON_SECONDARY:
@@ -185,16 +186,16 @@ class HistoryItem(Gtk.ListBoxRow):
         popover = Gtk.Popover()
         popover.set_parent(self)
         popover.set_pointing_to(Gdk.Rectangle(x=int(x), y=int(y), width=1, height=1))
-        
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        
+
         # Delete button
         delete_btn = Gtk.Button(label="Delete")
         delete_btn.add_css_class("flat")
         delete_btn.add_css_class("wa-ghost")
         delete_btn.connect("clicked", lambda b: self._on_delete_clicked(popover))
         box.append(delete_btn)
-        
+
         popover.set_child(box)
         popover.popup()
 

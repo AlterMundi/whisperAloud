@@ -1,13 +1,14 @@
 """Tests for transcriber functionality."""
 
 import math
-import numpy as np
-import pytest
 from unittest.mock import Mock, patch
 
+import numpy as np
+import pytest
+
 from whisper_aloud.config import WhisperAloudConfig
-from whisper_aloud.transcriber import Transcriber, TranscriptionResult
 from whisper_aloud.exceptions import AudioFormatError
+from whisper_aloud.transcriber import Transcriber, TranscriptionResult
 
 
 def test_transcriber_lazy_loading():
@@ -215,7 +216,7 @@ def test_transcriber_initialization_logging():
     """Test that transcriber logs initialization."""
     config = WhisperAloudConfig.load()
     with patch('whisper_aloud.transcriber.logger') as mock_logger:
-        transcriber = Transcriber(config)
+        Transcriber(config)
         mock_logger.info.assert_called_with(
             "Transcriber initialized with model: %s, device: %s",
             config.model.name, config.model.device

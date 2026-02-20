@@ -1,8 +1,9 @@
 """Integration tests for WhisperAloud (optional, requires real model)."""
 
 import os
-import pytest
 from pathlib import Path
+
+import pytest
 
 from whisper_aloud.config import WhisperAloudConfig
 from whisper_aloud.transcriber import Transcriber

@@ -1,9 +1,7 @@
 """Audio file archiving with FLAC compression and deduplication."""
 
 import logging
-import shutil
 from pathlib import Path
-from typing import Optional, Set
 
 import numpy as np
 import soundfile as sf

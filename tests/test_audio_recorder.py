@@ -1,11 +1,12 @@
 """Tests for audio recorder."""
 
-import numpy as np
-import pytest
 from unittest.mock import Mock, patch
 
-from whisper_aloud.config import AudioConfig
+import numpy as np
+import pytest
+
 from whisper_aloud.audio import AudioRecorder, RecordingState
+from whisper_aloud.config import AudioConfig
 from whisper_aloud.exceptions import AudioRecordingError
 
 
@@ -28,7 +29,7 @@ def test_recorder_with_callback():
         nonlocal callback_called
         callback_called = True
 
-    recorder = AudioRecorder(config, level_callback=level_callback)
+    AudioRecorder(config, level_callback=level_callback)
     assert not callback_called  # Not called during init
 
 

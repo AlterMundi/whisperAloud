@@ -1,12 +1,12 @@
 """Shared pytest fixtures for WhisperAloud tests."""
 
 import json
-import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from whisper_aloud.persistence.database import TranscriptionDatabase
 from whisper_aloud.persistence.models import HistoryEntry

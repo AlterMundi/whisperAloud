@@ -7,7 +7,7 @@ Backend detection order:
 """
 
 import logging
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 

@@ -1,13 +1,11 @@
 """Tests for CLI functionality."""
 
-import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from whisper_aloud.__main__ import main, daemon_main
+from whisper_aloud.__main__ import daemon_main, main
 
 
 def test_cli_help():
@@ -97,8 +95,9 @@ def test_cli_keyboard_interrupt(mock_transcriber_class):
 
 def test_cli_uses_correct_bus_name():
     """CLI should use org.fede.whisperaloud bus name."""
-    import whisper_aloud.__main__ as cli
     import inspect
+
+    import whisper_aloud.__main__ as cli
     source = inspect.getsource(cli)
     assert "org.fede.whisperaloud" in source
     assert "org.fede.whisperAloud" not in source

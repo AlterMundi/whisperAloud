@@ -1,12 +1,13 @@
 """Tests for WhisperAloud system tray indicator."""
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, call
 
 # Skip all tests in this module if AyatanaAppIndicator3 is not available
 try:
     import gi
     gi.require_version('AyatanaAppIndicator3', '0.1')
-    from gi.repository import AyatanaAppIndicator3 as _ai3
+    from gi.repository import AyatanaAppIndicator3  # noqa: F401
     _has_indicator = True
 except (ImportError, ValueError):
     _has_indicator = False
@@ -140,7 +141,7 @@ class TestIndicatorMenu:
              patch('whisper_aloud.service.indicator.AyatanaAppIndicator3', mock_ai3), \
              patch('whisper_aloud.service.indicator.Gtk', mock_gtk):
             from whisper_aloud.service.indicator import WhisperAloudIndicator
-            indicator = WhisperAloudIndicator(
+            WhisperAloudIndicator(
                 on_toggle=lambda: None,
                 on_quit=lambda: None,
             )
@@ -179,7 +180,7 @@ class TestIndicatorMenu:
              patch('whisper_aloud.service.indicator.AyatanaAppIndicator3', mock_ai3), \
              patch('whisper_aloud.service.indicator.Gtk', mock_gtk):
             from whisper_aloud.service.indicator import WhisperAloudIndicator
-            indicator = WhisperAloudIndicator(
+            WhisperAloudIndicator(
                 on_toggle=lambda: toggle_called.append(True),
                 on_quit=lambda: None,
             )
@@ -220,7 +221,7 @@ class TestIndicatorMenu:
              patch('whisper_aloud.service.indicator.AyatanaAppIndicator3', mock_ai3), \
              patch('whisper_aloud.service.indicator.Gtk', mock_gtk):
             from whisper_aloud.service.indicator import WhisperAloudIndicator
-            indicator = WhisperAloudIndicator(
+            WhisperAloudIndicator(
                 on_toggle=lambda: None,
                 on_quit=lambda: quit_called.append(True),
             )

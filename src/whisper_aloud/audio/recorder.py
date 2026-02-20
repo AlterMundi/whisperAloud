@@ -3,7 +3,6 @@
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional
 
@@ -11,10 +10,10 @@ import numpy as np
 import sounddevice as sd
 
 from ..config import AudioConfig, AudioProcessingConfig
-from ..exceptions import AudioRecordingError, AudioDeviceError
-from .device_manager import DeviceManager, AudioDevice
-from .level_meter import LevelMeter, AudioLevel
-from .audio_processor import AudioProcessor, AudioPipeline
+from ..exceptions import AudioDeviceError, AudioRecordingError
+from .audio_processor import AudioPipeline, AudioProcessor
+from .device_manager import AudioDevice, DeviceManager
+from .level_meter import AudioLevel, LevelMeter
 
 logger = logging.getLogger(__name__)
 

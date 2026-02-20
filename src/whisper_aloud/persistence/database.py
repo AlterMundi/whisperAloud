@@ -1,12 +1,12 @@
 """SQLite database for transcription history with FTS5 full-text search."""
 
-import sqlite3
 import json
 import logging
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Set
-from datetime import datetime, timedelta
-from contextlib import contextmanager
 
 from .models import HistoryEntry
 

@@ -1,18 +1,17 @@
 """High-level history management with optional audio archiving."""
 
-import logging
+import csv
 import hashlib
 import json
-import csv
-from typing import List, Optional
+import logging
 from pathlib import Path
-from datetime import datetime
+from typing import List, Optional
 
 import numpy as np
 
+from ..config import PersistenceConfig
 from .database import TranscriptionDatabase
 from .models import HistoryEntry
-from ..config import PersistenceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +109,7 @@ class HistoryManager:
             else:
                 entry_id = self.db.insert(entry)
                 logger.info(f"Added transcription {entry_id}: {entry.text[:50]}...")
-        except Exception as e:
+        except Exception:
             # Rollback: delete audio file if we saved a new one and it's not referenced
             if audio_saved and audio_path and self.audio_archive:
                 ref_count = self.db.count_audio_references(str(audio_path))

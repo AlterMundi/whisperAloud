@@ -6,23 +6,22 @@ from pathlib import Path
 from typing import Optional
 
 import gi
+
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib
+from gi.repository import GLib, Gtk
 
 from ..config import WhisperAloudConfig
-from .utils import AppState, format_duration
+from ..persistence.history_manager import HistoryManager
+from .error_handler import (
+    handle_model_load_error,
+)
+from .history_panel import HistoryPanel
 from .level_meter import LevelMeterPanel
 from .settings_dialog import SettingsDialog
 from .shortcuts_window import ShortcutsWindow
-from .history_panel import HistoryPanel
 from .sound_feedback import SoundFeedback
 from .status_bar import StatusBar
-from ..persistence.history_manager import HistoryManager
-from .error_handler import (
-    ErrorDialog,
-    ErrorSeverity,
-    handle_model_load_error,
-)
+from .utils import AppState, format_duration
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +267,7 @@ class MainWindow(Gtk.ApplicationWindow):
         controller: Gtk.EventControllerKey,
         keyval: int,
         keycode: int,
-        state: 'Gdk.ModifierType'
+        state: object
     ) -> bool:
         """
         Handle key press events.

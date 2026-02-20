@@ -3,10 +3,9 @@
 import json
 import logging
 import os
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, Any, Set
+from dataclasses import dataclass, field
 from pathlib import Path
-from copy import deepcopy
+from typing import Any, Dict, Optional, Set
 
 from .exceptions import ConfigurationError
 from .utils.validation_helpers import sanitize_language_code

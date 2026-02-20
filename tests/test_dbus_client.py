@@ -1,9 +1,6 @@
 """Tests for WhisperAloud D-Bus client wrapper."""
 import sys
-import json
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-
+from unittest.mock import MagicMock, patch
 
 # ── Bootstrap: patch pydbus and GLib before client module loads ──────────
 

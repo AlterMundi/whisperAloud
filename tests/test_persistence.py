@@ -1,13 +1,13 @@
 """Tests for persistence layer (database and history manager)."""
 
-import pytest
-import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from whisper_aloud.persistence.database import TranscriptionDatabase
-from whisper_aloud.persistence.models import HistoryEntry
+import numpy as np
+import pytest
+
 from whisper_aloud.persistence.audio_archive import AudioArchive
+from whisper_aloud.persistence.models import HistoryEntry
 
 
 class TestDatabaseSchema:
@@ -528,8 +528,8 @@ class TestHistoryManager:
     @pytest.fixture
     def manager(self, temp_db_path):
         """HistoryManager instance without audio archiving."""
-        from whisper_aloud.persistence import HistoryManager
         from whisper_aloud.config import PersistenceConfig
+        from whisper_aloud.persistence import HistoryManager
 
         config = PersistenceConfig(
             db_path=temp_db_path,
@@ -767,6 +767,7 @@ class TestHistoryManager:
     def test_cleanup_old(self, manager):
         """Test cleaning up old entries."""
         from datetime import datetime, timedelta
+
         from whisper_aloud.transcriber import TranscriptionResult
 
         # Add old entry
@@ -833,8 +834,8 @@ class TestHistoryManagerExport:
     @pytest.fixture
     def manager_with_data(self, temp_db_path):
         """HistoryManager with sample data."""
-        from whisper_aloud.persistence import HistoryManager
         from whisper_aloud.config import PersistenceConfig
+        from whisper_aloud.persistence import HistoryManager
         from whisper_aloud.transcriber import TranscriptionResult
 
         config = PersistenceConfig(
@@ -956,7 +957,7 @@ class TestAudioArchive:
     def test_archive_creation(self, tmp_path):
         """Test that archive directory is created."""
         archive_path = tmp_path / "audio_archive"
-        archive = AudioArchive(archive_path)
+        AudioArchive(archive_path)
 
         assert archive_path.exists()
         assert archive_path.is_dir()

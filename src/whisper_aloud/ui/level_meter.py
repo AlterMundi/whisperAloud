@@ -1,12 +1,12 @@
 """Audio level meter widget for real-time visualization."""
 
 import logging
-import math
-from typing import Optional
+from typing import Any
 
 import gi
+
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gdk
+from gi.repository import Gtk
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class LevelMeterWidget(Gtk.DrawingArea):
     def _draw(
         self,
         area: Gtk.DrawingArea,
-        ctx: 'cairo.Context',
+        ctx: Any,
         width: int,
         height: int
     ) -> None:
@@ -123,7 +123,7 @@ class LevelMeterWidget(Gtk.DrawingArea):
 
     def _draw_db_markers(
         self,
-        ctx: 'cairo.Context',
+        ctx: Any,
         x: float,
         y: float,
         width: float,

@@ -195,7 +195,7 @@ def handle_file_transcription(args) -> int:
         print(result.text)
 
         if args.verbose:
-            print(f"\n--- Metadata ---", file=sys.stderr)
+            print("\n--- Metadata ---", file=sys.stderr)
             print(f"Language: {result.language}", file=sys.stderr)
             print(f"Duration: {result.duration:.2f}s", file=sys.stderr)
             print(f"Processing time: {result.processing_time:.2f}s", file=sys.stderr)

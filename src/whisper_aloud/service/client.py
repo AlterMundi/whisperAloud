@@ -74,7 +74,7 @@ class WhisperAloudClient:
             self._bus = SessionBus()
 
         try:
-            from gi.repository import Gio, GLib
+            from gi.repository import Gio
             connection = self._bus.con  # underlying Gio.DBusConnection
 
             self._name_watch_id = Gio.bus_watch_name_on_connection(

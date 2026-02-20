@@ -10,7 +10,7 @@ try:
     import gi
     gi.require_version('Gtk', '3.0')
     gi.require_version('AyatanaAppIndicator3', '0.1')
-    from gi.repository import Gtk, AyatanaAppIndicator3
+    from gi.repository import AyatanaAppIndicator3, Gtk
     HAS_INDICATOR = True
 except (ImportError, ValueError) as e:
     HAS_INDICATOR = False

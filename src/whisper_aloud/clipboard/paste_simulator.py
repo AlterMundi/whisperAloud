@@ -5,7 +5,7 @@ import logging
 import os
 import subprocess
 import time
-from typing import Dict, Any
+from typing import Any, Dict
 
 from ..config import ClipboardConfig
 
@@ -58,7 +58,7 @@ class PasteSimulator:
         try:
             # ydotool keycodes: 29=Ctrl, 47=V
             # Format: keycode:1 (press), keycode:0 (release)
-            result = subprocess.run(
+            subprocess.run(
                 ['ydotool', 'key', '29:1', '47:1', '47:0', '29:0'],
                 timeout=self.config.timeout_seconds,
                 check=True,
@@ -93,7 +93,7 @@ class PasteSimulator:
             True if successful, False otherwise
         """
         try:
-            result = subprocess.run(
+            subprocess.run(
                 ['xdotool', 'key', 'ctrl+v'],
                 timeout=self.config.timeout_seconds,
                 check=True,

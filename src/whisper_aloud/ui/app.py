@@ -1,12 +1,12 @@
 """GTK4 application class for WhisperAloud."""
 
 import logging
-import sys
 from typing import Optional
 
 import gi
+
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gio, GLib
+from gi.repository import Gio, Gtk
 
 from .main_window import MainWindow
 from .styles import install_app_css

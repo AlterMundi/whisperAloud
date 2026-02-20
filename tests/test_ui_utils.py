@@ -1,11 +1,10 @@
 """Tests for UI utilities."""
 
-import pytest
 
 from whisper_aloud.ui.utils import (
     AppState,
-    format_duration,
     format_confidence,
+    format_duration,
     format_file_size,
 )
 

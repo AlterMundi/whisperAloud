@@ -4,7 +4,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
 from ..config import ClipboardConfig
 
@@ -114,7 +114,7 @@ class ClipboardManager:
             True if successful (clipboard or fallback)
         """
         try:
-            result = subprocess.run(
+            subprocess.run(
                 ['xclip', '-selection', 'clipboard'],
                 input=text.encode('utf-8'),
                 timeout=self.config.timeout_seconds,

@@ -1,6 +1,7 @@
 """Tests for configuration management."""
 
 import os
+
 import pytest
 
 from whisper_aloud.config import WhisperAloudConfig

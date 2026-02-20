@@ -1,11 +1,11 @@
 """Tests for audio device management."""
 
-import pytest
 from unittest.mock import Mock, patch
 
+import pytest
 import sounddevice as sd
 
-from whisper_aloud.audio import DeviceManager, AudioDevice
+from whisper_aloud.audio import AudioDevice, DeviceManager
 from whisper_aloud.exceptions import AudioDeviceError
 
 

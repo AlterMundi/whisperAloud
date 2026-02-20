@@ -3,12 +3,12 @@
 import logging
 import threading
 import time
-import psutil
-from typing import Optional
 
 import gi
+import psutil
+
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib
+from gi.repository import GLib, Gtk
 
 from .utils import format_file_size
 
@@ -90,7 +90,7 @@ class StatusBar(Gtk.Box):
 
                 # CPU usage
                 cpu_percent = process.cpu_percent(interval=None)
-                
+
                 # Update UI
                 GLib.idle_add(self._update_labels, mem_str, cpu_percent)
 

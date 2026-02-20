@@ -2,7 +2,6 @@
 
 import logging
 from enum import Enum
-from typing import Callable, Any
 
 logger = logging.getLogger(__name__)
 

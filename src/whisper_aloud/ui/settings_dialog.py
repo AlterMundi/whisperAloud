@@ -1,23 +1,21 @@
 """Settings dialog for WhisperAloud configuration."""
 
 import logging
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
 import gi
+
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib
+from gi.repository import GLib, Gtk
 
 from ..config import (
-    WhisperAloudConfig,
-    ModelConfig,
-    AudioConfig,
-    ClipboardConfig,
     NotificationConfig,
     PersistenceConfig,
+    WhisperAloudConfig,
 )
-from .error_handler import InputValidator, ValidationError
 from ..utils.validation_helpers import sanitize_language_code
+from .error_handler import InputValidator, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -681,7 +679,7 @@ class SettingsDialog(Gtk.Window):
                     raise ValidationError(f"Invalid language code '{lang}'. Must be a 2-letter ISO code (e.g., 'en', 'es').")
             else:
                 validated_lang = None
-            
+
             self._config.transcription.language = validated_lang
 
             devices = ["cpu", "cuda"]
@@ -843,12 +841,12 @@ class SettingsDialog(Gtk.Window):
             text=message,
         )
         self._child_dialog_open = True
-        
+
         def on_response(d, r):
             self._child_dialog_open = False
             d.close()
             if on_close:
                 on_close()
-                
+
         dialog.connect("response", on_response)
         dialog.present()

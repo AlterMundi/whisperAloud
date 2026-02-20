@@ -3,12 +3,11 @@
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from whisper_aloud import ClipboardManager, ClipboardConfig, PasteSimulator
-from whisper_aloud.exceptions import ClipboardError
+from whisper_aloud import ClipboardConfig, ClipboardManager, PasteSimulator
 
 
 class TestSessionDetection:
@@ -79,7 +78,7 @@ class TestClipboardCopy:
         config = ClipboardConfig()
         manager = ClipboardManager(config)
 
-        with patch.object(manager, '_copy_fallback', return_value=True) as mock_fallback:
+        with patch.object(manager, '_copy_fallback', return_value=True):
             result = manager.copy("Test text")
 
             assert result is True

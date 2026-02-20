@@ -7,7 +7,7 @@ import pytest
 
 def test_level_meter_import():
     """Test that level meter modules can be imported."""
-    from whisper_aloud.ui.level_meter import LevelMeterWidget, LevelMeterPanel
+    from whisper_aloud.ui.level_meter import LevelMeterPanel, LevelMeterWidget
 
     assert LevelMeterWidget is not None
     assert LevelMeterPanel is not None
@@ -18,7 +18,6 @@ def test_level_meter_widget_creation():
     try:
         import gi
         gi.require_version('Gtk', '4.0')
-        from gi.repository import Gtk
         from whisper_aloud.ui.level_meter import LevelMeterWidget
 
         # This will fail in headless environment
@@ -56,7 +55,6 @@ def test_level_meter_panel_creation():
     try:
         import gi
         gi.require_version('Gtk', '4.0')
-        from gi.repository import Gtk
         from whisper_aloud.ui.level_meter import LevelMeterPanel
 
         panel = LevelMeterPanel()

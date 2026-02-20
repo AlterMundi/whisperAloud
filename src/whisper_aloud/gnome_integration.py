@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 try:
     import gi
     gi.require_version('Notify', '0.7')
-    from gi.repository import Notify, GLib
+    from gi.repository import Notify
     HAS_NOTIFY = True
 except ImportError:
     HAS_NOTIFY = False
