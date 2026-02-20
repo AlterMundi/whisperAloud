@@ -1,0 +1,10 @@
+#!/bin/bash
+# WhisperAloud daemon wrapper
+# Prefers vendored venv if available, falls back to system Python
+
+VENV="/usr/lib/whisper-aloud/venv"
+if [ -d "$VENV" ] && [ -x "$VENV/bin/python" ]; then
+    exec "$VENV/bin/python" -m whisper_aloud "$@"
+else
+    exec python3 -m whisper_aloud "$@"
+fi

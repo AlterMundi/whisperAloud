@@ -1,0 +1,7 @@
+data/whisper-aloud.service lib/systemd/user/
+data/org.fede.whisperaloud.service usr/share/dbus-1/services/
+data/org.fede.whisperaloud.desktop usr/share/applications/
+data/org.fede.whisperaloud.xml usr/share/dbus-1/interfaces/
+data/org.fede.whisperaloud.metainfo.xml usr/share/metainfo/
+data/run usr/lib/whisper-aloud/
+data/run-gui usr/lib/whisper-aloud/

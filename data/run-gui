@@ -1,0 +1,9 @@
+#!/bin/bash
+# WhisperAloud GUI wrapper
+
+VENV="/usr/lib/whisper-aloud/venv"
+if [ -d "$VENV" ] && [ -x "$VENV/bin/python" ]; then
+    exec "$VENV/bin/python" -m whisper_aloud.ui "$@"
+else
+    exec python3 -m whisper_aloud.ui "$@"
+fi

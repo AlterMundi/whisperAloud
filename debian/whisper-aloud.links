@@ -1,0 +1,2 @@
+usr/lib/whisper-aloud/run usr/bin/whisper-aloud
+usr/lib/whisper-aloud/run-gui usr/bin/whisper-aloud-gui

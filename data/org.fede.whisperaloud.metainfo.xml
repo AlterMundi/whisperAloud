@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.fede.whisperaloud</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>WhisperAloud</name>
+  <summary>Offline voice transcription for Linux</summary>
+  <description>
+    <p>
+      WhisperAloud provides offline speech-to-text transcription using
+      OpenAI Whisper models. It runs as a background daemon with system
+      tray integration and global hotkeys, or as a standalone GTK4 application.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Offline transcription — no internet required after model download</li>
+      <li>Professional audio pipeline with AGC, noise gate, and denoising</li>
+      <li>System tray integration with AppIndicator</li>
+      <li>Global hotkeys via XDG Desktop Portal or libkeybinder3</li>
+      <li>Automatic clipboard integration</li>
+      <li>Transcription history with search</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">org.fede.whisperaloud.desktop</launchable>
+  <url type="homepage">https://github.com/fede/whisper-aloud</url>
+  <provides>
+    <dbus type="session">org.fede.whisperaloud</dbus>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-02-19">
+      <description>
+        <p>Initial release with daemon-first architecture.</p>
+      </description>
+    </release>
+  </releases>
+</component>
