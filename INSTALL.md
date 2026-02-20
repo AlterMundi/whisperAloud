@@ -227,8 +227,8 @@ git clone https://github.com/AlterMundi/whisperAloud.git
 cd whisperAloud
 
 # Or download and extract the release tarball:
-tar -xzf whisperAloud-0.1.0.tar.gz
-cd whisperAloud-0.1.0
+tar -xzf whisperAloud-0.2.0.tar.gz
+cd whisperAloud-0.2.0
 ```
 
 ### Step 4: Install WhisperAloud
@@ -752,12 +752,11 @@ After successful installation:
 
 ## Version History
 
-### v0.1.0 (Current)
-- Initial release
-- Phase 1: Core transcription engine ✅
-- Phase 2: Audio recording ✅
-- Test coverage: 77%
-- Unit tests: 47/53 passing (89%)
+### v0.2.0 (Current target)
+- Refactored daemon-first architecture on `master`
+- D-Bus lifecycle commands and reconnect logic consolidated
+- Documentation refresh (README + install + troubleshooting alignment)
+- CI profile split into deterministic fast path plus release smoke checklist
 
 ---
 

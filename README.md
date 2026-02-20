@@ -195,13 +195,15 @@ tests/           # unit + integration tests
 - `INSTALL.md` - full installation guide
 - `DEPENDENCIES.md` - system and Python dependency reference
 - `TROUBLESHOOTING.md` - common runtime issues and fixes
+- `CHANGELOG.md` - user-facing release history
+- `docs/release-checklist.md` - manual smoke and release procedure
 - `scripts/README.md` - validation and utility scripts
 - `examples/README.md` - example scripts
 
 ## Release Notes
 
 - `release-0.1.0` tag freezes the pre-refactor `master` snapshot.
-- Current `master` tracks the refactored daemon-first codebase.
+- Current codebase targets the `0.2.0` daemon-first migration release.
 
 ## Contributing
 
