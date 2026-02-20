@@ -68,22 +68,36 @@ class NoiseGate:
         # Step 2: Determine gate target (1.0 = open, 0.0 = closed)
         gate_open = rms > threshold_linear
 
-        # Step 3: Apply smooth attack/release envelope
-        # Attack: fast ramp using linear interpolation over attack window
-        # Release: exponential decay for smooth fade-out
-        attack_samples = max(1, int(self.attack_ms * sample_rate / 1000.0))
+        # Step 3: Apply smooth attack/release envelope using vectorized
+        # segment processing.  Attack uses linear ramp, release uses
+        # exponential decay.  We iterate over contiguous open/closed
+        # segments (typically few) rather than per-sample.
+        attack_step = 1.0 / max(1, int(self.attack_ms * sample_rate / 1000.0))
         envelope = self._envelope
         gain = np.empty(n, dtype=np.float64)
 
-        for i in range(n):
-            if gate_open[i]:
-                # Linear ramp toward 1.0 over attack_samples
-                envelope = min(1.0, envelope + 1.0 / attack_samples)
-            else:
-                envelope = release_coeff * envelope
-            gain[i] = envelope
+        # Find segment boundaries where gate state changes
+        changes = np.diff(gate_open.astype(np.int8))
+        seg_starts = np.concatenate(([0], np.nonzero(changes)[0] + 1, [n]))
 
-        self._envelope = envelope
+        for seg_idx in range(len(seg_starts) - 1):
+            start = seg_starts[seg_idx]
+            end = seg_starts[seg_idx + 1]
+            seg_len = end - start
+
+            if gate_open[start]:
+                # Attack: linear ramp from envelope toward 1.0
+                ramp = envelope + attack_step * np.arange(1, seg_len + 1)
+                np.clip(ramp, 0.0, 1.0, out=ramp)
+                gain[start:end] = ramp
+                envelope = ramp[-1]
+            else:
+                # Release: exponential decay from envelope toward 0.0
+                decay_factors = release_coeff ** np.arange(1, seg_len + 1)
+                gain[start:end] = envelope * decay_factors
+                envelope = gain[end - 1]
+
+        self._envelope = float(envelope)
         return (audio * gain).astype(audio.dtype)
 
 
@@ -143,29 +157,25 @@ class AGC:
                 (cumsum[window_samples:] - cumsum[:-window_samples]) / window_samples
             )
 
-        result = np.copy(audio)
+        # Compute desired gain per sample (vectorized)
+        desired_gain = np.where(
+            rms_arr > 1e-8,
+            np.clip(self.target_linear / np.maximum(rms_arr, 1e-8), self.min_gain, self.max_gain),
+            self._current_gain,  # Hold for silence
+        )
+
+        # Apply smoothed gain tracking with attack/release coefficients.
+        # This is a per-sample IIR with varying coefficient; we process
+        # in a tight loop but with numpy-precomputed targets.
+        gain_arr = np.empty(n, dtype=np.float64)
         gain = self._current_gain
-
         for i in range(n):
-            rms = rms_arr[i]
+            coeff = attack_coeff if desired_gain[i] < gain else release_coeff
+            gain = coeff * gain + (1 - coeff) * desired_gain[i]
+            gain_arr[i] = gain
 
-            if rms > 1e-8:
-                desired_gain = self.target_linear / rms
-                desired_gain = np.clip(desired_gain, self.min_gain, self.max_gain)
-            else:
-                desired_gain = gain  # Hold current running gain for silence
-
-            # Smooth gain changes: attack (reducing) is faster than release (boosting)
-            if desired_gain < gain:
-                coeff = attack_coeff
-            else:
-                coeff = release_coeff
-            gain = coeff * gain + (1 - coeff) * desired_gain
-
-            result[i] *= gain
-
-        self._current_gain = gain
-        return result.astype(np.float32)
+        self._current_gain = float(gain)
+        return (audio * gain_arr).astype(np.float32)
 
 
 class PeakLimiter:
