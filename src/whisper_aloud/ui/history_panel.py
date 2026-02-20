@@ -12,6 +12,11 @@ from gi.repository import GLib, GObject, Gtk
 
 from ..persistence.models import HistoryEntry
 from .history_item import HistoryItem
+from .history_panel_logic import (
+    filter_entries_by_query,
+    group_entries_by_date,
+    resolve_history_query_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,14 +192,15 @@ class HistoryPanel(Gtk.Box):
         def search_thread():
             """Background search thread."""
             try:
-                if self._show_favorites_only:
+                mode, normalized_query = resolve_history_query_mode(
+                    query,
+                    self._show_favorites_only,
+                )
+                if mode == "favorites":
                     results = self.history_manager.get_favorites(limit=50)
-                    # Apply text filter in memory if needed (since get_favorites doesn't take query)
-                    if query:
-                        query_lower = query.lower()
-                        results = [r for r in results if query_lower in r.text.lower()]
-                elif query:
-                    results = self.history_manager.search(query, limit=50)
+                    results = filter_entries_by_query(results, normalized_query)
+                elif mode == "search":
+                    results = self.history_manager.search(normalized_query, limit=50)
                 else:
                     results = self.history_manager.get_recent(limit=50)
 
@@ -257,26 +263,7 @@ class HistoryPanel(Gtk.Box):
 
     def _group_by_date(self, entries: List[HistoryEntry]) -> dict:
         """Group entries by date string."""
-        grouped = {}
-        today = datetime.now().date()
-
-        for entry in entries:
-            if not entry.timestamp:
-                key = "Unknown Date"
-            else:
-                date = entry.timestamp.date()
-                if date == today:
-                    key = "Today"
-                elif (today - date).days == 1:
-                    key = "Yesterday"
-                else:
-                    key = date.strftime("%B %d, %Y")
-
-            if key not in grouped:
-                grouped[key] = []
-            grouped[key].append(entry)
-
-        return grouped
+        return group_entries_by_date(entries)
 
     def _on_row_activated(self, list_box, row):
         """Handle row click."""

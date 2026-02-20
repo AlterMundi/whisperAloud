@@ -19,8 +19,10 @@ python -m pytest \
   tests/test_dbus_client.py \
   tests/test_daemon.py \
   tests/test_cli.py \
+  tests/test_clipboard.py \
   tests/test_history_daemon_manager.py \
   tests/test_indicator.py \
+  tests/test_history_panel_logic.py \
   tests/test_history_manager_transactions.py \
   tests/test_hotkey.py \
   tests/test_level_meter_logic.py \
