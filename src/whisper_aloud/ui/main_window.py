@@ -353,6 +353,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self.client.on_level_update(self._on_daemon_level_update)
         self.client.on_error(self._on_daemon_error)
 
+        # Watch for daemon restart (auto-reconnect)
+        self.client.watch_name(
+            on_connected=self._on_daemon_reconnected,
+            on_disconnected=self._on_daemon_lost,
+        )
+
         # Load local config for UI settings
         try:
             self.config = WhisperAloudConfig.load()
@@ -389,6 +395,37 @@ class MainWindow(Gtk.ApplicationWindow):
         # Update model info display
         self._update_model_info()
 
+        return False
+
+    def _on_daemon_reconnected(self) -> None:
+        """Called when daemon reappears on the bus after a crash/restart."""
+        logger.info("Daemon reappeared, reconnecting...")
+        GLib.idle_add(self._handle_reconnection)
+
+    def _handle_reconnection(self) -> bool:
+        """Re-establish daemon connection on the main thread."""
+        self.status_label.set_text("Reconnecting...")
+        try:
+            self.config = WhisperAloudConfig.load()
+            self._update_model_info()
+        except Exception:
+            pass
+        self.status_label.set_text("Ready")
+        self.record_button.set_sensitive(True)
+        self.set_state(AppState.IDLE)
+        logger.info("Reconnected to daemon after restart")
+        return False
+
+    def _on_daemon_lost(self) -> None:
+        """Called when daemon vanishes from the bus (crash or quit)."""
+        logger.warning("Daemon connection lost")
+        GLib.idle_add(self._handle_disconnection)
+
+    def _handle_disconnection(self) -> bool:
+        """Update UI for lost daemon connection on the main thread."""
+        self.record_button.set_sensitive(False)
+        self.status_label.set_text("Daemon disconnected - waiting for restart...")
+        self.set_state(AppState.ERROR)
         return False
 
     def _on_daemon_unavailable(self) -> bool:
