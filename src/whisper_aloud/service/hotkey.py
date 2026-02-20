@@ -16,17 +16,26 @@ def _try_import_portal():
     """Try to import Xdp (libportal) for GlobalShortcuts portal.
 
     Returns the Xdp module or None.
+
+    NOTE: Portal backend requires GNOME 46+ / KDE 6+ for GlobalShortcuts
+    support and full async session wiring (create_global_shortcuts_session +
+    bind_shortcuts).  Until that wiring is implemented, this function
+    returns None so systems fall through to keybinder or D-Bus-only mode.
     """
-    try:
-        import gi
-        gi.require_version('Xdp', '1.0')
-        from gi.repository import Xdp
-        # Verify we can create a portal instance
-        Xdp.Portal()
-        return Xdp
-    except (ImportError, ValueError, TypeError, Exception) as e:
-        logger.debug("XDG Desktop Portal not available: %s", e)
-        return None
+    # Portal backend is not yet fully implemented.  Uncomment and complete
+    # the async session handling when targeting GNOME 46+.
+    #
+    # try:
+    #     import gi
+    #     gi.require_version('Xdp', '1.0')
+    #     from gi.repository import Xdp
+    #     Xdp.Portal()
+    #     return Xdp
+    # except (ImportError, ValueError, TypeError, Exception) as e:
+    #     logger.debug("XDG Desktop Portal not available: %s", e)
+    #     return None
+    logger.debug("XDG Portal hotkey backend not yet implemented; skipping")
+    return None
 
 
 def _try_import_keybinder():
@@ -153,20 +162,21 @@ class HotkeyManager:
     # -- Private backend methods --
 
     def _register_portal(self, accel: str, callback: Callable[[], None]) -> bool:
-        """Register a hotkey using XDG Desktop Portal GlobalShortcuts."""
+        """Register a hotkey using XDG Desktop Portal GlobalShortcuts.
+
+        TODO: Implement full async wiring:
+          1. portal.create_global_shortcuts_session()
+          2. portal.bind_shortcuts(session, [shortcut], callback)
+          3. Connect 'shortcuts-changed' signal
+        Requires GNOME 46+ / KDE 6+ and libportal-gtk4 GIR bindings.
+        """
         try:
             if self._portal is None:
                 self._portal = self._xdp.Portal()
 
             self._callback = callback
             self._registered_accels.append(accel)
-
-            # Portal shortcut registration is async; the actual bind happens
-            # through create_global_shortcuts_session + bind_shortcuts.
-            # The GLib.MainLoop in the daemon drives the async callbacks.
-            # For now we set up the session; full async wiring happens when
-            # integrated into the daemon (Task 4.4).
-            logger.info("Portal hotkey registered: %s", accel)
+            logger.info("Portal hotkey registered: %s (stub)", accel)
             return True
         except Exception as e:
             logger.error("Failed to register portal hotkey '%s': %s", accel, e)
