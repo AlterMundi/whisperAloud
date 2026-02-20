@@ -1,11 +1,14 @@
 """History item widget for the history panel."""
 
 import logging
-import textwrap
 
 from gi.repository import Gdk, GObject, Gtk, Pango
 
 from ..persistence.models import HistoryEntry
+from .history_logic import (
+    format_transcription_preview,
+    should_emit_favorite_toggle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +82,7 @@ class HistoryItem(Gtk.ListBoxRow):
         box.append(fav_button)
 
         self.set_child(box)
-        self._preview_text = self._format_transcription_tooltip(entry.text)
+        self._preview_text = format_transcription_preview(entry.text)
         self._preview_popover: Gtk.Popover | None = None
         self._setup_hover_preview()
 
@@ -127,19 +130,8 @@ class HistoryItem(Gtk.ListBoxRow):
 
     @staticmethod
     def _format_transcription_tooltip(text: str) -> str:
-        """Format transcription tooltip as max 5 lines x 25 chars."""
-        cleaned = " ".join((text or "").split())
-        if not cleaned:
-            return ""
-
-        lines = textwrap.wrap(cleaned, width=25, break_long_words=True, replace_whitespace=True)
-        if len(lines) > 5:
-            lines = lines[:5]
-            if len(lines[-1]) >= 3:
-                lines[-1] = lines[-1][:-3] + "..."
-            else:
-                lines[-1] = lines[-1] + "..."
-        return "\n".join(lines)
+        """Backwards-compatible wrapper for preview formatting."""
+        return format_transcription_preview(text)
 
     def _on_favorite_toggled(self, button: Gtk.ToggleButton) -> None:
         """
@@ -152,7 +144,7 @@ class HistoryItem(Gtk.ListBoxRow):
         button.set_icon_name("starred-symbolic" if is_active else "non-starred-symbolic")
 
         # Only emit if state actually changed (avoid loops if updated externally)
-        if is_active != self.entry.favorite:
+        if should_emit_favorite_toggle(self.entry.favorite, is_active):
             self.entry.favorite = is_active
             self.emit("favorite-toggled", self.entry.id)
 

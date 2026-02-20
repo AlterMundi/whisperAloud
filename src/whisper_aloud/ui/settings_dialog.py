@@ -16,6 +16,11 @@ from ..config import (
 )
 from ..utils.validation_helpers import sanitize_language_code
 from .error_handler import InputValidator, ValidationError
+from .settings_logic import (
+    has_unsaved_changes,
+    should_auto_close_on_focus_loss,
+    should_block_close,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +69,19 @@ class SettingsDialog(Gtk.Window):
 
     def _on_window_active_changed(self, window: Gtk.Window, _param: object) -> None:
         """Auto-close settings when user clicks outside and window loses focus."""
-        if self._child_dialog_open:
-            return
-        if not window.get_property("is-active") and window.is_visible():
+        if should_auto_close_on_focus_loss(
+            child_dialog_open=self._child_dialog_open,
+            is_active=window.get_property("is-active"),
+            is_visible=window.is_visible(),
+        ):
             GLib.idle_add(window.close)
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         """Intercept close to protect unsaved changes."""
-        if self._allow_close:
-            return False
-        if self._has_unsaved_changes():
+        if should_block_close(
+            allow_close=self._allow_close,
+            unsaved_changes=self._has_unsaved_changes(),
+        ):
             self._show_discard_confirmation()
             return True
         return False
@@ -386,7 +394,7 @@ class SettingsDialog(Gtk.Window):
 
     def _has_unsaved_changes(self) -> bool:
         """Return True when current UI state differs from initial state."""
-        return self._capture_ui_state() != self._initial_ui_state
+        return has_unsaved_changes(self._initial_ui_state, self._capture_ui_state())
 
     def _mark_dirty(self, *_args: object) -> None:
         """Update dirty flag based on current form state."""

@@ -1,75 +1,55 @@
-"""Logic tests for SettingsDialog close/dirty behavior."""
+"""Logic tests for settings dialog behavior without GTK runtime."""
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-import pytest
-
-gi = pytest.importorskip("gi")
-if "unittest.mock" in type(gi).__module__:
-    pytest.skip("Skipping SettingsDialog logic tests when gi is mocked", allow_module_level=True)
-gi.require_version("Gtk", "4.0")
-
-from whisper_aloud.ui.settings_dialog import SettingsDialog
+from whisper_aloud.ui.settings_logic import (
+    has_unsaved_changes,
+    should_auto_close_on_focus_loss,
+    should_block_close,
+)
 
 
-def test_on_close_request_allows_when_flag_set():
-    dummy = SimpleNamespace(_allow_close=True)
-    assert SettingsDialog._on_close_request(dummy, None) is False
+def test_has_unsaved_changes_detects_no_diff():
+    initial = {"a": "x", "enabled": True}
+    current = {"a": "x", "enabled": True}
+    assert has_unsaved_changes(initial, current) is False
 
 
-def test_on_close_request_blocks_and_prompts_when_dirty():
-    show_discard = MagicMock()
-    dummy = SimpleNamespace(
-        _allow_close=False,
-        _has_unsaved_changes=lambda: True,
-        _show_discard_confirmation=show_discard,
-    )
-
-    result = SettingsDialog._on_close_request(dummy, None)
-    assert result is True
-    show_discard.assert_called_once()
+def test_has_unsaved_changes_detects_diff():
+    initial = {"a": "x", "enabled": True}
+    current = {"a": "y", "enabled": True}
+    assert has_unsaved_changes(initial, current) is True
 
 
-def test_on_close_request_allows_when_clean():
-    show_discard = MagicMock()
-    dummy = SimpleNamespace(
-        _allow_close=False,
-        _has_unsaved_changes=lambda: False,
-        _show_discard_confirmation=show_discard,
-    )
-
-    result = SettingsDialog._on_close_request(dummy, None)
-    assert result is False
-    show_discard.assert_not_called()
+def test_should_block_close_when_unsaved_and_not_allowed():
+    assert should_block_close(allow_close=False, unsaved_changes=True) is True
 
 
-def test_mark_dirty_uses_has_unsaved_changes():
-    dummy = SimpleNamespace(
-        _dirty=False,
-        _has_unsaved_changes=lambda: True,
-    )
-    SettingsDialog._mark_dirty(dummy)
-    assert dummy._dirty is True
+def test_should_not_block_close_when_allowed():
+    assert should_block_close(allow_close=True, unsaved_changes=True) is False
 
 
-def test_window_active_changed_ignores_when_child_dialog_open():
-    window = MagicMock()
-    window.get_property.return_value = False
-    window.is_visible.return_value = True
-    dummy = SimpleNamespace(_child_dialog_open=True)
-
-    with patch("whisper_aloud.ui.settings_dialog.GLib.idle_add") as idle_add:
-        SettingsDialog._on_window_active_changed(dummy, window, None)
-        idle_add.assert_not_called()
+def test_should_not_block_close_when_clean():
+    assert should_block_close(allow_close=False, unsaved_changes=False) is False
 
 
-def test_window_active_changed_closes_when_inactive_and_visible():
-    window = MagicMock()
-    window.get_property.return_value = False
-    window.is_visible.return_value = True
-    dummy = SimpleNamespace(_child_dialog_open=False)
+def test_focus_loss_close_ignored_when_child_dialog_open():
+    assert should_auto_close_on_focus_loss(
+        child_dialog_open=True,
+        is_active=False,
+        is_visible=True,
+    ) is False
 
-    with patch("whisper_aloud.ui.settings_dialog.GLib.idle_add") as idle_add:
-        SettingsDialog._on_window_active_changed(dummy, window, None)
-        idle_add.assert_called_once_with(window.close)
+
+def test_focus_loss_close_when_inactive_and_visible():
+    assert should_auto_close_on_focus_loss(
+        child_dialog_open=False,
+        is_active=False,
+        is_visible=True,
+    ) is True
+
+
+def test_focus_loss_no_close_when_not_visible():
+    assert should_auto_close_on_focus_loss(
+        child_dialog_open=False,
+        is_active=False,
+        is_visible=False,
+    ) is False
