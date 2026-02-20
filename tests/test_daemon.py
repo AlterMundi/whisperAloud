@@ -180,6 +180,16 @@ class TestDaemonMethods:
         result = daemon.CancelRecording()
         assert result is False
 
+    def test_cancel_recording_during_transcribing(self, daemon):
+        """CancelRecording should cancel an in-flight transcription."""
+        daemon.recorder.is_recording = False
+        daemon._transcribing = True
+        result = daemon.CancelRecording()
+        assert result is True
+        assert daemon._transcribing is False
+        daemon.transcriber.cancel_transcription.assert_called_once()
+        daemon.StatusChanged.assert_called_with("idle")
+
     def test_toggle_recording_starts(self, daemon):
         """ToggleRecording when idle should start recording."""
         daemon.recorder.is_recording = False

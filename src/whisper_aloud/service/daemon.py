@@ -319,14 +319,24 @@ class WhisperAloudService:
 
     def CancelRecording(self) -> bool:
         """Cancel active recording without transcribing."""
-        if not self.recorder or not self.recorder.is_recording:
-            return False
-        self._stop_level_timer()
-        self.recorder.cancel()
-        self.StatusChanged("idle")
-        if self.indicator:
-            self.indicator.set_state("idle")
-        return True
+        if self.recorder and self.recorder.is_recording:
+            self._stop_level_timer()
+            self.recorder.cancel()
+            self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
+            return True
+
+        if self._transcribing and self.transcriber:
+            self.transcriber.cancel_transcription()
+            self._transcribing = False
+            self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
+            logger.info("Transcription cancellation requested via D-Bus")
+            return True
+
+        return False
 
     def GetStatus(self) -> dict:
         """Get current service status as a dict."""
