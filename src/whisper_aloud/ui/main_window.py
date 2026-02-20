@@ -44,6 +44,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._model_loading: bool = False
         self._timer_active: bool = False
         self._timer_seconds: int = 0
+        self._daemon_available: bool = False
 
         # D-Bus client (replaces direct component access)
         from ..service.client import WhisperAloudClient
@@ -360,6 +361,7 @@ class MainWindow(Gtk.ApplicationWindow):
             False to remove this idle callback
         """
         self.client = client
+        self._daemon_available = True
         logger.info("Connected to WhisperAloud daemon")
 
         # Subscribe to daemon signals
@@ -419,6 +421,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _handle_reconnection(self) -> bool:
         """Re-establish daemon connection on the main thread."""
+        self._daemon_available = True
         self.status_label.set_text("Reconnecting...")
         try:
             self.config = WhisperAloudConfig.load()
@@ -438,6 +441,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _handle_disconnection(self) -> bool:
         """Update UI for lost daemon connection on the main thread."""
+        self._daemon_available = False
+        self._timer_active = False
         self.record_button.set_sensitive(False)
         self.status_label.set_text("Daemon disconnected - waiting for restart...")
         self.set_state(AppState.ERROR)
@@ -450,6 +455,8 @@ class MainWindow(Gtk.ApplicationWindow):
         Returns:
             False to remove this idle callback
         """
+        self._daemon_available = False
+        self._timer_active = False
         self._hide_loading_dialog()
         logger.warning("WhisperAloud daemon is not running")
 
@@ -582,6 +589,8 @@ class MainWindow(Gtk.ApplicationWindow):
         Returns:
             False to remove this idle callback
         """
+        self._daemon_available = False
+        self._timer_active = False
         self._hide_loading_dialog()
 
         logger.error(f"Daemon connection error: {error_msg}")
@@ -709,7 +718,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.cancel_button.set_visible(False)
                 self.record_button.set_visible(True)
                 self.record_button.set_label("Start Recording")
-                self.record_button.set_sensitive(True)
+                self.record_button.set_sensitive(self._daemon_available)
                 self.record_button.remove_css_class("destructive-action")
                 self.record_button.add_css_class("suggested-action")
                 self.timer_label.set_text("0:00")
@@ -717,7 +726,7 @@ class MainWindow(Gtk.ApplicationWindow):
             elif new_state == AppState.RECORDING:
                 logger.debug("Setting UI for RECORDING state")
                 self.record_button.set_label("Stop Recording")
-                self.record_button.set_sensitive(True)
+                self.record_button.set_sensitive(self._daemon_available)
                 self.record_button.remove_css_class("suggested-action")
                 self.record_button.add_css_class("destructive-action")
 
@@ -742,7 +751,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.cancel_button.set_visible(False)
                 self.record_button.set_visible(True)
                 self.record_button.set_label("Record Again")
-                self.record_button.set_sensitive(True)
+                self.record_button.set_sensitive(self._daemon_available)
                 self.record_button.remove_css_class("destructive-action")
                 self.record_button.add_css_class("suggested-action")
                 self.status_label.set_text("Ready")
@@ -755,7 +764,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.cancel_button.set_visible(False)
                 self.record_button.set_visible(True)
                 self.record_button.set_label("Try Again")
-                self.record_button.set_sensitive(True)
+                self.record_button.set_sensitive(self._daemon_available)
                 self.record_button.remove_css_class("destructive-action")
                 self.record_button.add_css_class("suggested-action")
         except Exception as e:
@@ -805,6 +814,10 @@ class MainWindow(Gtk.ApplicationWindow):
         """Start audio recording via daemon."""
         try:
             logger.info("Starting audio recording via daemon")
+            if not self.client or not self.client.is_connected or not self._daemon_available:
+                self.status_label.set_text("Daemon not connected")
+                self.set_state(AppState.ERROR)
+                return
 
             # Reset level meter
             self.level_meter.reset()
@@ -950,15 +963,26 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Apply via daemon SetConfig (daemon owns config persistence)
         try:
-            if self.client and self.client.is_connected:
-                lang_value = new_lang_config if new_lang_config is not None else "auto"
-                self.client.set_config({"transcription.language": lang_value})
-                # Update local reference to stay in sync
-                self.config.transcription.language = new_lang_config
-            else:
-                # No daemon — fall back to direct save
-                self.config.transcription.language = new_lang_config
-                self.config.save()
+            if not self.client or not self.client.is_connected or not self._daemon_available:
+                logger.warning("Ignoring language change while daemon is unavailable")
+                self.status_label.set_text("Daemon unavailable: language not changed")
+                previous_lang = current_lang or "auto"
+                if previous_lang in self._language_codes:
+                    dropdown.set_selected(self._language_codes.index(previous_lang))
+                return
+
+            lang_value = new_lang_config if new_lang_config is not None else "auto"
+            changed = self.client.set_config({"transcription.language": lang_value})
+            if not changed:
+                logger.warning("Daemon rejected language update")
+                self.status_label.set_text("Daemon rejected language update")
+                previous_lang = current_lang or "auto"
+                if previous_lang in self._language_codes:
+                    dropdown.set_selected(self._language_codes.index(previous_lang))
+                return
+
+            # Update local reference to stay in sync
+            self.config.transcription.language = new_lang_config
             self._update_model_info()
 
         except Exception as e:
@@ -1002,8 +1026,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self.config = WhisperAloudConfig.load()
 
             # Tell daemon to reload from disk (triggers _apply_config_changes)
-            if self.client and self.client.is_connected:
+            if self.client and self.client.is_connected and self._daemon_available:
                 self.client.reload_config()
+            else:
+                self.status_label.set_text("Saved locally; reconnect daemon to apply")
 
             # Update model info display
             self._update_model_info()
