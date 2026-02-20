@@ -1,0 +1,19 @@
+[Desktop Entry]
+Name=WhisperAloud
+Comment=Offline voice transcription
+Exec=/usr/bin/whisper-aloud-gui
+TryExec=whisper-aloud-gui
+Icon=org.fede.whisperaloud
+Type=Application
+Categories=AudioVideo;Audio;Utility;GTK;
+Keywords=voice;transcription;whisper;speech;audio;
+StartupNotify=true
+SingleMainWindow=true
+
+[Desktop Action Toggle]
+Name=Toggle Recording
+Exec=/usr/bin/whisper-aloud toggle
+
+[Desktop Action Cancel]
+Name=Cancel Recording
+Exec=/usr/bin/whisper-aloud cancel
