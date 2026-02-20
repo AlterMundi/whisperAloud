@@ -1,91 +1,73 @@
 #!/bin/bash
-# Install script for GNOME integration
+# Install script for WhisperAloud desktop integration
+# Installs desktop file, D-Bus activation, and systemd user unit
 
 set -e
 
-echo "Installing WhisperAloud GNOME integration..."
-
-# Check if we're on GNOME
-if ! command -v gnome-shell &> /dev/null; then
-    echo "GNOME Shell not found. This script is for GNOME integration."
-    exit 1
-fi
+echo "Installing WhisperAloud desktop integration..."
 
 # Check if running as root
 if [[ $EUID -eq 0 ]]; then
     echo "ERROR: Do not run this script with sudo!"
-    echo "GNOME extensions must be installed for the current user, not root."
+    echo "Desktop integration must be installed for the current user."
     echo "Run: ./scripts/install_gnome_integration.sh"
     exit 1
 fi
 
-# Get GNOME version
-GNOME_VERSION=$(gnome-shell --version | grep -oP '\d+\.\d+')
-echo "Detected GNOME version: $GNOME_VERSION"
-
-# Install extension
-EXTENSIONS_DIR="$HOME/.local/share/gnome-shell/extensions"
-EXT_UUID="whisperaloud@fede"
-EXT_DIR="$EXTENSIONS_DIR/$EXT_UUID"
-
-echo "Installing GNOME Shell extension..."
-mkdir -p "$EXT_DIR"
-cp -r gnome-extension/* "$EXT_DIR/"
-
-# Compile schemas
-if command -v glib-compile-schemas &> /dev/null; then
-    echo "Compiling GSettings schemas..."
-    glib-compile-schemas "$EXT_DIR/schemas"
-else
-    echo "WARNING: glib-compile-schemas not found. Shortcuts may not work."
-fi
-
-# Enable extension
-echo "Enabling extension..."
-gnome-extensions enable "$EXT_UUID"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="$SCRIPT_DIR/data"
 
 # Install desktop file
 echo "Installing desktop file..."
-mkdir -p "$HOME/.local/share/applications"
-if [ -f "com.whisperaloud.App.desktop" ]; then
-    cp "com.whisperaloud.App.desktop" "$HOME/.local/share/applications/"
-    echo "Desktop file installed. You can find WhisperAloud in your applications menu."
-else
-    echo "Desktop file not found, skipping"
+APPS_DIR="$HOME/.local/share/applications"
+mkdir -p "$APPS_DIR"
+cp "$DATA_DIR/org.fede.whisperaloud.desktop" "$APPS_DIR/"
+update-desktop-database "$APPS_DIR" 2>/dev/null || true
+echo "  -> $APPS_DIR/org.fede.whisperaloud.desktop"
+
+# Install D-Bus activation service
+echo "Installing D-Bus activation service..."
+DBUS_DIR="$HOME/.local/share/dbus-1/services"
+mkdir -p "$DBUS_DIR"
+cp "$DATA_DIR/org.fede.whisperaloud.service" "$DBUS_DIR/"
+echo "  -> $DBUS_DIR/org.fede.whisperaloud.service"
+
+# Install systemd user unit
+echo "Installing systemd user unit..."
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+mkdir -p "$SYSTEMD_DIR"
+cp "$DATA_DIR/whisper-aloud.service" "$SYSTEMD_DIR/"
+systemctl --user daemon-reload
+echo "  -> $SYSTEMD_DIR/whisper-aloud.service"
+
+# Remove legacy autostart entry if present
+LEGACY_AUTOSTART="$HOME/.config/autostart/whisperaloud-daemon.desktop"
+if [ -f "$LEGACY_AUTOSTART" ]; then
+    echo "Removing legacy autostart entry..."
+    rm "$LEGACY_AUTOSTART"
 fi
 
-# Install autostart
-echo "Setting up autostart..."
-AUTOSTART_DIR="$HOME/.config/autostart"
-mkdir -p "$AUTOSTART_DIR"
+# Remove legacy desktop file if present
+LEGACY_DESKTOP="$HOME/.local/share/applications/com.whisperaloud.App.desktop"
+if [ -f "$LEGACY_DESKTOP" ]; then
+    echo "Removing legacy desktop file..."
+    rm "$LEGACY_DESKTOP"
+fi
 
-cat > "$AUTOSTART_DIR/whisperaloud-daemon.desktop" << EOF
-[Desktop Entry]
-Type=Application
-Name=WhisperAloud Daemon
-Comment=Background daemon for WhisperAloud voice dictation
-Exec=whisper-aloud --daemon
-Terminal=false
-X-GNOME-Autostart-enabled=true
-EOF
-
+echo ""
 echo "Installation complete!"
 echo ""
-echo "GNOME Integration Options:"
+echo "Usage:"
+echo "  Enable the service:  systemctl --user enable whisper-aloud.service"
+echo "  Start the service:   systemctl --user start whisper-aloud.service"
+echo "  Check status:        systemctl --user status whisper-aloud.service"
+echo "  View logs:           journalctl --user -u whisper-aloud.service"
 echo ""
-echo "Option 1 - GNOME Shell Extension (Recommended):"
-echo "1. Log out and log back in (Wayland doesn't support shell restart)"
-echo "2. You should see a microphone icon in the top panel"
-echo "3. Start the daemon: whisper-aloud --daemon"
-echo "4. Click the icon to control recording"
-echo ""
-echo "Option 2 - Desktop Integration (Alternative):"
-echo "1. Find 'WhisperAloud' in your applications menu"
-echo "2. Right-click the icon for daemon controls"
-echo "3. Use terminal commands: whisper-aloud start/stop/status"
+echo "The service will also auto-activate via D-Bus when needed."
 echo ""
 echo "To uninstall:"
-echo "  gnome-extensions disable $EXT_UUID"
-echo "  rm -rf $EXT_DIR"
-echo "  rm $HOME/.local/share/applications/com.whisperaloud.App.desktop"
-echo "  rm $AUTOSTART_DIR/whisperaloud-daemon.desktop"
+echo "  systemctl --user disable --now whisper-aloud.service"
+echo "  rm $SYSTEMD_DIR/whisper-aloud.service"
+echo "  rm $DBUS_DIR/org.fede.whisperaloud.service"
+echo "  rm $APPS_DIR/org.fede.whisperaloud.desktop"
+echo "  systemctl --user daemon-reload"
