@@ -15,8 +15,10 @@ NC='\033[0m' # No Color
 VENV_PATH="${WHISPER_VENV:-$HOME/.venvs/whisper_aloud}"
 INSTALL_DEV=false
 SKIP_SYSTEM_DEPS=false
+SKIP_USER_SERVICE=false
 INSTALL_CUDA=false
 CUDA_AUTO_DETECT=true
+DRY_RUN=false
 
 # Print colored message
 print_msg() {
@@ -49,16 +51,21 @@ Options:
                             (default: ~/.venvs/whisper_aloud)
     -s, --skip-system       Skip system dependency installation
                             (useful if already installed)
+    --skip-user-service     Skip user systemd + D-Bus service installation
+                            (manual daemon startup only)
     --cuda                  Install NVIDIA CUDA dependencies (cuDNN, cuBLAS)
                             for GPU acceleration
     --no-cuda               Skip CUDA even if NVIDIA GPU detected
+    --dry-run               Print planned actions and exit
     --uninstall             Remove WhisperAloud installation
 
 Examples:
     ./install.sh                    # Standard install (prompts for CUDA if GPU found)
+    ./install.sh --dry-run          # Show behavior for this machine
     ./install.sh --cuda             # Install with CUDA support
     ./install.sh --no-cuda          # CPU-only, skip GPU detection
     ./install.sh --dev              # With dev tools (pytest, black, etc.)
+    ./install.sh --skip-user-service # Install app, skip user service integration
     ./install.sh -v ~/my_venv       # Custom venv location
     ./install.sh --uninstall        # Remove installation
 
@@ -665,6 +672,15 @@ print_instructions() {
     echo "  2. Launch the GUI:"
     echo -e "     ${BLUE}whisper-aloud-gui${NC}"
     echo ""
+    if [ "$SKIP_USER_SERVICE" = false ]; then
+        echo "  3. Manage daemon via user service:"
+        echo -e "     ${BLUE}systemctl --user start whisper-aloud${NC}"
+        echo -e "     ${BLUE}systemctl --user status whisper-aloud${NC}"
+    else
+        echo "  3. Start daemon manually (service integration skipped):"
+        echo -e "     ${BLUE}whisper-aloud-daemon${NC}"
+    fi
+    echo ""
     echo "  Or use the application menu (WhisperAloud)"
     echo ""
     echo "Add this to your ~/.bashrc for convenience:"
@@ -674,6 +690,34 @@ print_instructions() {
     # Note about first run
     echo -e "${YELLOW}Note:${NC} First transcription will download the Whisper model (~150MB)."
     echo "      This may take 1-2 minutes depending on your connection."
+    echo ""
+}
+
+print_dry_run_plan() {
+    detect_distro
+
+    echo ""
+    echo -e "${YELLOW}DRY RUN:${NC} no changes will be made."
+    echo ""
+    echo "Planned install profile:"
+    echo "  - Distro: $DISTRO (${DISTRO_VERSION:-unknown})"
+    echo "  - Venv path: $VENV_PATH"
+    echo "  - Dev dependencies: $INSTALL_DEV"
+    echo "  - Install system deps: $([ "$SKIP_SYSTEM_DEPS" = false ] && echo "yes" || echo "no (--skip-system)")"
+    echo "  - CUDA mode: $([ "$INSTALL_CUDA" = true ] && echo "force-install" || ([ "$CUDA_AUTO_DETECT" = true ] && echo "auto-detect" || echo "disabled"))"
+    echo "  - Install user service: $([ "$SKIP_USER_SERVICE" = false ] && echo "yes" || echo "no (--skip-user-service)")"
+    echo "  - Install desktop file: yes"
+    echo ""
+    echo "Command availability after install:"
+    echo "  - whisper-aloud"
+    echo "  - whisper-aloud-daemon"
+    echo "  - whisper-aloud-gui"
+    if [ "$SKIP_USER_SERVICE" = false ]; then
+        echo "  - systemctl --user start whisper-aloud"
+        echo "  - systemctl --user status whisper-aloud"
+    else
+        echo "  - whisper-aloud-daemon (manual daemon start)"
+    fi
     echo ""
 }
 
@@ -696,6 +740,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_SYSTEM_DEPS=true
             shift
             ;;
+        --skip-user-service)
+            SKIP_USER_SERVICE=true
+            shift
+            ;;
         --cuda)
             INSTALL_CUDA=true
             CUDA_AUTO_DETECT=false
@@ -704,6 +752,10 @@ while [[ $# -gt 0 ]]; do
         --no-cuda)
             INSTALL_CUDA=false
             CUDA_AUTO_DETECT=false
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
             shift
             ;;
         --uninstall)
@@ -743,6 +795,11 @@ main() {
         exit 1
     fi
 
+    if [ "$DRY_RUN" = true ]; then
+        print_dry_run_plan
+        exit 0
+    fi
+
     # Install system dependencies
     if [ "$SKIP_SYSTEM_DEPS" = false ]; then
         install_system_deps
@@ -775,7 +832,11 @@ main() {
     # Verify
     if verify_installation; then
         install_cli_shims
-        install_user_service
+        if [ "$SKIP_USER_SERVICE" = false ]; then
+            install_user_service
+        else
+            print_warning "Skipping user service installation (--skip-user-service)"
+        fi
         install_desktop_file
         print_instructions
     else

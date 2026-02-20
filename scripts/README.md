@@ -72,6 +72,22 @@ python scripts/test_transcription_simple.py
 
 ## Usage Notes
 
+### Installer Matrix Validation
+
+Validate installer behavior for supported modes:
+
+```bash
+./scripts/validate_install_matrix.sh
+```
+
+This script exercises `install.sh --dry-run` with combinations such as:
+- default install
+- `--skip-system`
+- `--skip-user-service`
+- combined skip modes
+
+It fails fast if reported behavior diverges from the documented matrix in `INSTALL.md`.
+
 ### CI Test Profile
 
 Use the deterministic CI test profile:

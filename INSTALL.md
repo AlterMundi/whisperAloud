@@ -70,6 +70,28 @@ The installer will:
 4. Install WhisperAloud and verify the installation
 5. Install a desktop file for easy launching
 
+### Installer Modes Matrix
+
+| Mode | System deps | User service (`systemctl --user`) | Daemon start command |
+|------|-------------|------------------------------------|----------------------|
+| `./install.sh` | Install | Install + enable when available | `systemctl --user start whisper-aloud` |
+| `./install.sh --skip-system` | Skip | Install + enable when available | `systemctl --user start whisper-aloud` |
+| `./install.sh --skip-user-service` | Install | Skip | `whisper-aloud-daemon` |
+| `./install.sh --skip-system --skip-user-service` | Skip | Skip | `whisper-aloud-daemon` |
+
+Use dry-run mode to inspect behavior on the current machine without making changes:
+
+```bash
+./install.sh --dry-run
+./install.sh --dry-run --skip-system --skip-user-service --no-cuda
+```
+
+Validate documented scenarios automatically:
+
+```bash
+./scripts/validate_install_matrix.sh
+```
+
 ### Manual Quick Install (Debian/Ubuntu)
 
 ```bash
