@@ -8,6 +8,7 @@ Use this checklist before tagging any public release branch from `master`.
 
 - `git status --short` is clean.
 - Fast CI profile passes (`./scripts/test_ci.sh -q`).
+- Full dependency profile passes (`./scripts/test_full_deps.sh -q`).
 - Planned release version is set in `pyproject.toml`.
 - `CHANGELOG.md` contains a dated section for the target version.
 
@@ -27,6 +28,8 @@ Use this checklist before tagging any public release branch from `master`.
 - Install editable package in clean venv: `pip install -e .`.
 - `whisper-aloud --help` works.
 - `whisper-aloud-transcribe --help` works.
+- Packaging smoke script passes: `./scripts/test_packaging_smoke.sh`.
+- Installer matrix validation passes: `./scripts/validate_install_matrix.sh`.
 - Console scripts exist in PATH:
   - `whisper-aloud`
   - `whisper-aloud-transcribe`
