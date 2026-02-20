@@ -24,6 +24,11 @@ def test_default_config():
     assert config.transcription.beam_size == 5
     assert config.transcription.vad_filter is True
     assert config.transcription.task == "transcribe"
+    assert config.notifications.enabled is True
+    assert config.notifications.recording_started is True
+    assert config.notifications.recording_stopped is True
+    assert config.notifications.transcription_completed is True
+    assert config.notifications.error is True
 
 
 def test_env_override():
@@ -157,6 +162,28 @@ def test_env_var_type_conversion():
         assert config.transcription.beam_size == 7
     finally:
         os.environ.pop('WHISPER_ALOUD_BEAM_SIZE', None)
+
+
+def test_notifications_env_override():
+    """Test notification-related environment variable overrides."""
+    os.environ['WHISPER_ALOUD_NOTIFICATIONS_ENABLED'] = 'false'
+    os.environ['WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STARTED'] = 'false'
+    os.environ['WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STOPPED'] = 'false'
+    os.environ['WHISPER_ALOUD_NOTIFICATIONS_TRANSCRIPTION_COMPLETED'] = 'false'
+    os.environ['WHISPER_ALOUD_NOTIFICATIONS_ERROR'] = 'false'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.notifications.enabled is False
+        assert config.notifications.recording_started is False
+        assert config.notifications.recording_stopped is False
+        assert config.notifications.transcription_completed is False
+        assert config.notifications.error is False
+    finally:
+        os.environ.pop('WHISPER_ALOUD_NOTIFICATIONS_ENABLED', None)
+        os.environ.pop('WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STARTED', None)
+        os.environ.pop('WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STOPPED', None)
+        os.environ.pop('WHISPER_ALOUD_NOTIFICATIONS_TRANSCRIPTION_COMPLETED', None)
+        os.environ.pop('WHISPER_ALOUD_NOTIFICATIONS_ERROR', None)
 
 
 def test_config_immutability():

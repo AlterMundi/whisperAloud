@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,19 @@ class ShortcutsWindow(Gtk.Window):
 
         self.set_title("Keyboard Shortcuts")
         self.set_transient_for(parent)
-        self.set_modal(True)
-        self.set_default_size(400, 350)
+        self.set_modal(False)
+        self.set_default_size(420, 580)
         self.set_resizable(False)
+        self.add_css_class("wa-dialog-window")
 
         self._build_ui()
+        self.connect("notify::is-active", self._on_window_active_changed)
         logger.debug("Shortcuts window initialized")
+
+    def _on_window_active_changed(self, window: Gtk.Window, _param: object) -> None:
+        """Auto-close shortcuts window when it loses focus."""
+        if not window.get_property("is-active") and window.is_visible():
+            GLib.idle_add(window.close)
 
     def _build_ui(self) -> None:
         """Build the shortcuts window UI."""
@@ -56,11 +63,13 @@ class ShortcutsWindow(Gtk.Window):
 
         # Header bar
         header = Gtk.HeaderBar()
+        header.add_css_class("wa-headerbar")
         header.set_title_widget(Gtk.Label(label="Keyboard Shortcuts"))
-        main_box.append(header)
+        self.set_titlebar(header)
 
         # Scrolled window for content
         scrolled = Gtk.ScrolledWindow()
+        scrolled.add_css_class("wa-output-wrap")
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scrolled.set_vexpand(True)
         main_box.append(scrolled)
@@ -105,6 +114,7 @@ class ShortcutsWindow(Gtk.Window):
         list_box = Gtk.ListBox()
         list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         list_box.add_css_class("boxed-list")
+        list_box.add_css_class("wa-shortcuts-list")
         group.append(list_box)
 
         for key, description in shortcuts:
@@ -143,6 +153,7 @@ class ShortcutsWindow(Gtk.Window):
         key_label = Gtk.Label(label=key)
         key_label.add_css_class("dim-label")
         key_label.add_css_class("monospace")
+        key_label.add_css_class("wa-keycap")
         box.append(key_label)
 
         row.set_child(box)

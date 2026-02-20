@@ -32,6 +32,7 @@ dependencies = [
     "soundfile>=0.12.0",
     "scipy>=1.11.0",
     "psutil>=5.9.0",
+    "pydbus>=0.6.0",
     # PyGObject/GTK4: Use system package (python3-gi) instead of pip
 ]
 
@@ -48,6 +49,7 @@ dev = [
 whisper-aloud = "whisper_aloud.__main__:main"
 whisper-aloud-transcribe = "whisper_aloud.__main__:main"
 whisper-aloud-gui = "whisper_aloud.ui:main"
+whisper-aloud-daemon = "whisper_aloud.__main__:daemon_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -73,3 +75,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --cov=whisper_aloud --cov-report=term-missing"
+markers = [
+    "integration: End-to-end or multi-component tests.",
+    "requires_audio_hw: Tests that need real audio input hardware.",
+    "requires_display: Tests that need a GUI display/GTK environment.",
+    "requires_dbus: Tests that need a live user D-Bus session.",
+]

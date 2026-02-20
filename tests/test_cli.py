@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from whisper_aloud.__main__ import main
+from whisper_aloud.__main__ import main, daemon_main
 
 
 def test_cli_help():
@@ -102,3 +102,12 @@ def test_cli_uses_correct_bus_name():
     source = inspect.getsource(cli)
     assert "org.fede.whisperaloud" in source
     assert "org.fede.whisperAloud" not in source
+
+
+@patch('whisper_aloud.__main__.handle_daemon_command')
+def test_daemon_entrypoint(mock_handle_daemon_command):
+    """Dedicated daemon entrypoint should call daemon handler directly."""
+    mock_handle_daemon_command.return_value = 0
+    exit_code = daemon_main()
+    assert exit_code == 0
+    mock_handle_daemon_command.assert_called_once()

@@ -5,8 +5,12 @@ import logging
 import sys
 from pathlib import Path
 
-from . import Transcriber, WhisperAloudConfig, __version__
+from . import __version__
+from .config import WhisperAloudConfig
 from .exceptions import WhisperAloudError
+
+# Kept for test patch compatibility; resolved lazily in handle_file_transcription.
+Transcriber = None
 
 # Import GObject libraries conditionally
 try:
@@ -162,6 +166,12 @@ def handle_file_transcription(args) -> int:
         return 1
 
     try:
+        global Transcriber
+        if Transcriber is None:
+            from .transcriber import Transcriber as _Transcriber
+
+            Transcriber = _Transcriber
+
         # Create configuration
         config = WhisperAloudConfig.load()
         config.model.name = args.model
@@ -304,6 +314,15 @@ Examples:
     else:
         parser.print_help()
         return 0
+
+
+def daemon_main() -> int:
+    """Entry point for dedicated daemon command."""
+    class _Args:
+        daemon = True
+        command = None
+
+    return handle_daemon_command(_Args())
 
 
 if __name__ == "__main__":

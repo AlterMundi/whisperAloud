@@ -1,6 +1,7 @@
 """D-Bus daemon service for WhisperAloud."""
 
 import logging
+import os
 import signal as signal_module
 import time
 import uuid
@@ -125,23 +126,28 @@ class WhisperAloudService:
         self._safe_toggle = lambda: GLib.idle_add(self.ToggleRecording)
         self._safe_quit = lambda: GLib.idle_add(self.Quit)
 
-        # Initialize system tray indicator (requires GTK3)
-        try:
-            # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering
+        # Initialize system tray indicator only when a GUI session is available.
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if has_display:
             try:
-                import gi
-                gi.require_version('Gtk', '3.0')
-                from gi.repository import Gtk as Gtk3
-                Gtk3.init(None)
-            except Exception:
-                pass  # GTK3 may already be initialized or unavailable
+                # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering
+                try:
+                    import gi
+                    gi.require_version('Gtk', '3.0')
+                    from gi.repository import Gtk as Gtk3
+                    Gtk3.init(None)
+                except Exception:
+                    pass  # GTK3 may already be initialized or unavailable
 
-            self.indicator = WhisperAloudIndicator(
-                on_toggle=self._safe_toggle,
-                on_quit=self._safe_quit,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to initialize indicator: {e}")
+                self.indicator = WhisperAloudIndicator(
+                    on_toggle=self._safe_toggle,
+                    on_quit=self._safe_quit,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize indicator: {e}")
+                self.indicator = None
+        else:
+            logger.info("No DISPLAY/WAYLAND_DISPLAY; skipping tray indicator")
             self.indicator = None
 
         # Initialize hotkey manager
@@ -274,6 +280,8 @@ class WhisperAloudService:
             self.StatusChanged("transcribing")
             if self.indicator:
                 self.indicator.set_state("transcribing")
+            if self.notifications:
+                self.notifications.show_recording_stopped()
 
             # Start transcription in background thread (non-blocking)
             self._transcribing = True
@@ -421,6 +429,9 @@ class WhisperAloudService:
                 new_config.hotkey.toggle_recording,
                 self._safe_toggle,
             )
+
+        if self.notifications:
+            self.notifications.config = new_config
 
         self.config = new_config
 

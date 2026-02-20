@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -169,6 +170,28 @@ def check_command(
     return dep
 
 
+def check_python_module_spec(
+    module: str,
+    description: str = "",
+    fix_debian: str = "",
+    fix_fedora: str = "",
+    optional: bool = False,
+) -> Dependency:
+    """Check for a Python module without importing it."""
+    dep = Dependency(
+        name=module,
+        description=description,
+        fix_debian=fix_debian,
+        fix_fedora=fix_fedora,
+        optional=optional,
+    )
+    if importlib.util.find_spec(module) is not None:
+        dep.status = Status.OK
+    else:
+        dep.details = "Module not found"
+    return dep
+
+
 def check_library(
     lib_name: str,
     description: str = "",
@@ -318,6 +341,22 @@ def check_all_dependencies() -> list[Dependency]:
             description="Scientific computing",
             fix_debian="pip install scipy",
             fix_fedora="pip install scipy",
+        )
+    )
+    deps.append(
+        check_python_module(
+            "soundfile",
+            description="Audio file read/write",
+            fix_debian="pip install soundfile",
+            fix_fedora="pip install soundfile",
+        )
+    )
+    deps.append(
+        check_python_module_spec(
+            "pydbus",
+            description="D-Bus client/service bindings",
+            fix_debian="pip install pydbus",
+            fix_fedora="pip install pydbus",
         )
     )
 

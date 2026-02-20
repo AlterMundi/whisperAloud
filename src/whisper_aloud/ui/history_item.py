@@ -1,7 +1,8 @@
 """History item widget for the history panel."""
 
 import logging
-from gi.repository import Gtk, GObject, Pango
+import textwrap
+from gi.repository import Gtk, GObject, Pango, Gdk
 
 from ..persistence.models import HistoryEntry
 
@@ -25,6 +26,7 @@ class HistoryItem(Gtk.ListBoxRow):
         """
         super().__init__()
         self.entry = entry
+        self.add_css_class("wa-history-item")
 
         # Build layout
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -38,6 +40,7 @@ class HistoryItem(Gtk.ListBoxRow):
         time_label = Gtk.Label(label=time_str)
         time_label.set_width_chars(5)
         time_label.add_css_class("dim-label")
+        time_label.add_css_class("wa-history-time")
         box.append(time_label)
 
         # Content box (Text + Metadata)
@@ -49,6 +52,7 @@ class HistoryItem(Gtk.ListBoxRow):
         text_label = Gtk.Label(label=text_preview)
         text_label.set_ellipsize(Pango.EllipsizeMode.END)
         text_label.set_xalign(0)
+        text_label.add_css_class("wa-history-title")
         content_box.append(text_label)
 
         # Metadata: language • confidence% • duration
@@ -57,6 +61,7 @@ class HistoryItem(Gtk.ListBoxRow):
         meta_label = Gtk.Label(label=meta_text)
         meta_label.add_css_class("dim-label")
         meta_label.add_css_class("caption")
+        meta_label.add_css_class("wa-history-meta")
         meta_label.set_xalign(0)
         content_box.append(meta_label)
 
@@ -68,13 +73,72 @@ class HistoryItem(Gtk.ListBoxRow):
         fav_button.set_active(entry.favorite)
         fav_button.set_valign(Gtk.Align.CENTER)
         fav_button.add_css_class("flat")
+        fav_button.add_css_class("wa-ghost")
         fav_button.connect("toggled", self._on_favorite_toggled)
         box.append(fav_button)
 
         self.set_child(box)
+        self._preview_text = self._format_transcription_tooltip(entry.text)
+        self._preview_popover: Gtk.Popover | None = None
+        self._setup_hover_preview()
 
         # Context menu
         self._setup_context_menu()
+
+    def _setup_hover_preview(self) -> None:
+        """Set up an upwards popover preview for transcription text."""
+        if not self._preview_text:
+            return
+
+        self._preview_popover = Gtk.Popover()
+        self._preview_popover.set_has_arrow(True)
+        self._preview_popover.set_autohide(False)
+        self._preview_popover.set_parent(self)
+        self._preview_popover.set_position(Gtk.PositionType.TOP)
+        self._preview_popover.add_css_class("wa-preview-popover")
+
+        preview_label = Gtk.Label(label=self._preview_text)
+        preview_label.set_xalign(0.0)
+        preview_label.set_yalign(0.0)
+        preview_label.set_wrap(True)
+        preview_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        preview_label.add_css_class("monospace")
+        preview_label.add_css_class("wa-preview-label")
+        self._preview_popover.set_child(preview_label)
+
+        hover_controller = Gtk.EventControllerMotion()
+        hover_controller.connect("enter", self._on_hover_enter)
+        hover_controller.connect("leave", self._on_hover_leave)
+        self.add_controller(hover_controller)
+
+    def _on_hover_enter(self, _controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
+        """Show preview popover anchored to the top edge of the row."""
+        if not self._preview_popover:
+            return
+        width = max(1, self.get_allocated_width())
+        self._preview_popover.set_pointing_to(Gdk.Rectangle(x=width // 2, y=0, width=1, height=1))
+        self._preview_popover.popup()
+
+    def _on_hover_leave(self, _controller: Gtk.EventControllerMotion) -> None:
+        """Hide preview popover when pointer leaves the row."""
+        if self._preview_popover:
+            self._preview_popover.popdown()
+
+    @staticmethod
+    def _format_transcription_tooltip(text: str) -> str:
+        """Format transcription tooltip as max 5 lines x 25 chars."""
+        cleaned = " ".join((text or "").split())
+        if not cleaned:
+            return ""
+
+        lines = textwrap.wrap(cleaned, width=25, break_long_words=True, replace_whitespace=True)
+        if len(lines) > 5:
+            lines = lines[:5]
+            if len(lines[-1]) >= 3:
+                lines[-1] = lines[-1][:-3] + "..."
+            else:
+                lines[-1] = lines[-1] + "..."
+        return "\n".join(lines)
 
     def _on_favorite_toggled(self, button: Gtk.ToggleButton) -> None:
         """
@@ -127,6 +191,7 @@ class HistoryItem(Gtk.ListBoxRow):
         # Delete button
         delete_btn = Gtk.Button(label="Delete")
         delete_btn.add_css_class("flat")
+        delete_btn.add_css_class("wa-ghost")
         delete_btn.connect("clicked", lambda b: self._on_delete_clicked(popover))
         box.append(delete_btn)
         

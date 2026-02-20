@@ -8,7 +8,14 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
 
-from ..config import WhisperAloudConfig, ModelConfig, AudioConfig, ClipboardConfig, PersistenceConfig
+from ..config import (
+    WhisperAloudConfig,
+    ModelConfig,
+    AudioConfig,
+    ClipboardConfig,
+    NotificationConfig,
+    PersistenceConfig,
+)
 from ..audio import DeviceManager
 from .error_handler import InputValidator, ValidationError
 from ..utils.validation_helpers import sanitize_language_code
@@ -38,7 +45,8 @@ class SettingsDialog(Gtk.Window):
         self.set_title("Settings")
         self.set_default_size(600, 500)
         self.set_modal(False)
-        # self.set_transient_for(parent)
+        self.set_transient_for(parent)
+        self.add_css_class("wa-dialog-window")
 
         # Store configuration
         self._config = config
@@ -47,8 +55,55 @@ class SettingsDialog(Gtk.Window):
 
         # Build UI
         self._build_ui()
+        self._allow_close = False
+        self._child_dialog_open = False
+        self._dirty = False
+        self._initial_ui_state = self._capture_ui_state()
+        self._connect_dirty_tracking()
+        self.connect("notify::is-active", self._on_window_active_changed)
+        self.connect("close-request", self._on_close_request)
 
         logger.info("Settings dialog initialized")
+
+    def _on_window_active_changed(self, window: Gtk.Window, _param: object) -> None:
+        """Auto-close settings when user clicks outside and window loses focus."""
+        if self._child_dialog_open:
+            return
+        if not window.get_property("is-active") and window.is_visible():
+            GLib.idle_add(window.close)
+
+    def _on_close_request(self, _window: Gtk.Window) -> bool:
+        """Intercept close to protect unsaved changes."""
+        if self._allow_close:
+            return False
+        if self._has_unsaved_changes():
+            self._show_discard_confirmation()
+            return True
+        return False
+
+    def _show_discard_confirmation(self) -> None:
+        """Ask user to confirm discarding unsaved changes."""
+        self._child_dialog_open = True
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Discard unsaved changes?",
+        )
+        dialog.format_secondary_text("You have unsaved changes in Settings.")
+        dialog.add_button("Keep Editing", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Discard", Gtk.ResponseType.OK)
+
+        def on_response(d: Gtk.MessageDialog, response: int) -> None:
+            self._child_dialog_open = False
+            d.close()
+            if response == Gtk.ResponseType.OK:
+                self._allow_close = True
+                self.close()
+
+        dialog.connect("response", on_response)
+        dialog.present()
 
     def _build_ui(self) -> None:
         """Build the settings dialog UI."""
@@ -58,20 +113,22 @@ class SettingsDialog(Gtk.Window):
 
         # Header bar
         header_bar = Gtk.HeaderBar()
+        header_bar.add_css_class("wa-headerbar")
         header_bar.set_title_widget(Gtk.Label(label="Settings"))
 
         # Cancel button
         cancel_button = Gtk.Button(label="Cancel")
+        cancel_button.add_css_class("wa-ghost")
         cancel_button.connect("clicked", self._on_cancel_clicked)
         header_bar.pack_start(cancel_button)
 
         # Save button
         save_button = Gtk.Button(label="Save")
         save_button.add_css_class("suggested-action")
+        save_button.add_css_class("wa-primary-action")
         save_button.connect("clicked", self._on_save_clicked)
         header_bar.pack_end(save_button)
-
-        main_box.append(header_bar)
+        self.set_titlebar(header_bar)
 
         # Stack for tabbed interface
         self.stack = Gtk.Stack()
@@ -79,6 +136,7 @@ class SettingsDialog(Gtk.Window):
 
         # Stack switcher
         stack_switcher = Gtk.StackSwitcher()
+        stack_switcher.add_css_class("wa-tabs")
         stack_switcher.set_stack(self.stack)
         stack_switcher.set_halign(Gtk.Align.CENTER)
         stack_switcher.set_margin_top(12)
@@ -103,6 +161,7 @@ class SettingsDialog(Gtk.Window):
         model_section = Gtk.Label(label="Transcription")
         model_section.set_halign(Gtk.Align.START)
         model_section.add_css_class("heading")
+        model_section.add_css_class("wa-section-title")
         page.append(model_section)
 
         # Model selector
@@ -131,6 +190,7 @@ class SettingsDialog(Gtk.Window):
         audio_section = Gtk.Label(label="Audio Input")
         audio_section.set_halign(Gtk.Align.START)
         audio_section.add_css_class("heading")
+        audio_section.add_css_class("wa-section-title")
         audio_section.set_margin_top(12)
         page.append(audio_section)
 
@@ -168,6 +228,7 @@ class SettingsDialog(Gtk.Window):
         clipboard_section = Gtk.Label(label="Clipboard")
         clipboard_section.set_halign(Gtk.Align.START)
         clipboard_section.add_css_class("heading")
+        clipboard_section.add_css_class("wa-section-title")
         clipboard_section.set_margin_top(12)
         page.append(clipboard_section)
 
@@ -197,7 +258,177 @@ class SettingsDialog(Gtk.Window):
         auto_paste_box.append(self.auto_paste_switch)
         page.append(auto_paste_box)
 
+        # --- OSD Notifications Section ---
+        notifications_section = Gtk.Label(label="OSD Notifications")
+        notifications_section.set_halign(Gtk.Align.START)
+        notifications_section.add_css_class("heading")
+        notifications_section.add_css_class("wa-section-title")
+        notifications_section.set_margin_top(12)
+        page.append(notifications_section)
+
+        notifications_help = Gtk.Label(
+            label="Choose which desktop popups are shown while using WhisperAloud."
+        )
+        notifications_help.set_halign(Gtk.Align.START)
+        notifications_help.add_css_class("wa-help")
+        page.append(notifications_help)
+
+        self.notifications_enabled_switch = Gtk.Switch()
+        self.notifications_enabled_switch.set_active(self._config.notifications.enabled)
+        self.notifications_enabled_switch.connect(
+            "notify::active", self._on_notifications_master_toggled
+        )
+
+        notifications_enabled_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        notifications_enabled_label = Gtk.Label(label="Enable OSD notifications:")
+        notifications_enabled_label.set_halign(Gtk.Align.START)
+        notifications_enabled_label.set_hexpand(True)
+        notifications_enabled_box.append(notifications_enabled_label)
+        notifications_enabled_box.append(self.notifications_enabled_switch)
+        page.append(notifications_enabled_box)
+
+        self.notification_recording_started_switch = Gtk.Switch()
+        self.notification_recording_started_switch.set_active(
+            self._config.notifications.recording_started
+        )
+        self.notification_recording_stopped_switch = Gtk.Switch()
+        self.notification_recording_stopped_switch.set_active(
+            self._config.notifications.recording_stopped
+        )
+        self.notification_transcription_completed_switch = Gtk.Switch()
+        self.notification_transcription_completed_switch.set_active(
+            self._config.notifications.transcription_completed
+        )
+        self.notification_error_switch = Gtk.Switch()
+        self.notification_error_switch.set_active(self._config.notifications.error)
+
+        recording_started_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        recording_started_label = Gtk.Label(label="Recording started:")
+        recording_started_label.set_halign(Gtk.Align.START)
+        recording_started_label.set_hexpand(True)
+        recording_started_box.append(recording_started_label)
+        recording_started_box.append(self.notification_recording_started_switch)
+        page.append(recording_started_box)
+
+        recording_stopped_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        recording_stopped_label = Gtk.Label(label="Recording stopped:")
+        recording_stopped_label.set_halign(Gtk.Align.START)
+        recording_stopped_label.set_hexpand(True)
+        recording_stopped_box.append(recording_stopped_label)
+        recording_stopped_box.append(self.notification_recording_stopped_switch)
+        page.append(recording_stopped_box)
+
+        transcription_completed_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        transcription_completed_label = Gtk.Label(label="Transcription completed:")
+        transcription_completed_label.set_halign(Gtk.Align.START)
+        transcription_completed_label.set_hexpand(True)
+        transcription_completed_box.append(transcription_completed_label)
+        transcription_completed_box.append(self.notification_transcription_completed_switch)
+        page.append(transcription_completed_box)
+
+        error_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        error_label = Gtk.Label(label="Errors:")
+        error_label.set_halign(Gtk.Align.START)
+        error_label.set_hexpand(True)
+        error_box.append(error_label)
+        error_box.append(self.notification_error_switch)
+        page.append(error_box)
+
+        self._set_notification_type_switches_sensitive(self._config.notifications.enabled)
+        self._style_setting_rows_in_page(page)
+
         self.stack.add_titled(page, "general", "General")
+
+    def _style_setting_rows_in_page(self, page: Gtk.Box) -> None:
+        """Apply a shared style class to horizontal setting rows."""
+        child = page.get_first_child()
+        while child is not None:
+            if isinstance(child, Gtk.Box) and child.get_orientation() == Gtk.Orientation.HORIZONTAL:
+                child.add_css_class("wa-setting-row")
+            child = child.get_next_sibling()
+
+    def _set_notification_type_switches_sensitive(self, enabled: bool) -> None:
+        """Enable/disable per-type notification switches from master toggle."""
+        self.notification_recording_started_switch.set_sensitive(enabled)
+        self.notification_recording_stopped_switch.set_sensitive(enabled)
+        self.notification_transcription_completed_switch.set_sensitive(enabled)
+        self.notification_error_switch.set_sensitive(enabled)
+
+    def _on_notifications_master_toggled(self, switch: Gtk.Switch, _param: object) -> None:
+        """Handle master notifications toggle changes."""
+        self._set_notification_type_switches_sensitive(switch.get_active())
+
+    def _capture_ui_state(self) -> dict:
+        """Capture current form state for unsaved-change detection."""
+        return {
+            "model": self.model_dropdown.get_selected(),
+            "language": self.language_entry.get_text(),
+            "audio_device": self.audio_device_dropdown.get_selected(),
+            "auto_copy": self.auto_copy_switch.get_active(),
+            "auto_paste": self.auto_paste_switch.get_active(),
+            "notifications_enabled": self.notifications_enabled_switch.get_active(),
+            "notif_start": self.notification_recording_started_switch.get_active(),
+            "notif_stop": self.notification_recording_stopped_switch.get_active(),
+            "notif_done": self.notification_transcription_completed_switch.get_active(),
+            "notif_error": self.notification_error_switch.get_active(),
+            "compute_device": self.compute_device_dropdown.get_selected(),
+            "sample_rate": self.sample_rate_entry.get_text(),
+            "vad_enabled": self.vad_switch.get_active(),
+            "vad_threshold": self.vad_threshold_entry.get_text(),
+            "normalize": self.normalize_switch.get_active(),
+            "paste_delay": self.paste_delay_entry.get_text(),
+            "save_audio": self.save_audio_switch.get_active(),
+            "dedupe_audio": self.deduplicate_audio_switch.get_active(),
+            "auto_cleanup": self.auto_cleanup_switch.get_active(),
+            "cleanup_days": self.cleanup_days_entry.get_text(),
+            "max_entries": self.max_entries_entry.get_text(),
+            "db_path": self.db_path_entry.get_text(),
+            "audio_archive_path": self.audio_archive_entry.get_text(),
+        }
+
+    def _has_unsaved_changes(self) -> bool:
+        """Return True when current UI state differs from initial state."""
+        return self._capture_ui_state() != self._initial_ui_state
+
+    def _mark_dirty(self, *_args: object) -> None:
+        """Update dirty flag based on current form state."""
+        self._dirty = self._has_unsaved_changes()
+
+    def _connect_dirty_tracking(self) -> None:
+        """Connect form inputs to unsaved-change tracking."""
+        tracked_widgets = [
+            self.model_dropdown,
+            self.language_entry,
+            self.audio_device_dropdown,
+            self.auto_copy_switch,
+            self.auto_paste_switch,
+            self.notifications_enabled_switch,
+            self.notification_recording_started_switch,
+            self.notification_recording_stopped_switch,
+            self.notification_transcription_completed_switch,
+            self.notification_error_switch,
+            self.compute_device_dropdown,
+            self.sample_rate_entry,
+            self.vad_switch,
+            self.vad_threshold_entry,
+            self.normalize_switch,
+            self.paste_delay_entry,
+            self.save_audio_switch,
+            self.deduplicate_audio_switch,
+            self.auto_cleanup_switch,
+            self.cleanup_days_entry,
+            self.max_entries_entry,
+            self.db_path_entry,
+            self.audio_archive_entry,
+        ]
+
+        for widget in tracked_widgets:
+            if isinstance(widget, Gtk.Switch):
+                widget.connect("notify::active", self._mark_dirty)
+            elif isinstance(widget, Gtk.DropDown):
+                widget.connect("notify::selected", self._mark_dirty)
+            elif isinstance(widget, Gtk.Entry):
+                widget.connect("changed", self._mark_dirty)
 
     def _add_advanced_page(self) -> None:
         """Add advanced settings page."""
@@ -216,6 +447,7 @@ class SettingsDialog(Gtk.Window):
         perf_section = Gtk.Label(label="Performance")
         perf_section.set_halign(Gtk.Align.START)
         perf_section.add_css_class("heading")
+        perf_section.add_css_class("wa-section-title")
         page.append(perf_section)
 
         # Compute device
@@ -236,6 +468,7 @@ class SettingsDialog(Gtk.Window):
         audio_section = Gtk.Label(label="Audio Processing")
         audio_section.set_halign(Gtk.Align.START)
         audio_section.add_css_class("heading")
+        audio_section.add_css_class("wa-section-title")
         audio_section.set_margin_top(12)
         page.append(audio_section)
 
@@ -308,6 +541,7 @@ class SettingsDialog(Gtk.Window):
         history_section = Gtk.Label(label="History & Storage")
         history_section.set_halign(Gtk.Align.START)
         history_section.add_css_class("heading")
+        history_section.add_css_class("wa-section-title")
         history_section.set_margin_top(12)
         page.append(history_section)
 
@@ -421,6 +655,7 @@ class SettingsDialog(Gtk.Window):
         audio_path_box.append(self.audio_archive_entry)
         page.append(audio_path_box)
 
+        self._style_setting_rows_in_page(page)
         self.stack.add_titled(scrolled, "advanced", "Advanced")
 
     def _on_save_clicked(self, button: Gtk.Button) -> None:
@@ -496,6 +731,21 @@ class SettingsDialog(Gtk.Window):
                 field_name="Paste delay"
             )
 
+            logger.debug("Updating notifications config")
+            if not self._config.notifications:
+                self._config.notifications = NotificationConfig()
+            self._config.notifications.enabled = self.notifications_enabled_switch.get_active()
+            self._config.notifications.recording_started = (
+                self.notification_recording_started_switch.get_active()
+            )
+            self._config.notifications.recording_stopped = (
+                self.notification_recording_stopped_switch.get_active()
+            )
+            self._config.notifications.transcription_completed = (
+                self.notification_transcription_completed_switch.get_active()
+            )
+            self._config.notifications.error = self.notification_error_switch.get_active()
+
             logger.debug("Updating persistence config")
             # Update persistence config
             if not self._config.persistence:
@@ -535,7 +785,7 @@ class SettingsDialog(Gtk.Window):
             try:
                 from pydbus import SessionBus
                 bus = SessionBus()
-                daemon = bus.get('org.fede.whisperAloud')
+                daemon = bus.get('org.fede.whisperaloud')
                 result = daemon.ReloadConfig()
                 logger.info(f"Daemon config reload: {result}")
             except Exception as e:
@@ -545,6 +795,10 @@ class SettingsDialog(Gtk.Window):
             # Trigger callback
             if self._on_save_callback:
                 self._on_save_callback()
+
+            # Reset unsaved-change baseline after successful persistence.
+            self._initial_ui_state = self._capture_ui_state()
+            self._dirty = False
 
             logger.debug("Showing success message")
             # Show success message
@@ -587,8 +841,10 @@ class SettingsDialog(Gtk.Window):
             buttons=Gtk.ButtonsType.OK,
             text=message,
         )
+        self._child_dialog_open = True
         
         def on_response(d, r):
+            self._child_dialog_open = False
             d.close()
             if on_close:
                 on_close()

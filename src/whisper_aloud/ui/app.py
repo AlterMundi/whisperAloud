@@ -9,6 +9,7 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gio, GLib
 
 from .main_window import MainWindow
+from .styles import install_app_css
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class WhisperAloudApp(Gtk.Application):
         """
         Gtk.Application.do_startup(self)
         logger.info("Application startup")
+        install_app_css()
 
         # Create actions
         self._create_actions()

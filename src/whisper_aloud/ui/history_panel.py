@@ -46,6 +46,7 @@ class HistoryPanel(Gtk.Box):
 
     def _build_ui(self):
         """Build panel UI."""
+        self.add_css_class("wa-history-panel")
         self.set_margin_start(6)
         self.set_margin_end(6)
         self.set_margin_top(6)
@@ -53,14 +54,17 @@ class HistoryPanel(Gtk.Box):
 
         # Header
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header_box.add_css_class("wa-history-header")
         label = Gtk.Label(label="History")
         label.add_css_class("heading")
+        label.add_css_class("wa-section-title")
         header_box.append(label)
         
         # Refresh button
         refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
         refresh_btn.set_tooltip_text("Refresh history")
         refresh_btn.add_css_class("flat")
+        refresh_btn.add_css_class("wa-ghost")
         refresh_btn.connect("clicked", lambda b: self.refresh_recent())
         header_box.append(refresh_btn)
         
@@ -68,11 +72,13 @@ class HistoryPanel(Gtk.Box):
 
         # Search box
         search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        search_box.add_css_class("wa-history-search")
         
         self.search_entry = Gtk.SearchEntry()
         # Use props for GTK4 version compatibility
         self.search_entry.props.placeholder_text = "Search transcriptions..."
         self.search_entry.set_hexpand(True)
+        self.search_entry.add_css_class("wa-search-entry")
         self.search_entry.connect("search-changed", self._on_search_changed)
         search_box.append(self.search_entry)
 
@@ -80,6 +86,7 @@ class HistoryPanel(Gtk.Box):
         self.favorites_button = Gtk.ToggleButton()
         self.favorites_button.set_icon_name("starred-symbolic")
         self.favorites_button.set_tooltip_text("Show favorites only")
+        self.favorites_button.add_css_class("wa-ghost")
         self.favorites_button.connect("toggled", self._on_filter_toggled)
         search_box.append(self.favorites_button)
 
@@ -87,6 +94,7 @@ class HistoryPanel(Gtk.Box):
 
         # Scrolled list
         scrolled = Gtk.ScrolledWindow()
+        scrolled.add_css_class("wa-history-list-wrap")
         scrolled.set_vexpand(True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
@@ -94,12 +102,14 @@ class HistoryPanel(Gtk.Box):
         self.list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.list_box.connect("row-activated", self._on_row_activated)
         self.list_box.add_css_class("rich-list")
+        self.list_box.add_css_class("wa-history-list")
         scrolled.set_child(self.list_box)
 
         self.append(scrolled)
 
         # Export button
         export_button = Gtk.Button(label="Export History...")
+        export_button.add_css_class("wa-ghost")
         export_button.connect("clicked", self._on_export_clicked)
         self.append(export_button)
 
@@ -192,6 +202,7 @@ class HistoryPanel(Gtk.Box):
             header = Gtk.Label(label=date_label)
             header.add_css_class("heading")
             header.add_css_class("dim-label")
+            header.add_css_class("wa-history-date")
             header.set_halign(Gtk.Align.START)
             header.set_margin_top(12)
             header.set_margin_bottom(4)

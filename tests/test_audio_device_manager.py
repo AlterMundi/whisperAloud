@@ -9,9 +9,13 @@ from whisper_aloud.audio import DeviceManager, AudioDevice
 from whisper_aloud.exceptions import AudioDeviceError
 
 
+@pytest.mark.requires_audio_hw
 def test_list_input_devices():
     """Test listing input devices."""
-    devices = DeviceManager.list_input_devices()
+    try:
+        devices = DeviceManager.list_input_devices()
+    except AudioDeviceError:
+        pytest.skip("No audio input devices available in test environment")
     assert isinstance(devices, list)
     # May be empty if no audio hardware in CI
     if devices:
@@ -27,6 +31,7 @@ def test_list_devices_failure(mock_query):
         DeviceManager.list_input_devices()
 
 
+@pytest.mark.requires_audio_hw
 def test_get_default_device():
     """Test getting default device."""
     try:
@@ -55,8 +60,13 @@ def test_get_device_by_id(mock_default, mock_query):
         assert device.name == "Test Mic"
 
 
-def test_get_device_by_id_not_found():
+@patch('whisper_aloud.audio.device_manager.DeviceManager.list_input_devices')
+def test_get_device_by_id_not_found(mock_list_devices):
     """Test getting non-existent device."""
+    mock_list_devices.return_value = [
+        AudioDevice(id=1, name="Mic 1", channels=1, sample_rate=16000.0, is_default=True, hostapi="ALSA"),
+        AudioDevice(id=2, name="Mic 2", channels=1, sample_rate=16000.0, is_default=False, hostapi="ALSA"),
+    ]
     with pytest.raises(AudioDeviceError, match="not found"):
         DeviceManager.get_device_by_id(999)
 

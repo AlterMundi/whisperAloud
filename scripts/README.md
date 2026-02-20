@@ -72,6 +72,28 @@ python scripts/test_transcription_simple.py
 
 ## Usage Notes
 
+### CI Test Profile
+
+Use the deterministic CI test profile:
+
+```bash
+./scripts/test_ci.sh
+```
+
+This excludes tests marked:
+- `integration`
+- `requires_audio_hw`
+- `requires_display`
+- `requires_dbus`
+
+Pass extra pytest args after the script command:
+
+```bash
+./scripts/test_ci.sh -q -x
+```
+
+---
+
 ### Environment Setup
 
 All scripts require the virtual environment:

@@ -36,9 +36,16 @@ class NotificationManager:
         self.app_name = "WhisperAloud"
         logger.info("NotificationManager initialized")
 
+    def _is_enabled(self, notification_type: str) -> bool:
+        """Return whether a notification type is enabled in config."""
+        notifications = self.config.notifications
+        if not notifications.enabled:
+            return False
+        return bool(getattr(notifications, notification_type, True))
+
     def show_recording_started(self) -> None:
         """Show notification when recording starts."""
-        if not HAS_NOTIFY:
+        if not HAS_NOTIFY or not self._is_enabled("recording_started"):
             return
 
         notification = Notify.Notification.new(
@@ -51,7 +58,7 @@ class NotificationManager:
 
     def show_recording_stopped(self) -> None:
         """Show notification when recording stops."""
-        if not HAS_NOTIFY:
+        if not HAS_NOTIFY or not self._is_enabled("recording_stopped"):
             return
 
         notification = Notify.Notification.new(
@@ -64,7 +71,7 @@ class NotificationManager:
 
     def show_transcription_completed(self, text: str) -> None:
         """Show notification when transcription completes."""
-        if not HAS_NOTIFY:
+        if not HAS_NOTIFY or not self._is_enabled("transcription_completed"):
             return
 
         # Truncate text for notification
@@ -89,7 +96,7 @@ class NotificationManager:
 
     def show_error(self, error_message: str) -> None:
         """Show error notification."""
-        if not HAS_NOTIFY:
+        if not HAS_NOTIFY or not self._is_enabled("error"):
             return
 
         notification = Notify.Notification.new(

@@ -508,6 +508,82 @@ EOF
     print_success "Desktop file installed"
 }
 
+# Install user-level CLI shims in ~/.local/bin
+install_cli_shims() {
+    print_msg "Installing user CLI shims in ~/.local/bin..."
+
+    local user_bin="$HOME/.local/bin"
+    mkdir -p "$user_bin"
+
+    ln -sf "$VENV_PATH/bin/whisper-aloud" "$user_bin/whisper-aloud"
+    ln -sf "$VENV_PATH/bin/whisper-aloud-daemon" "$user_bin/whisper-aloud-daemon"
+    ln -sf "$VENV_PATH/bin/whisper-aloud-gui" "$user_bin/whisper-aloud-gui"
+
+    if [[ ":$PATH:" != *":$user_bin:"* ]]; then
+        print_warning "$user_bin is not in PATH for this shell."
+        print_msg "Add this to your shell profile:"
+        echo "  export PATH=\"$user_bin:\$PATH\""
+    fi
+
+    print_success "CLI shims installed"
+}
+
+# Install user systemd service and D-Bus activation
+install_user_service() {
+    print_msg "Installing user systemd service..."
+
+    local user_systemd_dir="$HOME/.config/systemd/user"
+    local user_dbus_dir="$HOME/.local/share/dbus-1/services"
+    local service_file="$user_systemd_dir/whisper-aloud.service"
+    local dbus_file="$user_dbus_dir/org.fede.whisperaloud.service"
+
+    mkdir -p "$user_systemd_dir"
+    mkdir -p "$user_dbus_dir"
+
+    cat > "$service_file" << EOF
+[Unit]
+Description=WhisperAloud Transcription Service
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.fede.whisperaloud
+ExecStart=$VENV_PATH/bin/whisper-aloud-daemon
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
+EOF
+
+    cat > "$dbus_file" << EOF
+[D-BUS Service]
+Name=org.fede.whisperaloud
+SystemdService=whisper-aloud.service
+EOF
+
+    if command -v systemctl &>/dev/null; then
+        if systemctl --user daemon-reload 2>/dev/null; then
+            if systemctl --user enable --now whisper-aloud.service 2>/dev/null; then
+                print_success "User service enabled and started (whisper-aloud.service)"
+            else
+                print_warning "Could not enable/start user service automatically"
+                print_msg "You can run: systemctl --user enable --now whisper-aloud.service"
+            fi
+        else
+            print_warning "Could not reload user systemd daemon (no user session?)"
+            print_msg "After login, run: systemctl --user daemon-reload"
+            print_msg "Then run: systemctl --user enable --now whisper-aloud.service"
+        fi
+    else
+        print_warning "systemctl not found; user service installed but not activated"
+    fi
+
+    print_success "User service files installed"
+}
+
 # Uninstall
 uninstall() {
     print_msg "Uninstalling WhisperAloud..."
@@ -523,6 +599,39 @@ uninstall() {
     if [ -f "$desktop_file" ]; then
         rm "$desktop_file"
         print_success "Removed desktop file"
+    fi
+
+    # Remove user-level CLI shims
+    for shim in whisper-aloud whisper-aloud-daemon whisper-aloud-gui; do
+        local shim_path="$HOME/.local/bin/$shim"
+        if [ -L "$shim_path" ]; then
+            rm "$shim_path"
+            print_success "Removed CLI shim: $shim"
+        fi
+    done
+
+    # Remove user systemd service + D-Bus activation
+    local user_systemd_dir="$HOME/.config/systemd/user"
+    local user_dbus_dir="$HOME/.local/share/dbus-1/services"
+    local service_file="$user_systemd_dir/whisper-aloud.service"
+    local dbus_file="$user_dbus_dir/org.fede.whisperaloud.service"
+
+    if command -v systemctl &>/dev/null; then
+        systemctl --user disable --now whisper-aloud.service 2>/dev/null || true
+    fi
+
+    if [ -f "$service_file" ]; then
+        rm "$service_file"
+        print_success "Removed user service file"
+    fi
+
+    if [ -f "$dbus_file" ]; then
+        rm "$dbus_file"
+        print_success "Removed D-Bus activation file"
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        systemctl --user daemon-reload 2>/dev/null || true
     fi
 
     # Note about config and cache
@@ -544,6 +653,11 @@ print_instructions() {
     echo -e "${GREEN}════════════════════════════════════════════${NC}"
     echo ""
     echo "To use WhisperAloud:"
+    echo ""
+    echo "  Commands are installed in ~/.local/bin:"
+    echo -e "     ${BLUE}whisper-aloud${NC}"
+    echo -e "     ${BLUE}whisper-aloud-daemon${NC}"
+    echo -e "     ${BLUE}whisper-aloud-gui${NC}"
     echo ""
     echo "  1. Activate the virtual environment:"
     echo -e "     ${BLUE}source $VENV_PATH/bin/activate${NC}"
@@ -660,6 +774,8 @@ main() {
 
     # Verify
     if verify_installation; then
+        install_cli_shims
+        install_user_service
         install_desktop_file
         print_instructions
     else

@@ -131,6 +131,16 @@ class ClipboardConfig:
 
 
 @dataclass
+class NotificationConfig:
+    """Configuration for desktop OSD notifications."""
+    enabled: bool = True
+    recording_started: bool = True
+    recording_stopped: bool = True
+    transcription_completed: bool = True
+    error: bool = True
+
+
+@dataclass
 class PersistenceConfig:
     """Configuration for persistence/history."""
     db_path: Optional[Path] = None
@@ -182,6 +192,7 @@ class WhisperAloudConfig:
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     clipboard: ClipboardConfig = field(default_factory=ClipboardConfig)
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     audio_processing: AudioProcessingConfig = field(default_factory=AudioProcessingConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
@@ -219,6 +230,13 @@ class WhisperAloudConfig:
                 "timeout_seconds": self.clipboard.timeout_seconds,
                 "fallback_to_file": self.clipboard.fallback_to_file,
                 "fallback_path": self.clipboard.fallback_path,
+            },
+            "notifications": {
+                "enabled": self.notifications.enabled,
+                "recording_started": self.notifications.recording_started,
+                "recording_stopped": self.notifications.recording_stopped,
+                "transcription_completed": self.notifications.transcription_completed,
+                "error": self.notifications.error,
             },
             "persistence": {
                 "db_path": str(self.persistence.db_path) if self.persistence.db_path else None,
@@ -271,6 +289,11 @@ class WhisperAloudConfig:
             for key, value in data["clipboard"].items():
                 if hasattr(config.clipboard, key):
                     setattr(config.clipboard, key, value)
+
+        if "notifications" in data:
+            for key, value in data["notifications"].items():
+                if hasattr(config.notifications, key):
+                    setattr(config.notifications, key, value)
 
         if "persistence" in data:
             for key, value in data["persistence"].items():
@@ -363,6 +386,19 @@ class WhisperAloudConfig:
         self.clipboard.timeout_seconds = parse_float_env('WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS', self.clipboard.timeout_seconds)
         self.clipboard.fallback_to_file = parse_bool_env('WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE', self.clipboard.fallback_to_file)
         self.clipboard.fallback_path = os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH', self.clipboard.fallback_path)
+
+        # Notifications
+        self.notifications.enabled = parse_bool_env('WHISPER_ALOUD_NOTIFICATIONS_ENABLED', self.notifications.enabled)
+        self.notifications.recording_started = parse_bool_env(
+            'WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STARTED', self.notifications.recording_started
+        )
+        self.notifications.recording_stopped = parse_bool_env(
+            'WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STOPPED', self.notifications.recording_stopped
+        )
+        self.notifications.transcription_completed = parse_bool_env(
+            'WHISPER_ALOUD_NOTIFICATIONS_TRANSCRIPTION_COMPLETED', self.notifications.transcription_completed
+        )
+        self.notifications.error = parse_bool_env('WHISPER_ALOUD_NOTIFICATIONS_ERROR', self.notifications.error)
 
         # Persistence
         if os.getenv('WHISPER_ALOUD_DB_PATH'):
@@ -552,6 +588,23 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
     if clipboard_changes:
         changes.changed_sections.add("clipboard")
         changes.changed_fields["clipboard"] = clipboard_changes
+
+    # Check notification changes
+    notification_changes = set()
+    if old.notifications.enabled != new.notifications.enabled:
+        notification_changes.add("enabled")
+    if old.notifications.recording_started != new.notifications.recording_started:
+        notification_changes.add("recording_started")
+    if old.notifications.recording_stopped != new.notifications.recording_stopped:
+        notification_changes.add("recording_stopped")
+    if old.notifications.transcription_completed != new.notifications.transcription_completed:
+        notification_changes.add("transcription_completed")
+    if old.notifications.error != new.notifications.error:
+        notification_changes.add("error")
+
+    if notification_changes:
+        changes.changed_sections.add("notifications")
+        changes.changed_fields["notifications"] = notification_changes
 
     # Check persistence changes
     persistence_changes = set()

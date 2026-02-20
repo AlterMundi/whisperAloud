@@ -3,10 +3,38 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
+import os
 
-from whisper_aloud.ui.history_item import HistoryItem
-from whisper_aloud.ui.history_panel import HistoryPanel
-from whisper_aloud.persistence.models import HistoryEntry
+_ui_tests_enabled = (
+    os.environ.get("WHISPERALOUD_RUN_GTK_UI_TESTS") == "1"
+    and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+)
+
+if not _ui_tests_enabled:
+    pytestmark = [
+        pytest.mark.requires_display,
+        pytest.mark.skip(
+            reason=(
+                "GTK UI tests are opt-in and require display "
+                "(set WHISPERALOUD_RUN_GTK_UI_TESTS=1 with DISPLAY/WAYLAND_DISPLAY)"
+            )
+        ),
+    ]
+else:
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk
+
+    if not Gtk.init_check():
+        pytestmark = [
+            pytest.mark.requires_display,
+            pytest.mark.skip(reason="GTK4 initialization failed in test environment"),
+        ]
+    else:
+        pytestmark = pytest.mark.requires_display
+        from whisper_aloud.ui.history_item import HistoryItem
+        from whisper_aloud.ui.history_panel import HistoryPanel
+        from whisper_aloud.persistence.models import HistoryEntry
 
 
 @pytest.fixture

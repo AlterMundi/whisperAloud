@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from pathlib import Path
 from typing import Optional
 
 import gi
@@ -64,6 +65,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Set window properties
         self.set_title("WhisperAloud")
         self.set_default_size(900, 600)
+        self.add_css_class("wa-app-window")
         self.set_titlebar(self.header_bar)  # Use custom header bar
 
         # Set up keyboard shortcuts
@@ -83,11 +85,13 @@ class MainWindow(Gtk.ApplicationWindow):
         # Create header bar
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
+        self.header_bar.add_css_class("wa-headerbar")
 
         # History toggle button
         self.history_toggle = Gtk.ToggleButton()
         self.history_toggle.set_icon_name("sidebar-show-symbolic")
         self.history_toggle.set_tooltip_text("Toggle History")
+        self.history_toggle.add_css_class("wa-toolbar-btn")
         self.history_toggle.set_active(True)
         self.history_toggle.connect("toggled", self._on_history_toggled)
         self.header_bar.pack_start(self.history_toggle)
@@ -96,6 +100,7 @@ class MainWindow(Gtk.ApplicationWindow):
         help_button = Gtk.Button()
         help_button.set_icon_name("help-about-symbolic")
         help_button.set_tooltip_text("Keyboard Shortcuts (F1)")
+        help_button.add_css_class("wa-toolbar-btn")
         help_button.connect("clicked", self._on_help_clicked)
         self.header_bar.pack_end(help_button)
 
@@ -103,6 +108,7 @@ class MainWindow(Gtk.ApplicationWindow):
         settings_button = Gtk.Button()
         settings_button.set_icon_name("preferences-system-symbolic")
         settings_button.set_tooltip_text("Settings (Ctrl+,)")
+        settings_button.add_css_class("wa-toolbar-btn")
         settings_button.connect("clicked", self._on_settings_clicked)
         self.header_bar.pack_end(settings_button)
 
@@ -112,6 +118,7 @@ class MainWindow(Gtk.ApplicationWindow):
                                   "Italiano", "Portugu\u00eas", "\u65e5\u672c\u8a9e", "\u4e2d\u6587", "\ud55c\uad6d\uc5b4", "\u0420\u0443\u0441\u0441\u043a\u0438\u0439", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "\u0939\u093f\u0928\u094d\u0926\u0940"]
         self.lang_dropdown = Gtk.DropDown.new_from_strings(self._language_labels)
         self.lang_dropdown.set_tooltip_text("Select transcription language")
+        self.lang_dropdown.add_css_class("wa-language")
         self.lang_dropdown.set_selected(0)  # Default to Auto, will be updated when config loads
 
         self.lang_dropdown.connect("notify::selected", self._on_language_changed)
@@ -130,12 +137,14 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Status label
         self.status_label = Gtk.Label(label="Connecting to daemon...")
+        self.status_label.add_css_class("wa-status-chip")
         self.status_label.set_margin_top(12)
         self.status_label.set_margin_bottom(12)
         left_box.append(self.status_label)
 
         # Recording panel
         recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        recording_panel_box.add_css_class("wa-surface")
         recording_panel_box.set_margin_start(32)
         recording_panel_box.set_margin_end(32)
         recording_panel_box.set_margin_top(16)
@@ -146,6 +155,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.record_button = Gtk.Button(label="Start Recording")
         self.record_button.add_css_class("suggested-action")
         self.record_button.add_css_class("pill")
+        self.record_button.add_css_class("wa-primary-action")
         self.record_button.set_size_request(200, 56)  # Fixed width for consistent look
         self.record_button.set_sensitive(False)  # Disabled until daemon connects
         self.record_button.set_tooltip_text("Start/stop recording (Space)")
@@ -156,6 +166,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.cancel_button = Gtk.Button(label="Cancel")
         self.cancel_button.add_css_class("destructive-action")
         self.cancel_button.add_css_class("pill")
+        self.cancel_button.add_css_class("wa-primary-action")
         self.cancel_button.set_size_request(200, 56)  # Same size as record button
         self.cancel_button.set_visible(False)  # Hidden by default
         self.cancel_button.set_tooltip_text("Cancel transcription (Ctrl+X)")
@@ -181,6 +192,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Transcription view
         transcription_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        transcription_box.add_css_class("wa-surface")
         transcription_box.set_margin_start(16)
         transcription_box.set_margin_end(16)
         transcription_box.set_margin_top(12)
@@ -189,11 +201,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Scrolled window with text view
         scrolled = Gtk.ScrolledWindow()
+        scrolled.add_css_class("wa-output-wrap")
         scrolled.set_vexpand(True)
         scrolled.set_hexpand(True)
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
         self.text_view = Gtk.TextView()
+        self.text_view.add_css_class("wa-output")
         self.text_view.set_editable(False)
         self.text_view.set_wrap_mode(Gtk.WrapMode.WORD)
         self.text_view.set_margin_start(12)
@@ -209,12 +223,14 @@ class MainWindow(Gtk.ApplicationWindow):
         button_box.set_halign(Gtk.Align.END)
 
         self.copy_button = Gtk.Button(label="Copy to Clipboard")
+        self.copy_button.add_css_class("wa-ghost")
         self.copy_button.set_sensitive(False)
         self.copy_button.set_tooltip_text("Copy transcription to clipboard (Ctrl+C)")
         self.copy_button.connect("clicked", self._on_copy_clicked)
         button_box.append(self.copy_button)
 
         self.clear_button = Gtk.Button(label="Clear")
+        self.clear_button.add_css_class("wa-ghost")
         self.clear_button.set_sensitive(False)
         self.clear_button.set_tooltip_text("Clear transcription text (Escape)")
         self.clear_button.connect("clicked", self._on_clear_clicked)
@@ -459,7 +475,24 @@ class MainWindow(Gtk.ApplicationWindow):
         title.add_css_class("title-2")
         box.append(title)
 
-        hint = Gtk.Label(label="Start the daemon with:\n\n  systemctl --user start whisper-aloud\n\nor run:\n\n  whisper-aloud-daemon")
+        has_user_service = (Path.home() / ".config/systemd/user/whisper-aloud.service").exists()
+        if has_user_service:
+            hint_text = (
+                "Start the daemon with:\n\n"
+                "  systemctl --user start whisper-aloud\n\n"
+                "Or run directly:\n\n"
+                "  whisper-aloud-daemon\n"
+                "  whisper-aloud --daemon"
+            )
+        else:
+            hint_text = (
+                "Start the daemon with:\n\n"
+                "  whisper-aloud-daemon\n"
+                "  whisper-aloud --daemon\n\n"
+                "Tip: run ./install.sh to enable systemd user service integration."
+            )
+
+        hint = Gtk.Label(label=hint_text)
         hint.set_wrap(True)
         hint.set_selectable(True)
         hint.set_justify(Gtk.Justification.LEFT)
