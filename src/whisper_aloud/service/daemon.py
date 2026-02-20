@@ -166,18 +166,33 @@ class WhisperAloudService:
         logger.info("WhisperAloudService initialized")
 
     def _init_components(self) -> None:
-        """Initialize recorder and transcriber."""
+        """Initialize recorder and transcriber.
+
+        The recorder is created immediately (fast).  The transcriber is
+        created but model loading is deferred to first use so that D-Bus
+        name registration is not blocked (avoids systemd activation timeout).
+        """
         try:
             self.recorder = AudioRecorder(
                 self.config.audio,
                 level_callback=self._on_level,
             )
             self.transcriber = Transcriber(self.config)
-            self.transcriber.load_model()
-            logger.info("Components initialized successfully")
+            # Model loading deferred to _ensure_model_loaded()
+            self._model_loaded = False
+            logger.info("Components initialized (model loading deferred)")
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
             raise
+
+    def _ensure_model_loaded(self) -> None:
+        """Load the transcription model on first use."""
+        if self._model_loaded:
+            return
+        logger.info("Loading transcription model (first use)...")
+        self.transcriber.load_model()
+        self._model_loaded = True
+        logger.info("Transcription model loaded")
 
     def run(self) -> None:
         """Run the D-Bus service."""
@@ -438,6 +453,7 @@ class WhisperAloudService:
 
     def _transcribe_audio(self, audio_data):
         """Transcribe audio data (runs in thread)."""
+        self._ensure_model_loaded()
         return self.transcriber.transcribe_numpy(audio_data)
 
     def _transcribe_and_emit(self, audio_data) -> None:

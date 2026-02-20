@@ -226,6 +226,27 @@ class TestDaemonMethods:
         assert id_int == 1
 
 
+    # ─── Deferred model loading ────────────────────────────────────────
+
+    def test_model_not_loaded_at_init(self, daemon):
+        """Model should NOT be loaded during __init__ (deferred for D-Bus activation)."""
+        daemon.transcriber.load_model.assert_not_called()
+        assert daemon._model_loaded is False
+
+    def test_ensure_model_loaded_on_first_transcription(self, daemon):
+        """Model should be loaded on first _transcribe_audio call."""
+        mock_result = MagicMock()
+        daemon.transcriber.transcribe_numpy.return_value = mock_result
+        daemon._transcribe_audio(np.zeros(16000, dtype=np.float32))
+        daemon.transcriber.load_model.assert_called_once()
+        assert daemon._model_loaded is True
+
+    def test_ensure_model_loaded_idempotent(self, daemon):
+        """Repeated _ensure_model_loaded calls should only load once."""
+        daemon._ensure_model_loaded()
+        daemon._ensure_model_loaded()
+        daemon.transcriber.load_model.assert_called_once()
+
     # ─── Task 2.2: Level tracking tests ──────────────────────────────────
 
     def test_start_recording_starts_level_timer(self, daemon):
