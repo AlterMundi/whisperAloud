@@ -3,23 +3,22 @@
 import logging
 import os
 import signal as signal_module
+import threading
 import time
 import uuid
-from pydbus.generic import signal
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from gi.repository import GLib
 from pydbus import SessionBus
+from pydbus.generic import signal
 
-from ..audio.recorder import AudioRecorder, RecordingState
+from ..audio.recorder import AudioRecorder
 from ..clipboard import ClipboardManager
 from ..config import WhisperAloudConfig
-from ..exceptions import WhisperAloudError
-from ..transcriber import Transcriber
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
+from ..transcriber import Transcriber
 from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
 
@@ -130,19 +129,31 @@ class WhisperAloudService:
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         if has_display:
             try:
-                # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering
+                gtk_ready = True
+                # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering.
+                # init_check avoids hard failures in headless sessions with stale DISPLAY.
                 try:
                     import gi
+
                     gi.require_version('Gtk', '3.0')
                     from gi.repository import Gtk as Gtk3
-                    Gtk3.init(None)
-                except Exception:
-                    pass  # GTK3 may already be initialized or unavailable
 
-                self.indicator = WhisperAloudIndicator(
-                    on_toggle=self._safe_toggle,
-                    on_quit=self._safe_quit,
-                )
+                    init_result = Gtk3.init_check(None)
+                    if isinstance(init_result, tuple):
+                        gtk_ready = bool(init_result[0])
+                    else:
+                        gtk_ready = bool(init_result)
+                except Exception:
+                    gtk_ready = False
+
+                if gtk_ready:
+                    self.indicator = WhisperAloudIndicator(
+                        on_toggle=self._safe_toggle,
+                        on_quit=self._safe_quit,
+                    )
+                else:
+                    logger.info("GUI session not available; skipping tray indicator")
+                    self.indicator = None
             except Exception as e:
                 logger.warning(f"Failed to initialize indicator: {e}")
                 self.indicator = None
@@ -548,16 +559,17 @@ class WhisperAloudService:
             GLib.idle_add(_emit_success)
 
         except Exception as e:
-            logger.error(f"Transcription failed: {e}")
+            error_message = str(e)
+            logger.error(f"Transcription failed: {error_message}")
 
             def _emit_error():
                 self._transcribing = False
                 self.StatusChanged("idle")
                 if self.indicator:
                     self.indicator.set_state("idle")
-                self.Error("transcription_failed", str(e))
+                self.Error("transcription_failed", error_message)
                 if self.notifications:
-                    self.notifications.show_error(str(e))
+                    self.notifications.show_error(error_message)
                 return False
 
             GLib.idle_add(_emit_error)

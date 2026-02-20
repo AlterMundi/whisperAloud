@@ -1,9 +1,9 @@
 """Tests for WhisperAloud D-Bus daemon service."""
 import sys
-import pytest
-import numpy as np
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pytest
 
 # ── Bootstrap: patch pydbus and GLib before daemon module loads ──────────
 # pydbus signal() is a descriptor that prevents instance-level assignment.
@@ -41,6 +41,26 @@ _fake_pydbus.SessionBus = MagicMock
 sys.modules.setdefault('pydbus', _fake_pydbus)
 sys.modules.setdefault('pydbus.generic', _fake_pydbus_generic)
 
+# Keep daemon imports deterministic and non-blocking in headless CI.
+_fake_gtk = MagicMock()
+_fake_gtk.init_check.return_value = (True, [])
+_fake_glib = MagicMock()
+_fake_glib.Variant = lambda t, v: v
+_fake_glib.idle_add = lambda fn, *args: fn(*args)
+_fake_glib.SOURCE_REMOVE = False
+_fake_glib.PRIORITY_DEFAULT = 0
+_fake_glib.unix_signal_add = MagicMock(return_value=1)
+_fake_glib.timeout_add = MagicMock(return_value=1)
+_fake_glib.source_remove = MagicMock()
+_fake_gi_repo = MagicMock()
+_fake_gi_repo.Gtk = _fake_gtk
+_fake_gi_repo.GLib = _fake_glib
+_fake_gi = MagicMock()
+_fake_gi.repository = _fake_gi_repo
+sys.modules['gi'] = _fake_gi
+sys.modules['gi.repository'] = _fake_gi_repo
+sys.modules.setdefault('sounddevice', MagicMock())
+
 
 def _make_daemon(indicator_fails=False, hotkey_fails=False):
     """Create a daemon instance with all external dependencies mocked."""
@@ -68,8 +88,8 @@ def _make_daemon(indicator_fails=False, hotkey_fails=False):
             mock_hk_cls.return_value.available = True
             mock_hk_cls.return_value.backend = "keybinder"
 
-        from whisper_aloud.service.daemon import WhisperAloudService
         from whisper_aloud.config import WhisperAloudConfig
+        from whisper_aloud.service.daemon import WhisperAloudService
         config = WhisperAloudConfig()
         service = WhisperAloudService(config=config)
         service._mock_glib = mock_glib
@@ -349,8 +369,28 @@ class TestDaemonMethods:
         with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
             mock_glib.Variant = lambda t, v: v
             mock_glib.idle_add = lambda fn, *args: fn(*args)
-            daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
         daemon.clipboard_manager.copy.assert_not_called()
+
+    def test_transcribe_error_emits_later_without_closure_failure(self, daemon):
+        """Deferred error callback should not depend on except-scope variable lifetime."""
+        daemon.transcriber.transcribe_numpy.side_effect = Exception("boom")
+        deferred_callbacks = []
+
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+
+            def _capture_idle(fn, *args):
+                deferred_callbacks.append((fn, args))
+                return 1
+
+            mock_glib.idle_add = _capture_idle
+            daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+
+        assert len(deferred_callbacks) == 1
+        fn, args = deferred_callbacks[0]
+        fn(*args)
+        daemon.Error.assert_called_once_with("transcription_failed", "boom")
 
 
     # ─── Task 3.2: Indicator integration tests ─────────────────────────
