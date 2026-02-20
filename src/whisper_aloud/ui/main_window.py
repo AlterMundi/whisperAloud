@@ -19,6 +19,7 @@ from .history_panel import HistoryPanel
 from .level_meter import LevelMeterPanel
 from .main_window_logic import (
     is_daemon_interaction_ready,
+    resolve_daemon_status_state,
     resolve_language_change,
     should_enter_transcribing,
     should_restore_transcribing_after_cancel,
@@ -428,16 +429,26 @@ class MainWindow(Gtk.ApplicationWindow):
         """Re-establish daemon connection on the main thread."""
         self._daemon_available = True
         self.status_label.set_text("Reconnecting...")
+        daemon_state = "idle"
+
+        if self.client and self.client.is_connected:
+            try:
+                daemon_state = resolve_daemon_status_state(self.client.get_status())
+            except Exception as e:
+                logger.debug("Failed to refresh daemon status on reconnect: %s", e)
+
         try:
             self.config = WhisperAloudConfig.load()
             self._update_model_info()
         except Exception:
             pass
-        self.status_label.set_text("Ready")
+
         self.record_button.set_sensitive(True)
         self.settings_button.set_sensitive(True)
-        self.set_state(AppState.IDLE)
-        logger.info("Reconnected to daemon after restart")
+        self._handle_status_change(daemon_state, force=True)
+        if daemon_state == "idle":
+            self.status_label.set_text("Ready")
+        logger.info("Reconnected to daemon after restart (state=%s)", daemon_state)
         return False
 
     def _on_daemon_lost(self) -> None:
@@ -615,7 +626,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle StatusChanged signal from daemon (may be called from any thread)."""
         GLib.idle_add(self._handle_status_change, state)
 
-    def _handle_status_change(self, state: str) -> bool:
+    def _handle_status_change(self, state: str, force: bool = False) -> bool:
         """
         Process daemon status change on main thread.
 
@@ -629,7 +640,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         if state == "idle":
             # Don't reset to idle if we're waiting for TranscriptionReady
-            if self._state != AppState.TRANSCRIBING:
+            if force or self._state != AppState.TRANSCRIBING:
                 self.set_state(AppState.IDLE)
         elif state == "recording":
             self.set_state(AppState.RECORDING)

@@ -1,6 +1,7 @@
 """Pure logic helpers for MainWindow behavior."""
 
-from typing import Sequence
+from collections.abc import Mapping
+from typing import Any, Sequence
 
 
 def is_daemon_interaction_ready(
@@ -38,3 +39,21 @@ def should_enter_transcribing(stop_result: str) -> bool:
 def should_restore_transcribing_after_cancel(cancel_result: bool) -> bool:
     """Return True when cancel was rejected and UI should roll back to transcribing."""
     return not cancel_result
+
+
+def resolve_daemon_status_state(status_payload: Mapping[str, Any] | None) -> str:
+    """Return normalized daemon state extracted from GetStatus payload."""
+    if not isinstance(status_payload, Mapping):
+        return "idle"
+
+    raw_state = status_payload.get("state", "idle")
+    if hasattr(raw_state, "unpack"):
+        try:
+            raw_state = raw_state.unpack()
+        except Exception:
+            pass
+
+    state = str(raw_state or "").strip().lower()
+    if state in {"idle", "recording", "transcribing"}:
+        return state
+    return "idle"
