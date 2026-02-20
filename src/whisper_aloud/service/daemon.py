@@ -103,6 +103,7 @@ class WhisperAloudService:
 
         # Threading
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="whisper-aloud")
+        self._model_lock = threading.Lock()
 
         # State
         self._shutdown = False
@@ -186,13 +187,16 @@ class WhisperAloudService:
             raise
 
     def _ensure_model_loaded(self) -> None:
-        """Load the transcription model on first use."""
+        """Load the transcription model on first use (thread-safe)."""
         if self._model_loaded:
             return
-        logger.info("Loading transcription model (first use)...")
-        self.transcriber.load_model()
-        self._model_loaded = True
-        logger.info("Transcription model loaded")
+        with self._model_lock:
+            if self._model_loaded:
+                return
+            logger.info("Loading transcription model (first use)...")
+            self.transcriber.load_model()
+            self._model_loaded = True
+            logger.info("Transcription model loaded")
 
     def run(self) -> None:
         """Run the D-Bus service."""
@@ -371,6 +375,7 @@ class WhisperAloudService:
                 logger.info("Model config changed, reloading...")
                 self.transcriber = Transcriber(new_config)
                 self.transcriber.load_model()
+                self._model_loaded = True
 
             # Check if audio config changed
             if (new_config.audio != self.config.audio or
@@ -380,6 +385,16 @@ class WhisperAloudService:
                     new_config.audio,
                     level_callback=self._on_level,
                     processing_config=new_config.audio_processing,
+                )
+
+            # Check if hotkey config changed
+            if (self.hotkey_manager and self.hotkey_manager.available and
+                    new_config.hotkey.toggle_recording != self.config.hotkey.toggle_recording):
+                logger.info("Hotkey config changed, re-registering...")
+                self.hotkey_manager.unregister()
+                self.hotkey_manager.register(
+                    new_config.hotkey.toggle_recording,
+                    self.ToggleRecording,
                 )
 
             old_config = self.config

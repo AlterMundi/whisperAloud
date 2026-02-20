@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # WhisperAloud daemon wrapper
 # Prefers vendored venv if available, falls back to system Python
 
