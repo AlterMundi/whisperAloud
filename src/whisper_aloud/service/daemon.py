@@ -369,7 +369,7 @@ class WhisperAloudService:
                     config_dict[section][field] = value
             new_config = WhisperAloudConfig.from_dict(config_dict)
             new_config.validate()
-            self.config = new_config
+            self._apply_config_changes(new_config)
             self.config.save()
             self.ConfigChanged(changes)
             return True
@@ -382,37 +382,7 @@ class WhisperAloudService:
         try:
             logger.info("Reloading configuration...")
             new_config = WhisperAloudConfig.load()
-
-            # Check if model config changed
-            if (new_config.model.name != self.config.model.name or
-                    new_config.model.device != self.config.model.device):
-                logger.info("Model config changed, reloading...")
-                self.transcriber = Transcriber(new_config)
-                self.transcriber.load_model()
-                self._model_loaded = True
-
-            # Check if audio config changed
-            if (new_config.audio != self.config.audio or
-                    new_config.audio_processing != self.config.audio_processing):
-                logger.info("Audio config changed, recreating recorder...")
-                self.recorder = AudioRecorder(
-                    new_config.audio,
-                    level_callback=self._on_level,
-                    processing_config=new_config.audio_processing,
-                )
-
-            # Check if hotkey config changed
-            if (self.hotkey_manager and self.hotkey_manager.available and
-                    new_config.hotkey.toggle_recording != self.config.hotkey.toggle_recording):
-                logger.info("Hotkey config changed, re-registering...")
-                self.hotkey_manager.unregister()
-                self.hotkey_manager.register(
-                    new_config.hotkey.toggle_recording,
-                    self._safe_toggle,
-                )
-
-            old_config = self.config
-            self.config = new_config
+            self._apply_config_changes(new_config)
             self.ConfigChanged({})
             logger.info("Configuration reloaded successfully")
             return True
@@ -421,6 +391,38 @@ class WhisperAloudService:
             logger.error(f"Failed to reload config: {e}")
             self.Error("reload_failed", str(e))
             return False
+
+    def _apply_config_changes(self, new_config: 'WhisperAloudConfig') -> None:
+        """Re-initialize components whose config has changed."""
+        # Check if model config changed
+        if (new_config.model.name != self.config.model.name or
+                new_config.model.device != self.config.model.device):
+            logger.info("Model config changed, reloading...")
+            self.transcriber = Transcriber(new_config)
+            self.transcriber.load_model()
+            self._model_loaded = True
+
+        # Check if audio config changed
+        if (new_config.audio != self.config.audio or
+                new_config.audio_processing != self.config.audio_processing):
+            logger.info("Audio config changed, recreating recorder...")
+            self.recorder = AudioRecorder(
+                new_config.audio,
+                level_callback=self._on_level,
+                processing_config=new_config.audio_processing,
+            )
+
+        # Check if hotkey config changed
+        if (self.hotkey_manager and self.hotkey_manager.available and
+                new_config.hotkey.toggle_recording != self.config.hotkey.toggle_recording):
+            logger.info("Hotkey config changed, re-registering...")
+            self.hotkey_manager.unregister()
+            self.hotkey_manager.register(
+                new_config.hotkey.toggle_recording,
+                self._safe_toggle,
+            )
+
+        self.config = new_config
 
     def Quit(self) -> bool:
         """Quit the service."""
