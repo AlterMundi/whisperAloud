@@ -10,6 +10,7 @@ set -euo pipefail
 #   ./scripts/test_ci.sh
 
 python -m pytest \
+  tests/test_audio_device_manager.py \
   tests/test_config.py \
   tests/test_config_persistence.py \
   tests/test_dbus_client.py \

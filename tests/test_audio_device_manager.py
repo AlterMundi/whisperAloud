@@ -1,121 +1,164 @@
-"""Tests for audio device management."""
+"""Deterministic tests for audio device management (no real hardware required)."""
 
+import importlib
+import sys
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-import sounddevice as sd
 
-from whisper_aloud.audio import AudioDevice, DeviceManager
 from whisper_aloud.exceptions import AudioDeviceError
 
 
-@pytest.mark.requires_audio_hw
+def _import_device_manager_with_fake_sounddevice(fake_sd):
+    """Import device_manager with a fake sounddevice module injected."""
+    with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+        sys.modules.pop("whisper_aloud.audio.device_manager", None)
+        module = importlib.import_module("whisper_aloud.audio.device_manager")
+    return module
+
+
+def _build_fake_sounddevice():
+    """Create a fake sounddevice module-like object for deterministic tests."""
+    portaudio_error = type("FakePortAudioError", (Exception,), {})
+    return SimpleNamespace(
+        query_devices=Mock(return_value=[]),
+        query_hostapis=Mock(return_value={"name": "ALSA"}),
+        default=SimpleNamespace(device=[0, 1]),
+        InputStream=Mock(),
+        PortAudioError=portaudio_error,
+    )
+
+
 def test_list_input_devices():
-    """Test listing input devices."""
-    try:
-        devices = DeviceManager.list_input_devices()
-    except AudioDeviceError:
-        pytest.skip("No audio input devices available in test environment")
-    assert isinstance(devices, list)
-    # May be empty if no audio hardware in CI
-    if devices:
-        assert all(isinstance(d, AudioDevice) for d in devices)
+    """list_input_devices returns only input-capable devices with hostapi metadata."""
+    fake_sd = _build_fake_sounddevice()
+    fake_sd.query_devices.return_value = [
+        {"max_input_channels": 0, "name": "Output Only", "default_samplerate": 44100.0, "hostapi": 0},
+        {"max_input_channels": 2, "name": "USB Mic", "default_samplerate": 48000.0, "hostapi": 1},
+    ]
+    fake_sd.default.device = [1, 0]
+    fake_sd.query_hostapis.return_value = {"name": "PipeWire"}
+
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    devices = module.DeviceManager.list_input_devices()
+
+    assert len(devices) == 1
+    assert isinstance(devices[0], module.AudioDevice)
+    assert devices[0].id == 1
+    assert devices[0].name == "USB Mic"
+    assert devices[0].channels == 2
+    assert devices[0].sample_rate == 48000.0
+    assert devices[0].is_default is True
+    assert devices[0].hostapi == "PipeWire"
 
 
-@patch('sounddevice.query_devices')
-def test_list_devices_failure(mock_query):
-    """Test device listing failure."""
-    mock_query.side_effect = Exception("Hardware error")
+def test_list_devices_failure():
+    """list_input_devices wraps unexpected errors as AudioDeviceError."""
+    fake_sd = _build_fake_sounddevice()
+    fake_sd.query_devices.side_effect = Exception("Hardware error")
 
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
     with pytest.raises(AudioDeviceError, match="Unexpected error"):
-        DeviceManager.list_input_devices()
+        module.DeviceManager.list_input_devices()
 
 
-@pytest.mark.requires_audio_hw
 def test_get_default_device():
-    """Test getting default device."""
-    try:
-        device = DeviceManager.get_default_input_device()
-        assert isinstance(device, AudioDevice)
-    except AudioDeviceError:
-        pytest.skip("No audio devices available")
+    """get_default_input_device returns the one marked as default."""
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    module.DeviceManager.list_input_devices = Mock(return_value=[
+        module.AudioDevice(1, "Mic 1", 1, 16000.0, False, "ALSA"),
+        module.AudioDevice(2, "Mic 2", 2, 48000.0, True, "PipeWire"),
+    ])
+
+    device = module.DeviceManager.get_default_input_device()
+    assert device.id == 2
+    assert device.name == "Mic 2"
 
 
-@patch('sounddevice.query_devices')
-@patch('sounddevice.default')
-def test_get_device_by_id(mock_default, mock_query):
-    """Test getting device by ID."""
-    # Mock devices as dicts (sounddevice returns dict-like DeviceList)
-    mock_query.return_value = [
-        {'max_input_channels': 2, 'name': 'Test Mic', 'default_samplerate': 44100.0, 'hostapi': 0},
-        {'max_input_channels': 0, 'name': 'Output Only', 'default_samplerate': 44100.0, 'hostapi': 0},
-    ]
-    mock_default.device = [0, 1]
+def test_get_default_device_fallback_to_first():
+    """get_default_input_device falls back to first when no default flag exists."""
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    module.DeviceManager.list_input_devices = Mock(return_value=[
+        module.AudioDevice(5, "Mic A", 1, 16000.0, False, "ALSA"),
+        module.AudioDevice(6, "Mic B", 2, 48000.0, False, "PipeWire"),
+    ])
 
-    # Mock hostapis - query_hostapis(index) returns a single dict
-    with patch('sounddevice.query_hostapis', return_value={"name": "ALSA"}):
-        device = DeviceManager.get_device_by_id(0)
-        assert isinstance(device, AudioDevice)
-        assert device.id == 0
-        assert device.name == "Test Mic"
+    device = module.DeviceManager.get_default_input_device()
+    assert device.id == 5
+    assert device.name == "Mic A"
 
 
-@patch('whisper_aloud.audio.device_manager.DeviceManager.list_input_devices')
-def test_get_device_by_id_not_found(mock_list_devices):
-    """Test getting non-existent device."""
-    mock_list_devices.return_value = [
-        AudioDevice(id=1, name="Mic 1", channels=1, sample_rate=16000.0, is_default=True, hostapi="ALSA"),
-        AudioDevice(id=2, name="Mic 2", channels=1, sample_rate=16000.0, is_default=False, hostapi="ALSA"),
-    ]
+def test_get_device_by_id():
+    """get_device_by_id returns expected device."""
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    module.DeviceManager.list_input_devices = Mock(return_value=[
+        module.AudioDevice(1, "Mic 1", 1, 16000.0, True, "ALSA"),
+        module.AudioDevice(2, "Mic 2", 2, 48000.0, False, "PipeWire"),
+    ])
+
+    device = module.DeviceManager.get_device_by_id(2)
+    assert device.id == 2
+    assert device.name == "Mic 2"
+
+
+def test_get_device_by_id_not_found():
+    """get_device_by_id raises with available ids when missing."""
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    module.DeviceManager.list_input_devices = Mock(return_value=[
+        module.AudioDevice(1, "Mic 1", 1, 16000.0, True, "ALSA"),
+        module.AudioDevice(2, "Mic 2", 2, 48000.0, False, "PipeWire"),
+    ])
+
     with pytest.raises(AudioDeviceError, match="not found"):
-        DeviceManager.get_device_by_id(999)
+        module.DeviceManager.get_device_by_id(999)
 
 
-@patch('sounddevice.InputStream')
-@patch('whisper_aloud.audio.device_manager.DeviceManager.get_device_by_id')
-def test_validate_device(mock_get_device, mock_stream):
-    """Test device validation."""
-    # Mock device
-    mock_device = Mock()
-    mock_device.id = 0
-    mock_device.name = "Test Mic"
-    mock_device.channels = 2
-    mock_get_device.return_value = mock_device
+def test_validate_device():
+    """validate_device accepts supported format and closes test stream."""
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    device = module.AudioDevice(0, "Test Mic", 2, 48000.0, True, "ALSA")
+    module.DeviceManager.get_device_by_id = Mock(return_value=device)
 
-    # Mock stream creation (should succeed)
-    mock_stream_instance = Mock()
-    mock_stream.return_value = mock_stream_instance
+    stream_instance = Mock()
+    fake_sd.InputStream.return_value = stream_instance
 
-    device = DeviceManager.validate_device(0, 16000, 1)
-    assert device == mock_device
+    validated = module.DeviceManager.validate_device(0, 16000, 1)
+    assert validated == device
+    fake_sd.InputStream.assert_called_once_with(
+        device=0,
+        samplerate=16000,
+        channels=1,
+        dtype="float32",
+    )
+    stream_instance.close.assert_called_once()
 
-    # Verify stream was created for validation
-    mock_stream.assert_called_once()
 
-
-@patch('sounddevice.InputStream')
-@patch('whisper_aloud.audio.device_manager.DeviceManager.get_device_by_id')
-def test_validate_device_insufficient_channels(mock_get_device, mock_stream):
-    """Test validation fails with insufficient channels."""
-    mock_device = Mock()
-    mock_device.channels = 1
-    mock_get_device.return_value = mock_device
+def test_validate_device_insufficient_channels():
+    """validate_device rejects when requested channels exceed device capability."""
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    module.DeviceManager.get_device_by_id = Mock(
+        return_value=module.AudioDevice(0, "Mono Mic", 1, 16000.0, True, "ALSA")
+    )
 
     with pytest.raises(AudioDeviceError, match="channel"):
-        DeviceManager.validate_device(0, 16000, 2)
+        module.DeviceManager.validate_device(0, 16000, 2)
 
 
-@patch('sounddevice.InputStream')
-@patch('whisper_aloud.audio.device_manager.DeviceManager.get_device_by_id')
-def test_validate_device_stream_failure(mock_get_device, mock_stream):
-    """Test validation fails when stream creation fails."""
-    mock_device = Mock()
-    mock_device.name = "Bad Device"
-    mock_device.channels = 2
-    mock_get_device.return_value = mock_device
-
-    # Mock stream failure with PortAudioError (what sounddevice raises)
-    mock_stream.side_effect = sd.PortAudioError("Stream error")
+def test_validate_device_stream_failure():
+    """validate_device maps PortAudioError to AudioDeviceError."""
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    module.DeviceManager.get_device_by_id = Mock(
+        return_value=module.AudioDevice(0, "Bad Device", 2, 16000.0, True, "ALSA")
+    )
+    fake_sd.InputStream.side_effect = fake_sd.PortAudioError("Stream error")
 
     with pytest.raises(AudioDeviceError, match="doesn't support"):
-        DeviceManager.validate_device(0, 16000, 1)
+        module.DeviceManager.validate_device(0, 16000, 1)

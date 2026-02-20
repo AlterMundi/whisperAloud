@@ -15,6 +15,7 @@ python -m pytest \
   tests/test_config.py \
   tests/test_config_persistence.py \
   tests/test_config_reload_integration.py \
+  tests/test_audio_device_manager.py \
   tests/test_dbus_client.py \
   tests/test_daemon.py \
   tests/test_cli.py \
