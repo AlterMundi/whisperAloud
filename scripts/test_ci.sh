@@ -16,5 +16,6 @@ python -m pytest \
   tests/test_cli.py \
   tests/test_history_item_logic.py \
   tests/test_level_meter_logic.py \
+  tests/test_main_window_logic.py \
   tests/test_settings_dialog_logic.py \
   "$@"

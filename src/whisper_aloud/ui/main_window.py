@@ -17,6 +17,12 @@ from .error_handler import (
 )
 from .history_panel import HistoryPanel
 from .level_meter import LevelMeterPanel
+from .main_window_logic import (
+    is_daemon_interaction_ready,
+    resolve_language_change,
+    should_enter_transcribing,
+    should_restore_transcribing_after_cancel,
+)
 from .settings_dialog import SettingsDialog
 from .shortcuts_window import ShortcutsWindow
 from .sound_feedback import SoundFeedback
@@ -853,14 +859,19 @@ class MainWindow(Gtk.ApplicationWindow):
         # Stop local timer
         self._timer_active = False
 
-        if not self.client or not self.client.is_connected or not self._daemon_available:
+        daemon_ready = is_daemon_interaction_ready(
+            client_present=self.client is not None,
+            client_connected=bool(self.client and self.client.is_connected),
+            daemon_available=self._daemon_available,
+        )
+        if not daemon_ready:
             self.status_label.set_text("Daemon not connected")
             self.set_state(AppState.ERROR)
             return
 
         # Tell daemon to stop recording (non-blocking; transcription result arrives via signal)
-        result = self.client.stop_recording()
-        if result != "transcribing":
+        result = self.client.stop_recording() if self.client else ""
+        if not should_enter_transcribing(result):
             logger.warning("StopRecording returned unexpected state: %r", result)
             self.status_label.set_text("Failed to start transcription")
             self.set_state(AppState.ERROR)
@@ -895,13 +906,19 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._state != AppState.TRANSCRIBING:
             return
 
-        if not self.client or not self.client.is_connected or not self._daemon_available:
+        daemon_ready = is_daemon_interaction_ready(
+            client_present=self.client is not None,
+            client_connected=bool(self.client and self.client.is_connected),
+            daemon_available=self._daemon_available,
+        )
+        if not daemon_ready:
             self.status_label.set_text("Daemon not connected")
             self.set_state(AppState.ERROR)
             return
 
         self.set_state(AppState.CANCELLING)
-        if not self.client.cancel_recording():
+        cancel_result = self.client.cancel_recording() if self.client else False
+        if should_restore_transcribing_after_cancel(cancel_result):
             logger.warning("CancelRecording rejected while transcribing")
             self.status_label.set_text("Cancel not available")
             self.set_state(AppState.TRANSCRIBING)
@@ -966,40 +983,39 @@ class MainWindow(Gtk.ApplicationWindow):
             dropdown: The dropdown widget
             param: The parameter that changed
         """
-        selected_idx = dropdown.get_selected()
-        if selected_idx < 0 or selected_idx >= len(self._language_codes):
-            return
-
         # Guard: don't change language if config not loaded yet
         if not self.config:
             return
 
-        new_lang = self._language_codes[selected_idx]
-        current_lang = self.config.transcription.language or "auto"
-
-        # Skip if same language
-        if new_lang == current_lang:
+        selection = resolve_language_change(
+            selected_idx=dropdown.get_selected(),
+            language_codes=self._language_codes,
+            current_language=self.config.transcription.language,
+        )
+        if selection is None:
             return
+        new_lang, current_lang = selection
 
         logger.info(f"Language changed: {current_lang} -> {new_lang}")
 
         # Apply via daemon SetConfig (daemon owns config persistence)
         try:
-            if not self.client or not self.client.is_connected or not self._daemon_available:
+            daemon_ready = is_daemon_interaction_ready(
+                client_present=self.client is not None,
+                client_connected=bool(self.client and self.client.is_connected),
+                daemon_available=self._daemon_available,
+            )
+            if not daemon_ready:
                 logger.warning("Ignoring language change while daemon is unavailable")
                 self.status_label.set_text("Daemon unavailable: language not changed")
-                previous_lang = current_lang
-                if previous_lang in self._language_codes:
-                    dropdown.set_selected(self._language_codes.index(previous_lang))
+                dropdown.set_selected(self._language_codes.index(current_lang))
                 return
 
-            changed = self.client.set_config({"transcription.language": new_lang})
+            changed = self.client.set_config({"transcription.language": new_lang}) if self.client else False
             if not changed:
                 logger.warning("Daemon rejected language update")
                 self.status_label.set_text("Daemon rejected language update")
-                previous_lang = current_lang
-                if previous_lang in self._language_codes:
-                    dropdown.set_selected(self._language_codes.index(previous_lang))
+                dropdown.set_selected(self._language_codes.index(current_lang))
                 return
 
             # Update local reference to stay in sync

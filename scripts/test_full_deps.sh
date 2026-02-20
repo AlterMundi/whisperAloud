@@ -21,5 +21,6 @@ python -m pytest \
   tests/test_history_manager_transactions.py \
   tests/test_hotkey.py \
   tests/test_level_meter_logic.py \
+  tests/test_main_window_logic.py \
   tests/test_validation_helpers.py \
   "$@"
