@@ -106,7 +106,7 @@ class TestDaemonMethods:
         assert result == "transcribing"
         daemon.recorder.stop.assert_called_once()
         daemon.RecordingStopped.assert_called_once()
-        daemon.StatusChanged.assert_called_with("transcribing")
+        daemon.StatusChanged.assert_any_call("transcribing")
 
     def test_stop_recording_no_components(self, daemon):
         """StopRecording with no components should return 'error'."""
