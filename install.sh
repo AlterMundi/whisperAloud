@@ -481,7 +481,7 @@ install_desktop_file() {
     mkdir -p "$desktop_dir"
 
     # Create desktop file with correct path
-    cat > "$desktop_dir/com.whisperaloud.App.desktop" << EOF
+    cat > "$desktop_dir/org.fede.whisperaloud.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=WhisperAloud
@@ -602,11 +602,14 @@ uninstall() {
     fi
 
     # Remove desktop file
-    local desktop_file="$HOME/.local/share/applications/com.whisperaloud.App.desktop"
-    if [ -f "$desktop_file" ]; then
-        rm "$desktop_file"
-        print_success "Removed desktop file"
-    fi
+    for desktop_file in \
+        "$HOME/.local/share/applications/org.fede.whisperaloud.desktop" \
+        "$HOME/.local/share/applications/com.whisperaloud.App.desktop"; do
+        if [ -f "$desktop_file" ]; then
+            rm "$desktop_file"
+            print_success "Removed desktop file: $(basename "$desktop_file")"
+        fi
+    done
 
     # Remove user-level CLI shims
     for shim in whisper-aloud whisper-aloud-daemon whisper-aloud-gui; do
