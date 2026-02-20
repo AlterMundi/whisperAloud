@@ -15,12 +15,12 @@ Depends: ${python3:Depends}, ${misc:Depends},
  python3-gi-cairo,
  gir1.2-gtk-4.0,
  gir1.2-adw-1,
- gir1.2-ayatanaappindicator3-0.1,
  gir1.2-gsound-1.0,
  libportaudio2,
  python3-numpy,
  dbus-user-session
-Recommends: xdg-desktop-portal, xdg-desktop-portal-gtk,
+Recommends: gir1.2-ayatanaappindicator3-0.1,
+ xdg-desktop-portal, xdg-desktop-portal-gtk,
  wl-clipboard, gnome-shell-extension-appindicator
 Suggests: python3-noisereduce, ydotool
 Description: Offline voice transcription for Linux desktop

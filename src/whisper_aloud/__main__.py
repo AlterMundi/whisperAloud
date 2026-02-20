@@ -103,7 +103,7 @@ def handle_daemon_command(args) -> int:
             else:
                 # No command specified, show status
                 result = call_service_method("GetStatus")
-                print(f"Service status: {result.get_string()}")
+                print(f"Service status: {result}")
             return 0
         except WhisperAloudError as e:
             print(f"Service error: {e}", file=sys.stderr)

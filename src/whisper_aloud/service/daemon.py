@@ -2,6 +2,7 @@
 
 import logging
 import signal as signal_module
+import time
 import uuid
 from pydbus.generic import signal
 import threading
@@ -152,6 +153,7 @@ class WhisperAloudService:
         # Initialize history manager for persistence
         self.history_manager = HistoryManager(self.config.persistence)
         self.session_id = str(uuid.uuid4())
+        self._start_time = time.monotonic()
         logger.info(f"Daemon session ID: {self.session_id}")
 
         # Initialize clipboard manager
@@ -185,13 +187,14 @@ class WhisperAloudService:
             bus.publish("org.fede.whisperaloud", self)
             logger.info("D-Bus service published as org.fede.whisperaloud")
 
-            # Keep the service running
-            signal_module.signal(signal_module.SIGTERM, self._signal_handler)
-            signal_module.signal(signal_module.SIGINT, self._signal_handler)
-
             # Use GLib main loop
             loop = GLib.MainLoop()
             self._loop = loop
+
+            # Register signal handlers via GLib (safe for D-Bus emission)
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal_module.SIGTERM, self._signal_handler_glib)
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal_module.SIGINT, self._signal_handler_glib)
+
             loop.run()
 
         except Exception as e:
@@ -285,6 +288,7 @@ class WhisperAloudService:
             "model": GLib.Variant("s", self.config.model.name),
             "device": GLib.Variant("s", self.config.model.device),
             "hotkey_backend": GLib.Variant("s", self.hotkey_manager.backend if self.hotkey_manager else "none"),
+            "uptime": GLib.Variant("d", time.monotonic() - self._start_time),
         }
 
     def GetHistory(self, limit: int) -> list:
@@ -327,7 +331,9 @@ class WhisperAloudService:
             for key, variant in changes.items():
                 section, field = key.split(".", 1)
                 if section in config_dict and field in config_dict[section]:
-                    config_dict[section][field] = variant
+                    # Unpack GLib.Variant to native Python value
+                    value = variant.unpack() if hasattr(variant, 'unpack') else variant
+                    config_dict[section][field] = value
             new_config = WhisperAloudConfig.from_dict(config_dict)
             new_config.validate()
             self.config = new_config
@@ -352,9 +358,14 @@ class WhisperAloudService:
                 self.transcriber.load_model()
 
             # Check if audio config changed
-            if new_config.audio != self.config.audio:
+            if (new_config.audio != self.config.audio or
+                    new_config.audio_processing != self.config.audio_processing):
                 logger.info("Audio config changed, recreating recorder...")
-                self.recorder = AudioRecorder(new_config.audio)
+                self.recorder = AudioRecorder(
+                    new_config.audio,
+                    level_callback=self._on_level,
+                    processing_config=new_config.audio_processing,
+                )
 
             old_config = self.config
             self.config = new_config
@@ -405,10 +416,9 @@ class WhisperAloudService:
 
     # ─── Signal handling ─────────────────────────────────────────────────
 
-    def _signal_handler(self, signum, frame):
-        """Handle SIGTERM/SIGINT for clean shutdown."""
-        logger.info(f"Received signal {signum}, shutting down")
-        # If recording, stop without transcribing
+    def _signal_handler_glib(self):
+        """Handle SIGTERM/SIGINT from GLib main loop (safe for D-Bus emission)."""
+        logger.info("Received shutdown signal, shutting down")
         if self.recorder and self.recorder.is_recording:
             try:
                 self.recorder.cancel()
@@ -422,6 +432,7 @@ class WhisperAloudService:
         self._shutdown = True
         if hasattr(self, '_loop') and self._loop:
             self._loop.quit()
+        return GLib.SOURCE_REMOVE
 
     # ─── Internal helpers ────────────────────────────────────────────────
 
@@ -430,11 +441,15 @@ class WhisperAloudService:
         return self.transcriber.transcribe_numpy(audio_data)
 
     def _transcribe_and_emit(self, audio_data) -> None:
-        """Transcribe audio and emit completion signal (runs in thread)."""
+        """Transcribe audio and emit completion signal (runs in thread).
+
+        All D-Bus signal emissions and indicator updates are marshalled
+        to the GLib main loop via idle_add for thread safety.
+        """
         try:
             result = self._transcribe_audio(audio_data)
 
-            # Save to history database
+            # Save to history database (safe from worker thread)
             try:
                 entry_id = self.history_manager.add_transcription(
                     result=result,
@@ -453,34 +468,41 @@ class WhisperAloudService:
                 "confidence": GLib.Variant("d", result.confidence),
                 "history_id": GLib.Variant("i", entry_id),
             }
-            self._transcribing = False
-            self.StatusChanged("idle")
-            if self.indicator:
-                self.indicator.set_state("idle")
-                self.indicator.set_last_text(result.text)
-            self.TranscriptionReady(result.text, meta)
 
-            # Auto-copy to clipboard
-            if self.config.clipboard.auto_copy and self.clipboard_manager:
-                try:
-                    self.clipboard_manager.copy(result.text)
-                    logger.info("Transcription copied to clipboard")
-                except Exception as e:
-                    logger.warning(f"Failed to copy to clipboard: {e}")
+            def _emit_success():
+                self._transcribing = False
+                self.StatusChanged("idle")
+                if self.indicator:
+                    self.indicator.set_state("idle")
+                    self.indicator.set_last_text(result.text)
+                self.TranscriptionReady(result.text, meta)
+                if self.config.clipboard.auto_copy and self.clipboard_manager:
+                    try:
+                        self.clipboard_manager.copy(result.text)
+                        logger.info("Transcription copied to clipboard")
+                    except Exception as e:
+                        logger.warning(f"Failed to copy to clipboard: {e}")
+                if self.notifications:
+                    self.notifications.show_transcription_completed(result.text)
+                logger.info("Transcription completed and signals emitted")
+                return False
 
-            if self.notifications:
-                self.notifications.show_transcription_completed(result.text)
-            logger.info("Transcription completed and signals emitted")
+            GLib.idle_add(_emit_success)
 
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
-            self._transcribing = False
-            self.StatusChanged("idle")
-            if self.indicator:
-                self.indicator.set_state("idle")
-            self.Error("transcription_failed", str(e))
-            if self.notifications:
-                self.notifications.show_error(str(e))
+
+            def _emit_error():
+                self._transcribing = False
+                self.StatusChanged("idle")
+                if self.indicator:
+                    self.indicator.set_state("idle")
+                self.Error("transcription_failed", str(e))
+                if self.notifications:
+                    self.notifications.show_error(str(e))
+                return False
+
+            GLib.idle_add(_emit_error)
 
     def _cleanup(self) -> None:
         """Clean up resources."""

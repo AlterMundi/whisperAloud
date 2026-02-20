@@ -55,6 +55,9 @@ def _make_daemon(indicator_fails=False, hotkey_fails=False):
          patch('whisper_aloud.service.daemon.GLib') as mock_glib:
         # GLib.Variant passthrough for test assertions
         mock_glib.Variant = lambda t, v: v
+        # GLib.idle_add should invoke the callback immediately in tests
+        mock_glib.idle_add = lambda fn, *args: fn(*args)
+        mock_glib.SOURCE_REMOVE = False
 
         if indicator_fails:
             mock_ind_cls.side_effect = Exception("no tray available")
@@ -278,7 +281,7 @@ class TestDaemonMethods:
         """SIGTERM during recording should cancel recording."""
         daemon.recorder.is_recording = True
         daemon._loop = MagicMock()
-        daemon._signal_handler(15, None)  # SIGTERM
+        daemon._signal_handler_glib()
         daemon.recorder.cancel.assert_called_once()
         daemon._loop.quit.assert_called_once()
 
@@ -286,7 +289,7 @@ class TestDaemonMethods:
         """SIGTERM when idle should just quit cleanly."""
         daemon.recorder.is_recording = False
         daemon._loop = MagicMock()
-        daemon._signal_handler(15, None)
+        daemon._signal_handler_glib()
         daemon.recorder.cancel.assert_not_called()
         daemon._loop.quit.assert_called_once()
 
@@ -303,7 +306,10 @@ class TestDaemonMethods:
         daemon.transcriber.transcribe_numpy.return_value = mock_result
         daemon.history_manager.add_transcription.return_value = 1
 
-        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            mock_glib.idle_add = lambda fn, *args: fn(*args)
+            daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
         daemon.clipboard_manager.copy.assert_called_once_with("Hello world")
 
     def test_clipboard_not_called_when_disabled(self, daemon):
@@ -318,7 +324,10 @@ class TestDaemonMethods:
         daemon.transcriber.transcribe_numpy.return_value = mock_result
         daemon.history_manager.add_transcription.return_value = 1
 
-        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            mock_glib.idle_add = lambda fn, *args: fn(*args)
+            daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
         daemon.clipboard_manager.copy.assert_not_called()
 
 
@@ -354,7 +363,10 @@ class TestDaemonMethods:
         daemon.transcriber.transcribe_numpy.return_value = mock_result
         daemon.history_manager.add_transcription.return_value = 1
 
-        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            mock_glib.idle_add = lambda fn, *args: fn(*args)
+            daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
 
         daemon.indicator.set_last_text.assert_called_once_with("transcribed text")
         daemon.indicator.set_state.assert_called_with("idle")
