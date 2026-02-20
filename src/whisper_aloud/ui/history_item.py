@@ -2,7 +2,7 @@
 
 import logging
 
-from gi.repository import Gdk, GObject, Gtk, Pango
+from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 
 from ..persistence.models import HistoryEntry
 from .history_logic import (
@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 class HistoryItem(Gtk.ListBoxRow):
     """Individual history entry widget."""
+
+    _PREVIEW_DELAY_MS = 180
 
     __gsignals__ = {
         'favorite-toggled': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
@@ -78,12 +80,15 @@ class HistoryItem(Gtk.ListBoxRow):
         fav_button.set_valign(Gtk.Align.CENTER)
         fav_button.add_css_class("flat")
         fav_button.add_css_class("wa-ghost")
+        fav_button.set_tooltip_text("Toggle favorite")
         fav_button.connect("toggled", self._on_favorite_toggled)
         box.append(fav_button)
 
         self.set_child(box)
         self._preview_text = format_transcription_preview(entry.text)
         self._preview_popover: Gtk.Popover | None = None
+        self._preview_show_timeout_id: int | None = None
+        self._context_popover: Gtk.Popover | None = None
         self._setup_hover_preview()
 
         # Context menu
@@ -96,9 +101,10 @@ class HistoryItem(Gtk.ListBoxRow):
 
         self._preview_popover = Gtk.Popover()
         self._preview_popover.set_has_arrow(True)
-        self._preview_popover.set_autohide(False)
+        self._preview_popover.set_autohide(True)
         self._preview_popover.set_parent(self)
         self._preview_popover.set_position(Gtk.PositionType.TOP)
+        self._preview_popover.set_size_request(360, -1)
         self._preview_popover.add_css_class("wa-preview-popover")
 
         preview_label = Gtk.Label(label=self._preview_text)
@@ -106,6 +112,7 @@ class HistoryItem(Gtk.ListBoxRow):
         preview_label.set_yalign(0.0)
         preview_label.set_wrap(True)
         preview_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        preview_label.set_max_width_chars(65)
         preview_label.add_css_class("monospace")
         preview_label.add_css_class("wa-preview-label")
         self._preview_popover.set_child(preview_label)
@@ -115,18 +122,47 @@ class HistoryItem(Gtk.ListBoxRow):
         hover_controller.connect("leave", self._on_hover_leave)
         self.add_controller(hover_controller)
 
+        focus_controller = Gtk.EventControllerFocus()
+        focus_controller.connect("leave", self._on_focus_leave)
+        self.add_controller(focus_controller)
+
     def _on_hover_enter(self, _controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
-        """Show preview popover anchored to the top edge of the row."""
+        """Schedule preview popover for delayed show."""
         if not self._preview_popover:
             return
-        width = max(1, self.get_allocated_width())
-        self._preview_popover.set_pointing_to(Gdk.Rectangle(x=width // 2, y=0, width=1, height=1))
-        self._preview_popover.popup()
+        self._cancel_preview_timer()
+        self._preview_show_timeout_id = GLib.timeout_add(
+            self._PREVIEW_DELAY_MS,
+            self._show_preview_popover,
+        )
 
     def _on_hover_leave(self, _controller: Gtk.EventControllerMotion) -> None:
         """Hide preview popover when pointer leaves the row."""
+        self._cancel_preview_timer()
         if self._preview_popover:
             self._preview_popover.popdown()
+
+    def _on_focus_leave(self, _controller: Gtk.EventControllerFocus) -> None:
+        """Hide preview popover when row focus is lost."""
+        self._cancel_preview_timer()
+        if self._preview_popover:
+            self._preview_popover.popdown()
+
+    def _cancel_preview_timer(self) -> None:
+        """Cancel pending preview timer if one is active."""
+        if self._preview_show_timeout_id is not None:
+            GLib.source_remove(self._preview_show_timeout_id)
+            self._preview_show_timeout_id = None
+
+    def _show_preview_popover(self) -> bool:
+        """Show preview popover anchored to the row top center."""
+        self._preview_show_timeout_id = None
+        if not self._preview_popover:
+            return GLib.SOURCE_REMOVE
+        width = max(1, self.get_allocated_width())
+        self._preview_popover.set_pointing_to(Gdk.Rectangle(x=width // 2, y=0, width=1, height=1))
+        self._preview_popover.popup()
+        return GLib.SOURCE_REMOVE
 
     @staticmethod
     def _format_transcription_tooltip(text: str) -> str:
@@ -175,8 +211,15 @@ class HistoryItem(Gtk.ListBoxRow):
 
     def _show_context_menu(self, x, y):
         """Show context menu popover."""
+        if self._preview_popover:
+            self._preview_popover.popdown()
+
+        if self._context_popover:
+            self._context_popover.popdown()
+
         popover = Gtk.Popover()
         popover.set_parent(self)
+        popover.set_autohide(True)
         popover.set_pointing_to(Gdk.Rectangle(x=int(x), y=int(y), width=1, height=1))
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -185,13 +228,16 @@ class HistoryItem(Gtk.ListBoxRow):
         delete_btn = Gtk.Button(label="Delete")
         delete_btn.add_css_class("flat")
         delete_btn.add_css_class("wa-ghost")
+        delete_btn.set_tooltip_text("Delete this history entry")
         delete_btn.connect("clicked", lambda b: self._on_delete_clicked(popover))
         box.append(delete_btn)
 
         popover.set_child(box)
+        self._context_popover = popover
         popover.popup()
 
     def _on_delete_clicked(self, popover):
         """Handle delete action."""
         popover.popdown()
+        self._context_popover = None
         self.emit("delete-requested", self.entry.id)

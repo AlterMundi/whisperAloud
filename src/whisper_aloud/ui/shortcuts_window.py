@@ -6,7 +6,7 @@ from typing import List, Tuple
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ class ShortcutsWindow(Gtk.Window):
         self.add_css_class("wa-dialog-window")
 
         self._build_ui()
+        self._setup_keyboard_shortcuts()
         self.connect("notify::is-active", self._on_window_active_changed)
         logger.debug("Shortcuts window initialized")
 
@@ -66,6 +67,11 @@ class ShortcutsWindow(Gtk.Window):
         header = Gtk.HeaderBar()
         header.add_css_class("wa-headerbar")
         header.set_title_widget(Gtk.Label(label="Keyboard Shortcuts"))
+        close_button = Gtk.Button(label="Close")
+        close_button.add_css_class("wa-ghost")
+        close_button.set_tooltip_text("Close shortcuts (Esc)")
+        close_button.connect("clicked", lambda _btn: self.close())
+        header.pack_end(close_button)
         self.set_titlebar(header)
 
         # Scrolled window for content
@@ -87,6 +93,25 @@ class ShortcutsWindow(Gtk.Window):
         for group_name, shortcuts in self.SHORTCUTS:
             group_box = self._create_shortcut_group(group_name, shortcuts)
             content.append(group_box)
+
+    def _setup_keyboard_shortcuts(self) -> None:
+        """Set up keyboard shortcuts for accessibility and fast dismissal."""
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_controller)
+
+    def _on_key_pressed(
+        self,
+        _controller: Gtk.EventControllerKey,
+        keyval: int,
+        _keycode: int,
+        _state: Gdk.ModifierType,
+    ) -> bool:
+        """Handle local window key presses."""
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        return False
 
     def _create_shortcut_group(
         self,

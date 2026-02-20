@@ -7,7 +7,7 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from ..config import (
     NotificationConfig,
@@ -57,6 +57,7 @@ class SettingsDialog(Gtk.Window):
 
         # Build UI
         self._build_ui()
+        self._setup_keyboard_shortcuts()
         self._allow_close = False
         self._child_dialog_open = False
         self._dirty = False
@@ -124,6 +125,7 @@ class SettingsDialog(Gtk.Window):
         # Cancel button
         cancel_button = Gtk.Button(label="Cancel")
         cancel_button.add_css_class("wa-ghost")
+        cancel_button.set_tooltip_text("Discard and close (Esc)")
         cancel_button.connect("clicked", self._on_cancel_clicked)
         header_bar.pack_start(cancel_button)
 
@@ -131,6 +133,7 @@ class SettingsDialog(Gtk.Window):
         save_button = Gtk.Button(label="Save")
         save_button.add_css_class("suggested-action")
         save_button.add_css_class("wa-primary-action")
+        save_button.set_tooltip_text("Save settings (Ctrl+S)")
         save_button.connect("clicked", self._on_save_clicked)
         header_bar.pack_end(save_button)
         self.set_titlebar(header_bar)
@@ -153,6 +156,32 @@ class SettingsDialog(Gtk.Window):
         self._add_advanced_page()
 
         main_box.append(self.stack)
+
+    def _setup_keyboard_shortcuts(self) -> None:
+        """Enable dialog-local keyboard shortcuts for accessibility."""
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_controller)
+
+    def _on_key_pressed(
+        self,
+        _controller: Gtk.EventControllerKey,
+        keyval: int,
+        _keycode: int,
+        state: Gdk.ModifierType,
+    ) -> bool:
+        """Handle keyboard shortcuts in settings dialog."""
+        ctrl_pressed = bool(state & Gdk.ModifierType.CONTROL_MASK)
+
+        if keyval == Gdk.KEY_Escape:
+            self._on_cancel_clicked(None)
+            return True
+
+        if ctrl_pressed and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            self._on_save_clicked(None)
+            return True
+
+        return False
 
     def _add_general_page(self) -> None:
         """Add general settings page with common options."""
@@ -664,12 +693,12 @@ class SettingsDialog(Gtk.Window):
         self._style_setting_rows_in_page(page)
         self.stack.add_titled(scrolled, "advanced", "Advanced")
 
-    def _on_save_clicked(self, button: Gtk.Button) -> None:
+    def _on_save_clicked(self, button: Optional[Gtk.Button]) -> None:
         """
         Handle save button click.
 
         Args:
-            button: The button that was clicked
+            button: The button that was clicked (or None from keyboard shortcut)
         """
         logger.info("Saving settings")
 
@@ -811,12 +840,12 @@ class SettingsDialog(Gtk.Window):
             self._show_message(f"Error saving settings: {e}", Gtk.MessageType.ERROR)
 
 
-    def _on_cancel_clicked(self, button: Gtk.Button) -> None:
+    def _on_cancel_clicked(self, button: Optional[Gtk.Button]) -> None:
         """
         Handle cancel button click.
 
         Args:
-            button: The button that was clicked
+            button: The button that was clicked (or None from keyboard shortcut)
         """
         logger.info("Settings dialog cancelled")
         self.close()
