@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["devel", "main"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_full_deps:
+        description: "Run optional full dependency test job"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-cov
+
+      - name: Run CI test profile
+        env:
+          PYTHONPATH: src
+        run: ./scripts/test_ci.sh -q
+
+  full-deps:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_full_deps == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime + test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsndfile1
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Run full test suite (best effort)
+        env:
+          PYTHONPATH: src
+        run: pytest -q

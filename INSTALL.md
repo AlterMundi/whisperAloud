@@ -53,7 +53,7 @@ The easiest way to install WhisperAloud:
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/whisperAloud.git
+git clone https://github.com/AlterMundi/whisperAloud.git
 cd whisperAloud
 
 # Run automated installer
@@ -201,7 +201,7 @@ alias whisper-env='source ~/.venvs/whisper_aloud/bin/activate'
 
 ```bash
 # If using git:
-git clone https://github.com/your-org/whisperAloud.git
+git clone https://github.com/AlterMundi/whisperAloud.git
 cd whisperAloud
 
 # Or download and extract the release tarball:

@@ -16,7 +16,6 @@ from ..config import (
     NotificationConfig,
     PersistenceConfig,
 )
-from ..audio import DeviceManager
 from .error_handler import InputValidator, ValidationError
 from ..utils.validation_helpers import sanitize_language_code
 
@@ -200,6 +199,7 @@ class SettingsDialog(Gtk.Window):
         device_label.set_halign(Gtk.Align.START)
         device_label.set_hexpand(True)
 
+        from ..audio import DeviceManager
         self._devices = DeviceManager.list_input_devices()
         device_names = [
             f"{d.name}" + (" ⭐" if d.is_default else "")
@@ -698,6 +698,7 @@ class SettingsDialog(Gtk.Window):
 
             # Update channels based on selected device
             if self._config.audio.device_id is not None:
+                from ..audio import DeviceManager
                 device = DeviceManager.get_device_by_id(self._config.audio.device_id)
                 # If device is mono-only, force mono. If stereo-capable, respect config or default to stereo?
                 # For now, let's just ensure we don't ask for more channels than available

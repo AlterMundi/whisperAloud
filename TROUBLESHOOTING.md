@@ -34,7 +34,7 @@ Run the simple test first to download and verify the model:
 
 ```bash
 source ~/.venvs/whisper_aloud/bin/activate
-python test_transcription_simple.py
+python scripts/test_transcription_simple.py
 ```
 
 This script:
@@ -52,7 +52,7 @@ The default `base` model is 145MB. Try the `tiny` model (75MB, faster):
 
 ```bash
 export WHISPER_ALOUD_MODEL_NAME=tiny
-python demo_quick.py
+python examples/demo_quick.py
 ```
 
 **Model sizes:**
@@ -131,7 +131,7 @@ Visit https://status.huggingface.co/ to see if there are service issues.
 
 ```bash
 source ~/.venvs/whisper_aloud/bin/activate
-python test_transcription_simple.py
+python scripts/test_transcription_simple.py
 ```
 
 Look for the "Processing speed" line:
@@ -421,7 +421,7 @@ python -c "from whisper_aloud import WhisperAloudConfig; print('✅ Config works
 python -c "from whisper_aloud.audio import DeviceManager; print(f'✅ {len(DeviceManager.list_input_devices())} devices')"
 
 # Test transcription
-python test_transcription_simple.py
+python scripts/test_transcription_simple.py
 ```
 
 ---
@@ -459,7 +459,7 @@ print(f'Language: {c.transcription.language or \"auto\"}')"
 
 ```bash
 source ~/.venvs/whisper_aloud/bin/activate
-python test_transcription_simple.py
+python scripts/test_transcription_simple.py
 ```
 
 ### Memory Usage
@@ -469,7 +469,7 @@ python test_transcription_simple.py
 free -h
 
 # Run in background
-python demo_quick.py &
+python examples/demo_quick.py &
 PID=$!
 
 # Watch memory
@@ -493,7 +493,7 @@ If problems persist:
 
 4. **Try minimal test**:
    ```bash
-   python test_transcription_simple.py
+   python scripts/test_transcription_simple.py
    ```
 
 5. **Report issue** with:
@@ -507,7 +507,7 @@ If problems persist:
 
 | Problem | Quick Fix |
 |---------|-----------|
-| Hangs during transcription | Run `python test_transcription_simple.py` first |
+| Hangs during transcription | Run `python scripts/test_transcription_simple.py` first |
 | Slow transcription | Use `export WHISPER_ALOUD_MODEL_NAME=tiny` |
 | Out of memory | Use smaller model |
 | No audio devices | Run `arecord -l` to check hardware |
