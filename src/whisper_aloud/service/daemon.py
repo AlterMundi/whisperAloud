@@ -120,11 +120,25 @@ class WhisperAloudService:
         # Initialize components
         self._init_components()
 
-        # Initialize system tray indicator
+        # Thread-safe wrappers for callbacks that may fire from any thread.
+        # GLib.idle_add ensures D-Bus signal emissions happen on the main loop.
+        self._safe_toggle = lambda: GLib.idle_add(self.ToggleRecording)
+        self._safe_quit = lambda: GLib.idle_add(self.Quit)
+
+        # Initialize system tray indicator (requires GTK3)
         try:
+            # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering
+            try:
+                import gi
+                gi.require_version('Gtk', '3.0')
+                from gi.repository import Gtk as Gtk3
+                Gtk3.init(None)
+            except Exception:
+                pass  # GTK3 may already be initialized or unavailable
+
             self.indicator = WhisperAloudIndicator(
-                on_toggle=self.ToggleRecording,
-                on_quit=self.Quit,
+                on_toggle=self._safe_toggle,
+                on_quit=self._safe_quit,
             )
         except Exception as e:
             logger.warning(f"Failed to initialize indicator: {e}")
@@ -136,7 +150,7 @@ class WhisperAloudService:
             if self.hotkey_manager.available:
                 self.hotkey_manager.register(
                     self.config.hotkey.toggle_recording,
-                    self.ToggleRecording,
+                    self._safe_toggle,
                 )
                 logger.info(f"Hotkey registered: {self.config.hotkey.toggle_recording} (backend: {self.hotkey_manager.backend})")
             else:
@@ -394,7 +408,7 @@ class WhisperAloudService:
                 self.hotkey_manager.unregister()
                 self.hotkey_manager.register(
                     new_config.hotkey.toggle_recording,
-                    self.ToggleRecording,
+                    self._safe_toggle,
                 )
 
             old_config = self.config

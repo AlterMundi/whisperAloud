@@ -358,8 +358,8 @@ class TestDaemonMethods:
         """Indicator should be created during __init__."""
         assert daemon.indicator is not None
         daemon._mock_indicator_cls.assert_called_once_with(
-            on_toggle=daemon.ToggleRecording,
-            on_quit=daemon.Quit,
+            on_toggle=daemon._safe_toggle,
+            on_quit=daemon._safe_quit,
         )
 
     def test_indicator_state_updated_on_start_recording(self, daemon):
@@ -413,7 +413,7 @@ class TestDaemonMethods:
         """Register should be called with config accel on available backend."""
         daemon.hotkey_manager.register.assert_called_once_with(
             daemon.config.hotkey.toggle_recording,
-            daemon.ToggleRecording,
+            daemon._safe_toggle,
         )
 
     def test_daemon_runs_without_hotkey(self):
