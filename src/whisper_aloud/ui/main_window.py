@@ -3,16 +3,12 @@
 import logging
 import threading
 from typing import Optional
-from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
 
-from ..config import WhisperAloudConfig, detect_config_changes
-from ..transcriber import Transcriber, TranscriptionResult
-from ..audio import AudioRecorder, AudioLevel
-from ..clipboard import ClipboardManager
+from ..config import WhisperAloudConfig
 from .utils import AppState, format_duration
 from .level_meter import LevelMeterPanel
 from .settings_dialog import SettingsDialog
@@ -24,10 +20,7 @@ from ..persistence.history_manager import HistoryManager
 from .error_handler import (
     ErrorDialog,
     ErrorSeverity,
-    handle_audio_device_error,
     handle_model_load_error,
-    handle_transcription_error,
-    handle_clipboard_error
 )
 
 logger = logging.getLogger(__name__)
@@ -50,14 +43,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self._state: AppState = AppState.IDLE
         self._model_loading: bool = False
         self._timer_active: bool = False
+        self._timer_seconds: int = 0
 
-        # Initialize backend components (will be lazy-loaded)
+        # D-Bus client (replaces direct component access)
+        from ..service.client import WhisperAloudClient
+        self.client: Optional[WhisperAloudClient] = None
+
+        # Local config for UI settings (language dropdown, settings dialog)
         self.config: Optional[WhisperAloudConfig] = None
-        self.transcriber: Optional[Transcriber] = None
-        self.recorder: Optional[AudioRecorder] = None
-        self.clipboard_manager: Optional[ClipboardManager] = None
+
+        # Local read-only HistoryManager (reads shared SQLite DB written by daemon)
         self.history_manager: Optional[HistoryManager] = None
-        self.session_id: Optional[str] = None
 
         # Sound feedback (initialized early as it's lightweight)
         self.sound_feedback = SoundFeedback(enabled=True)
@@ -73,7 +69,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Set up keyboard shortcuts
         self._setup_keyboard_shortcuts()
 
-        # Load configuration and initialize components in background
+        # Connect to daemon in background
         GLib.idle_add(self._init_components_async)
 
         logger.info("Main window initialized")
@@ -131,9 +127,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Left side: Recording and Transcription
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        
+
         # Status label
-        self.status_label = Gtk.Label(label="Loading...")
+        self.status_label = Gtk.Label(label="Connecting to daemon...")
         self.status_label.set_margin_top(12)
         self.status_label.set_margin_bottom(12)
         left_box.append(self.status_label)
@@ -151,7 +147,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.record_button.add_css_class("suggested-action")
         self.record_button.add_css_class("pill")
         self.record_button.set_size_request(200, 56)  # Fixed width for consistent look
-        self.record_button.set_sensitive(False)  # Disabled until model loads
+        self.record_button.set_sensitive(False)  # Disabled until daemon connects
         self.record_button.set_tooltip_text("Start/stop recording (Space)")
         self.record_button.connect("clicked", self._on_record_button_clicked)
         recording_panel_box.append(self.record_button)
@@ -311,66 +307,153 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return False
 
+    # ─── Daemon connection ────────────────────────────────────────────────
+
     def _init_components_async(self) -> bool:
         """
-        Initialize backend components asynchronously.
+        Connect to daemon asynchronously.
 
         Returns:
             False to remove this idle callback
         """
-        # Show loading dialog
         self._show_loading_dialog()
 
-        def _load_in_thread():
-            """Load components in background thread."""
+        def _connect_in_thread():
+            """Connect to daemon in background thread."""
             try:
-                logger.info("Loading configuration and model...")
-                self.config = WhisperAloudConfig.load()
-                self.transcriber = Transcriber(self.config)
-
-                # Load model (blocking operation)
-                self.transcriber.load_model()
-
-                # Initialize other components
-                self.recorder = AudioRecorder(
-                    self.config.audio,
-                    level_callback=self._on_audio_level
-                )
-                self.clipboard_manager = ClipboardManager(self.config.clipboard)
-
-                # Initialize history manager
-                import uuid
-                self.session_id = str(uuid.uuid4())
-                self.history_manager = HistoryManager(self.config.persistence)
-
-                GLib.idle_add(self._on_components_loaded)
-
+                from ..service.client import WhisperAloudClient
+                client = WhisperAloudClient()
+                if client.is_connected:
+                    GLib.idle_add(self._on_daemon_connected, client)
+                else:
+                    GLib.idle_add(self._on_daemon_unavailable)
             except Exception as e:
-                logger.error(f"Failed to initialize components: {e}", exc_info=True)
+                logger.error(f"Failed to connect to daemon: {e}", exc_info=True)
                 GLib.idle_add(self._on_load_error, str(e))
 
-        # Start loading in background thread
-        threading.Thread(target=_load_in_thread, daemon=True).start()
+        threading.Thread(target=_connect_in_thread, daemon=True).start()
         return False
 
-    def _model_cache_exists(self) -> bool:
-        """Check if model is already cached in HuggingFace cache."""
-        from pathlib import Path
-        cache_dir = Path.home() / ".cache/huggingface/hub"
-        if not cache_dir.exists():
-            return False
-        # Look for any whisper model files
-        model_name = self.config.model.name if self.config else "base"
-        # Check for common model directory patterns
-        for pattern in [f"*whisper*{model_name}*", "*faster-whisper*"]:
-            if any(cache_dir.glob(pattern)):
-                return True
+    def _on_daemon_connected(self, client) -> bool:
+        """
+        Called when daemon connection succeeds (main thread).
+
+        Args:
+            client: Connected WhisperAloudClient instance
+
+        Returns:
+            False to remove this idle callback
+        """
+        self.client = client
+        logger.info("Connected to WhisperAloud daemon")
+
+        # Subscribe to daemon signals
+        self.client.on_status_changed(self._on_daemon_status_changed)
+        self.client.on_transcription_ready(self._on_daemon_transcription_ready)
+        self.client.on_level_update(self._on_daemon_level_update)
+        self.client.on_error(self._on_daemon_error)
+
+        # Load local config for UI settings
+        try:
+            self.config = WhisperAloudConfig.load()
+        except Exception as e:
+            logger.warning(f"Failed to load local config, using defaults: {e}")
+            self.config = WhisperAloudConfig()
+
+        # Initialize local read-only HistoryManager for the history panel
+        try:
+            self.history_manager = HistoryManager(self.config.persistence)
+        except Exception as e:
+            logger.warning(f"Failed to init history manager: {e}")
+
+        # Hide loading dialog
+        self._hide_loading_dialog()
+
+        # Update UI state
+        self.status_label.set_text("Ready")
+        self.record_button.set_sensitive(True)
+        self.set_state(AppState.IDLE)
+
+        # Update language dropdown from config
+        if self.config and self.config.transcription.language:
+            current_lang = self.config.transcription.language
+            if current_lang in self._language_codes:
+                self.lang_dropdown.set_selected(self._language_codes.index(current_lang))
+
+        # Initialize History Panel with local read-only HistoryManager
+        if self.history_manager:
+            self.history_panel = HistoryPanel(self.history_manager)
+            self.history_panel.connect("entry-selected", self._on_history_entry_selected)
+            self.history_container.append(self.history_panel)
+
+        # Update model info display
+        self._update_model_info()
+
         return False
+
+    def _on_daemon_unavailable(self) -> bool:
+        """
+        Called when daemon is not running (main thread).
+
+        Returns:
+            False to remove this idle callback
+        """
+        self._hide_loading_dialog()
+        logger.warning("WhisperAloud daemon is not running")
+
+        self.status_label.set_text("Daemon not running")
+        self.set_state(AppState.ERROR)
+
+        # Show diagnostic dialog with retry option
+        dialog = Gtk.Window()
+        dialog.set_modal(True)
+        dialog.set_transient_for(self)
+        dialog.set_title("WhisperAloud - Daemon Not Running")
+        dialog.set_default_size(450, 200)
+        dialog.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+        box.set_margin_top(24)
+        box.set_margin_bottom(24)
+
+        title = Gtk.Label(label="WhisperAloud daemon not running")
+        title.add_css_class("title-2")
+        box.append(title)
+
+        hint = Gtk.Label(label="Start the daemon with:\n\n  systemctl --user start whisper-aloud\n\nor run:\n\n  whisper-aloud-daemon")
+        hint.set_wrap(True)
+        hint.set_selectable(True)
+        hint.set_justify(Gtk.Justification.LEFT)
+        box.append(hint)
+
+        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        button_box.set_halign(Gtk.Align.END)
+
+        retry_button = Gtk.Button(label="Retry Connection")
+        retry_button.add_css_class("suggested-action")
+        retry_button.connect("clicked", lambda btn: self._retry_daemon_connection(dialog))
+        button_box.append(retry_button)
+
+        box.append(button_box)
+        dialog.set_child(box)
+        dialog.present()
+
+        return False
+
+    def _retry_daemon_connection(self, dialog: Gtk.Window) -> None:
+        """
+        Retry connecting to the daemon.
+
+        Args:
+            dialog: The unavailable dialog to close on success
+        """
+        dialog.close()
+        GLib.idle_add(self._init_components_async)
 
     def _show_loading_dialog(self) -> None:
-        """Show a loading dialog during model initialization."""
-        is_first_run = not self._model_cache_exists()
-
+        """Show a loading dialog during daemon connection."""
         self._loading_dialog = Gtk.Window()
         self._loading_dialog.set_modal(True)
         self._loading_dialog.set_transient_for(self)
@@ -385,21 +468,9 @@ class MainWindow(Gtk.ApplicationWindow):
         box.set_margin_top(24)
         box.set_margin_bottom(24)
 
-        if is_first_run:
-            # First run - show welcome message
-            title = Gtk.Label(label="Welcome to WhisperAloud!")
-            title.add_css_class("title-2")
-            box.append(title)
-
-            msg = Gtk.Label(label="Downloading AI model (~140MB).\nThis only happens once and may take a few minutes.")
-            msg.set_wrap(True)
-            msg.set_justify(Gtk.Justification.CENTER)
-            box.append(msg)
-        else:
-            # Regular load
-            msg = Gtk.Label(label="Loading Whisper model...")
-            msg.add_css_class("title-3")
-            box.append(msg)
+        msg = Gtk.Label(label="Connecting to WhisperAloud daemon...")
+        msg.add_css_class("title-3")
+        box.append(msg)
 
         # Progress bar (indeterminate/pulsing)
         self._loading_progress = Gtk.ProgressBar()
@@ -432,106 +503,120 @@ class MainWindow(Gtk.ApplicationWindow):
             self._loading_dialog = None
             self._loading_progress = None
 
-    def _on_components_loaded(self) -> bool:
+    def _on_load_error(self, error_msg: str) -> bool:
         """
-        Called when components finish loading (main thread).
-
-        Returns:
-            False to remove this idle callback
-        """
-        # Hide loading dialog
-        self._hide_loading_dialog()
-
-        logger.info("Components loaded successfully")
-        self.status_label.set_text("Ready")
-        self.record_button.set_sensitive(True)
-        self.set_state(AppState.IDLE)
-
-        # Update language dropdown from config
-        if self.config and self.config.transcription.language:
-            current_lang = self.config.transcription.language
-            if current_lang in self._language_codes:
-                self.lang_dropdown.set_selected(self._language_codes.index(current_lang))
-
-        # Initialize History Panel
-        if self.history_manager:
-            self.history_panel = HistoryPanel(self.history_manager)
-            self.history_panel.connect("entry-selected", self._on_history_entry_selected)
-            self.history_container.append(self.history_panel)
-
-        # Set up D-Bus listener for daemon signals
-        self._setup_dbus_listener()
-
-        # Update model info display
-        self._update_model_info()
-            
-        return False
-
-    def _setup_dbus_listener(self) -> None:
-        """Set up D-Bus listener for daemon signals."""
-        try:
-            from pydbus import SessionBus
-            bus = SessionBus()
-            daemon = bus.get('org.fede.whisperAloud')
-
-            # Callback for HistoryUpdated signal
-            def on_history_updated(entry_id):
-                logger.debug(f"Daemon added transcription {entry_id}")
-                GLib.idle_add(self._on_daemon_history_updated, entry_id)
-
-            daemon.onHistoryUpdated = on_history_updated
-            logger.info("Listening to daemon HistoryUpdated signals")
-
-        except Exception as e:
-            logger.debug(f"No daemon available for sync: {e}")
-
-    def _on_daemon_history_updated(self, entry_id: int) -> bool:
-        """
-        Called when daemon adds a new transcription (main thread).
+        Called when daemon connection fails with an exception (main thread).
 
         Args:
-            entry_id: ID of the new entry
+            error_msg: Error message
 
         Returns:
             False to remove this idle callback
         """
-        logger.info(f"Daemon added transcription {entry_id}, refreshing history")
+        self._hide_loading_dialog()
 
-        # Refresh history panel to show new entry
+        logger.error(f"Daemon connection error: {error_msg}")
+        self.status_label.set_text("Error connecting to daemon")
+        self.set_state(AppState.ERROR)
+
+        handle_model_load_error(self, Exception(error_msg))
+        return False
+
+    # ─── Daemon signal handlers ───────────────────────────────────────────
+
+    def _on_daemon_status_changed(self, state: str) -> None:
+        """Handle StatusChanged signal from daemon (may be called from any thread)."""
+        GLib.idle_add(self._handle_status_change, state)
+
+    def _handle_status_change(self, state: str) -> bool:
+        """
+        Process daemon status change on main thread.
+
+        Args:
+            state: New daemon state string
+
+        Returns:
+            False to remove this idle callback
+        """
+        logger.debug(f"Daemon status changed: {state}")
+
+        if state == "idle":
+            # Don't reset to idle if we're waiting for TranscriptionReady
+            if self._state != AppState.TRANSCRIBING:
+                self.set_state(AppState.IDLE)
+        elif state == "recording":
+            self.set_state(AppState.RECORDING)
+        elif state == "transcribing":
+            self.set_state(AppState.TRANSCRIBING)
+            self.status_label.set_text("Transcribing... (press Ctrl+X to cancel)")
+        return False
+
+    def _on_daemon_transcription_ready(self, text: str, meta: dict) -> None:
+        """Handle TranscriptionReady signal from daemon."""
+        GLib.idle_add(self._handle_transcription_ready, text, meta)
+
+    def _handle_transcription_ready(self, text: str, meta: dict) -> bool:
+        """
+        Process transcription result on main thread.
+
+        Args:
+            text: Transcribed text
+            meta: Metadata dict with duration, confidence, etc.
+
+        Returns:
+            False to remove this idle callback
+        """
+        logger.info(f"Transcription received: {len(text)} characters")
+
+        # Display transcription text
+        buffer = self.text_view.get_buffer()
+        buffer.set_text(text)
+
+        # Update status with metadata
+        duration = meta.get("duration", 0.0) if isinstance(meta, dict) else 0.0
+        confidence = meta.get("confidence", 0.0) if isinstance(meta, dict) else 0.0
+        confidence_pct = int(confidence * 100)
+        self.status_label.set_text(
+            f"Ready (Confidence: {confidence_pct}%, "
+            f"Duration: {duration:.1f}s)"
+        )
+
+        # Update state
+        self.set_state(AppState.READY)
+        self.copy_button.set_sensitive(True)
+        self.clear_button.set_sensitive(True)
+
+        # Refresh history panel
         if hasattr(self, 'history_panel'):
             self.history_panel.refresh_recent()
 
         return False
 
-    def _on_load_error_sync(self, error_msg: str) -> None:
+    def _on_daemon_level_update(self, level: float) -> None:
+        """Handle LevelUpdate signal from daemon."""
+        GLib.idle_add(self.level_meter.update_level, level, level, 0.0)
+
+    def _on_daemon_error(self, code: str, message: str) -> None:
+        """Handle Error signal from daemon."""
+        GLib.idle_add(self._handle_daemon_error, code, message)
+
+    def _handle_daemon_error(self, code: str, message: str) -> bool:
         """
-        Called when component loading fails (synchronous version).
+        Process daemon error on main thread.
 
         Args:
-            error_msg: Error message
-        """
-        # Hide loading dialog
-        self._hide_loading_dialog()
-
-        logger.error(f"Component load error: {error_msg}")
-        self.status_label.set_text("Error loading components")
-        self.set_state(AppState.ERROR)
-
-        # Show detailed error dialog
-        handle_model_load_error(self, Exception(error_msg))
-
-    def _on_load_error(self, error_msg: str) -> bool:
-        """
-        Called when component loading fails (asynchronous version).
-
-        Args:
-            error_msg: Error message
+            code: Error code string
+            message: Human-readable error message
 
         Returns:
             False to remove this idle callback
         """
-        self._on_load_error_sync(error_msg)
+        logger.error(f"Daemon error [{code}]: {message}")
+        self.status_label.set_text(f"Error: {message}")
+        self.set_state(AppState.ERROR)
         return False
+
+    # ─── State management ─────────────────────────────────────────────────
 
     def set_state(self, new_state: AppState) -> None:
         """
@@ -629,6 +714,8 @@ class MainWindow(Gtk.ApplicationWindow):
         except Exception as e:
             logger.debug(f"Sound feedback failed: {e}")
 
+    # ─── Recording actions (via D-Bus) ────────────────────────────────────
+
     def _on_record_button_clicked(self, button: Gtk.Button) -> None:
         """
         Handle record button click.
@@ -645,71 +732,48 @@ class MainWindow(Gtk.ApplicationWindow):
             # Stop recording and start transcription
             self._stop_recording_and_transcribe()
 
-    def _on_audio_level(self, level: AudioLevel) -> None:
-        """
-        Handle audio level updates from recorder (audio thread).
-
-        Args:
-            level: Audio level information
-        """
-        # Update level meter from main thread
-        GLib.idle_add(self._update_level_meter, level.rms, level.peak, level.db)
-
-    def _update_level_meter(self, rms: float, peak: float, db: float) -> bool:
-        """
-        Update level meter (main thread).
-
-        Args:
-            rms: RMS level
-            peak: Peak level
-            db: Decibel level
-
-        Returns:
-            False to remove this idle callback
-        """
-        self.level_meter.update_level(rms, peak, db)
-        return False
-
     def _start_recording(self) -> None:
-        """Start audio recording."""
+        """Start audio recording via daemon."""
         try:
-            logger.info("Starting audio recording")
+            logger.info("Starting audio recording via daemon")
 
             # Reset level meter
             self.level_meter.reset()
 
-            self.recorder.start()
-            self.set_state(AppState.RECORDING)
-            self.status_label.set_text("Recording...")
+            success = self.client.start_recording()
+            if success:
+                self.set_state(AppState.RECORDING)
+                self.status_label.set_text("Recording...")
 
-            # Start timer
-            self._timer_active = True
-            GLib.timeout_add(100, self._update_timer)
+                # Start local timer
+                self._timer_active = True
+                self._timer_seconds = 0
+                GLib.timeout_add(1000, self._update_timer)
+            else:
+                self.status_label.set_text("Failed to start recording")
+                self.set_state(AppState.ERROR)
 
         except Exception as e:
             logger.error(f"Failed to start recording: {e}", exc_info=True)
             self.status_label.set_text("Recording failed")
             self.set_state(AppState.ERROR)
 
-            # Show detailed error dialog
-            handle_audio_device_error(self, e)
-
     def _stop_recording_and_transcribe(self) -> None:
-        """Stop recording and start transcription in background thread."""
-        logger.info("Stopping recording and starting transcription")
+        """Stop recording via daemon. Result comes back via TranscriptionReady signal."""
+        logger.info("Stopping recording via daemon")
 
-        # Stop timer
+        # Stop local timer
         self._timer_active = False
 
         # Update UI
         self.set_state(AppState.TRANSCRIBING)
 
-        # Start transcription in background thread
-        threading.Thread(target=self._transcribe_async, daemon=True).start()
+        # Tell daemon to stop recording (non-blocking; transcription result arrives via signal)
+        self.client.stop_recording()
 
     def _update_timer(self) -> bool:
         """
-        Update recording timer.
+        Update recording timer locally.
 
         Returns:
             True to continue timer, False to stop
@@ -717,112 +781,26 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self._timer_active:
             return False
 
-        if self.recorder and self.recorder.is_recording:
-            duration = self.recorder.recording_duration
-            self.timer_label.set_text(format_duration(duration))
+        self._timer_seconds += 1
+        self.timer_label.set_text(format_duration(self._timer_seconds))
+        return True
 
-        return True  # Continue timer
-
-    def _transcribe_async(self) -> None:
+    def _on_cancel_clicked(self, button: Gtk.Button) -> None:
         """
-        Transcribe audio in background thread.
-
-        IMPORTANT: This runs in a worker thread, not the main thread.
-        All UI updates must use GLib.idle_add().
-        """
-        try:
-            # Stop recording and get audio data
-            logger.info("Stopping recorder and getting audio data")
-            audio = self.recorder.stop()
-
-            if audio is None or len(audio) == 0:
-                logger.warning("No audio data recorded")
-                GLib.idle_add(self._on_transcription_error, "No audio recorded")
-                return
-
-            logger.info(f"Transcribing {len(audio)} audio samples...")
-
-            # Transcribe (blocking operation, 5-30 seconds)
-            result = self.transcriber.transcribe_numpy(
-                audio,
-                sample_rate=self.config.audio.sample_rate
-            )
-
-            logger.info(f"Transcription complete: {len(result.text)} characters")
-            
-            # Save to history (IN THIS THREAD)
-            if self.history_manager:
-                try:
-                    self.history_manager.add_transcription(
-                        result=result,
-                        audio=audio if self.config.persistence.save_audio else None,
-                        sample_rate=self.config.audio.sample_rate,
-                        session_id=self.session_id
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to save history: {e}", exc_info=True)
-
-            # Update UI from main thread
-            GLib.idle_add(self._on_transcription_complete, result)
-
-        except Exception as e:
-            logger.error(f"Transcription failed: {e}", exc_info=True)
-            GLib.idle_add(self._on_transcription_error, str(e))
-
-    def _on_transcription_complete(self, result: TranscriptionResult) -> bool:
-        """
-        Called when transcription completes (main thread).
+        Handle cancel transcription button click.
 
         Args:
-            result: Transcription result
-
-        Returns:
-            False to remove this idle callback
+            button: The button that was clicked
         """
-        logger.info("Transcription result received")
+        logger.info("Cancel transcription button clicked")
 
-        # Display transcription text
-        buffer = self.text_view.get_buffer()
-        buffer.set_text(result.text)
+        if self._state != AppState.TRANSCRIBING:
+            return
 
-        # Update status
-        confidence_pct = int(result.confidence * 100)
-        self.status_label.set_text(
-            f"Ready (Confidence: {confidence_pct}%, "
-            f"Duration: {result.duration:.1f}s)"
-        )
+        self.set_state(AppState.CANCELLING)
+        self.client.cancel_recording()
 
-        # Update state
-        self.set_state(AppState.READY)
-
-        # Auto-copy if enabled
-        if self.config.clipboard.auto_copy:
-            self._copy_to_clipboard()
-
-        # Refresh history panel
-        if hasattr(self, 'history_panel'):
-            self.history_panel.refresh_recent()
-
-        return False
-
-    def _on_transcription_error(self, error_msg: str) -> bool:
-        """
-        Called when transcription fails (main thread).
-
-        Args:
-            error_msg: Error message
-
-        Returns:
-            False to remove this idle callback
-        """
-        logger.error(f"Transcription error: {error_msg}")
-        self.status_label.set_text("Transcription failed")
-        self.set_state(AppState.ERROR)
-
-        # Show detailed error dialog
-        handle_transcription_error(self, Exception(error_msg))
-
-        return False
+    # ─── Clipboard ────────────────────────────────────────────────────────
 
     def _on_copy_clicked(self, button: Gtk.Button) -> None:
         """
@@ -835,7 +813,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._copy_to_clipboard()
 
     def _copy_to_clipboard(self) -> None:
-        """Copy transcription text to clipboard."""
+        """Copy transcription text to clipboard using GTK4 clipboard API."""
         buffer = self.text_view.get_buffer()
         text = buffer.get_text(
             buffer.get_start_iter(),
@@ -848,23 +826,15 @@ class MainWindow(Gtk.ApplicationWindow):
             return
 
         try:
-            success = self.clipboard_manager.copy(text)
-            if success:
-                self.status_label.set_text("Copied to clipboard")
-                logger.info(f"Copied {len(text)} characters to clipboard")
-            else:
-                self.status_label.set_text("Saved to fallback file")
-                logger.warning("Clipboard copy failed, using fallback")
-                ErrorDialog.show_error(
-                    parent=self,
-                    title="Clipboard Warning",
-                    message="Text saved to fallback file:\n/tmp/whisper_aloud_clipboard.txt",
-                    severity=ErrorSeverity.WARNING
-                )
+            clipboard = self.get_clipboard()
+            clipboard.set(text)
+            self.status_label.set_text("Copied to clipboard")
+            logger.info(f"Copied {len(text)} characters to clipboard")
         except Exception as e:
             logger.error(f"Clipboard error: {e}", exc_info=True)
             self.status_label.set_text("Clipboard error")
-            handle_clipboard_error(self, e)
+
+    # ─── Clear / History / Settings / Help ────────────────────────────────
 
     def _on_clear_clicked(self, button: Gtk.Button) -> None:
         """
@@ -881,25 +851,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         if self._state == AppState.READY:
             self.set_state(AppState.IDLE)
-
-    def _on_cancel_clicked(self, button: Gtk.Button) -> None:
-        """
-        Handle cancel transcription button click.
-
-        Args:
-            button: The button that was clicked
-        """
-        logger.info("Cancel transcription button clicked")
-
-        if self._state != AppState.TRANSCRIBING:
-            return
-
-        # Set UI to cancelling state
-        self.set_state(AppState.CANCELLING)
-
-        # Signal the transcriber to stop
-        if self.transcriber:
-            self.transcriber.cancel_transcription()
 
     def _on_language_changed(self, dropdown: Gtk.DropDown, param) -> None:
         """
@@ -928,7 +879,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         logger.info(f"Language changed: {current_lang} -> {new_lang}")
 
-        # Update config
+        # Update local config
         self.config.transcription.language = new_lang_config
 
         # Save config to file
@@ -936,9 +887,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.config.save()
             self._update_model_info()
 
-            # Reload model in background with new language
-            logger.info("Reloading model with new language")
-            threading.Thread(target=self._reload_model, daemon=True).start()
+            # Tell daemon to reload config (picks up new language)
+            if self.client and self.client.is_connected:
+                self.client.reload_config()
 
         except Exception as e:
             logger.error(f"Failed to change language: {e}", exc_info=True)
@@ -968,30 +919,16 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.present()
 
     def _on_settings_saved(self) -> None:
-        """Handle settings saved event."""
-        logger.info("Settings saved, checking for changes...")
+        """Handle settings saved event. Tell daemon to reload configuration."""
+        logger.info("Settings saved, notifying daemon to reload config")
 
         try:
-            # Reload configuration from file to get latest changes
-            logger.debug("Reloading configuration from file")
-            new_config = WhisperAloudConfig.load()
-            logger.debug("Configuration reloaded successfully")
+            # Reload local config reference
+            self.config = WhisperAloudConfig.load()
 
-            # Use centralized change detection
-            changes = detect_config_changes(self.config, new_config)
-            logger.info(f"Config changes: {changes}")
-
-            # Update config reference
-            self.config = new_config
-
-            if changes.requires_model_reload:
-                logger.info("Model settings changed, reloading model")
-                # Reload model in background
-                threading.Thread(target=self._reload_model, daemon=True).start()
-
-            if changes.requires_audio_reinit:
-                logger.info("Audio settings changed, re-initializing recorder")
-                self._reinit_recorder()
+            # Tell daemon to reload from disk
+            if self.client and self.client.is_connected:
+                self.client.reload_config()
 
             # Update model info display
             self._update_model_info()
@@ -1000,88 +937,6 @@ class MainWindow(Gtk.ApplicationWindow):
             logger.error(f"Error in _on_settings_saved: {e}", exc_info=True)
             self.status_label.set_text("Error updating settings")
             self.set_state(AppState.ERROR)
-
-    def _reinit_recorder(self) -> None:
-        """Re-initialize the audio recorder with new config."""
-        try:
-            if self.recorder:
-                logger.debug("Re-initializing recorder")
-                # Stop any active recording first
-                if self.recorder.is_recording:
-                    logger.debug("Cancel active recording")
-                    self.recorder.cancel()
-
-                # Ensure the old recorder releases resources
-                logger.debug("Delete old recorder")
-                del self.recorder
-
-            # Create new recorder instance with updated config
-            logger.debug("Create new recorder instance")
-            self.recorder = AudioRecorder(
-                self.config.audio,
-                level_callback=self._on_audio_level
-            )
-            logger.info("Recorder re-initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to re-init recorder: {e}", exc_info=True)
-            # Show error dialog
-            handle_audio_device_error(self, e)
-
-    def _reload_model(self) -> None:
-        """Reload the Whisper model synchronously."""
-        logger.info("Starting model reload")
-        self.status_label.set_text("Reloading model...")
-        self.record_button.set_sensitive(False)
-
-        # Stop resource monitoring to avoid conflicts
-        logger.debug("Stopping resource monitoring")
-        self.status_bar.cleanup()
-
-        try:
-            logger.debug("Unload existing model")
-            if self.transcriber:
-                self.transcriber.unload_model()
-
-            logger.debug("Create new transcriber")
-            self.transcriber = Transcriber(self.config)
-
-            logger.debug("Load new model")
-            self.transcriber.load_model()
-            logger.info("Model loaded successfully")
-
-            # Re-initialize recorder with new config if needed
-            self._reinit_recorder()
-
-            logger.debug("Model reload complete, updating UI")
-            self._on_model_reloaded_sync()
-        except Exception as e:
-            logger.error(f"Failed to reload model: {e}", exc_info=True)
-            # Revert to previous valid config if possible, or just show error
-            # For now, show error dialog
-            GLib.idle_add(self._on_load_error_sync, str(e))
-
-    def _on_model_reloaded_sync(self) -> None:
-        """Called when model is reloaded (synchronous version)."""
-        try:
-            logger.info("Model reloaded successfully")
-            logger.debug("Setting status label to success message")
-            self.status_label.set_text("Model reloaded successfully")
-            logger.debug("Enabling record button")
-            self.record_button.set_sensitive(True)
-            logger.debug("Setting state to IDLE")
-            self.set_state(AppState.IDLE)  # Reset state to IDLE
-            logger.debug("Updating model info display")
-            self._update_model_info()
-            logger.debug("Restarting resource monitoring")
-            self.status_bar.start_monitoring()
-            logger.debug("Model reload UI update complete")
-        except Exception as e:
-            logger.error(f"Error in _on_model_reloaded_sync: {e}", exc_info=True)
-
-    def _on_model_reloaded(self) -> bool:
-        """Called when model is reloaded (asynchronous version)."""
-        self._on_model_reloaded_sync()
-        return False
 
     def _on_history_toggled(self, button: Gtk.ToggleButton) -> None:
         """Handle history toggle button."""
@@ -1112,6 +967,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _update_model_info(self) -> None:
         """Update status bar and language button with current model info."""
+        if not self.config:
+            return
         self.status_bar.set_model_info(
             self.config.model.name,
             self.config.model.device,
@@ -1123,6 +980,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if lang in self._language_codes:
             self.lang_dropdown.set_selected(self._language_codes.index(lang))
 
+    # ─── Cleanup ──────────────────────────────────────────────────────────
+
     def cleanup(self) -> None:
         """Clean up resources before shutdown."""
         logger.info("Cleaning up main window resources")
@@ -1131,14 +990,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, 'status_bar'):
             self.status_bar.cleanup()
 
-        # Stop recording if active
-        if self.recorder and hasattr(self.recorder, 'is_recording') and self.recorder.is_recording:
-            logger.info("Stopping active recording")
-            self.recorder.cancel()
-
-        # Unload model to free memory
-        if self.transcriber and hasattr(self.transcriber, 'unload_model'):
-            logger.info("Unloading Whisper model")
-            self.transcriber.unload_model()
+        # Disconnect D-Bus client
+        if self.client:
+            self.client.disconnect()
 
         logger.info("Cleanup complete")

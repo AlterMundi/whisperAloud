@@ -19,7 +19,7 @@ class WhisperAloudApp(Gtk.Application):
     def __init__(self) -> None:
         """Initialize the application."""
         super().__init__(
-            application_id='com.whisperaloud.App',
+            application_id='org.fede.whisperaloud.Gui',
             flags=Gio.ApplicationFlags.FLAGS_NONE
         )
         self.window: Optional[MainWindow] = None
