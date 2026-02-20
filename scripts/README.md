@@ -102,6 +102,13 @@ This excludes tests marked:
 - `requires_display`
 - `requires_dbus`
 
+GTK widget-level tests are opt-in to avoid headless crashes in CI/sandboxed
+environments. Enable them explicitly in a desktop session:
+
+```bash
+WHISPER_ALOUD_RUN_GTK_WIDGET_TESTS=1 python -m pytest tests/test_level_meter.py
+```
+
 Pass extra pytest args after the script command:
 
 ```bash
