@@ -879,17 +879,18 @@ class MainWindow(Gtk.ApplicationWindow):
 
         logger.info(f"Language changed: {current_lang} -> {new_lang}")
 
-        # Update local config
-        self.config.transcription.language = new_lang_config
-
-        # Save config to file
+        # Apply via daemon SetConfig (daemon owns config persistence)
         try:
-            self.config.save()
-            self._update_model_info()
-
-            # Tell daemon to reload config (picks up new language)
             if self.client and self.client.is_connected:
-                self.client.reload_config()
+                lang_value = new_lang_config if new_lang_config is not None else "auto"
+                self.client.set_config({"transcription.language": lang_value})
+                # Update local reference to stay in sync
+                self.config.transcription.language = new_lang_config
+            else:
+                # No daemon — fall back to direct save
+                self.config.transcription.language = new_lang_config
+                self.config.save()
+            self._update_model_info()
 
         except Exception as e:
             logger.error(f"Failed to change language: {e}", exc_info=True)
@@ -919,14 +920,19 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.present()
 
     def _on_settings_saved(self) -> None:
-        """Handle settings saved event. Tell daemon to reload configuration."""
+        """Handle settings saved event.
+
+        The SettingsDialog writes the config file directly (multi-field batch).
+        We tell the daemon to reload so it picks up the changes and
+        re-initializes any affected components.
+        """
         logger.info("Settings saved, notifying daemon to reload config")
 
         try:
-            # Reload local config reference
+            # Reload local config reference from disk
             self.config = WhisperAloudConfig.load()
 
-            # Tell daemon to reload from disk
+            # Tell daemon to reload from disk (triggers _apply_config_changes)
             if self.client and self.client.is_connected:
                 self.client.reload_config()
 
