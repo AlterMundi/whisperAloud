@@ -127,6 +127,27 @@ def test_language_validation_edge_cases():
         os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
 
 
+def test_language_auto_is_preserved():
+    """'auto' language mode should be accepted and persisted."""
+    os.environ['WHISPER_ALOUD_LANGUAGE'] = 'auto'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.language == "auto"
+        config.save()
+        loaded = WhisperAloudConfig.load()
+        assert loaded.transcription.language == "auto"
+    finally:
+        os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
+
+
+def test_validate_rejects_invalid_transcription_language():
+    """validate() should reject unsupported language tokens."""
+    config = WhisperAloudConfig.load()
+    config.transcription.language = "english"
+    with pytest.raises(ConfigurationError, match="Invalid language"):
+        config.validate()
+
+
 def test_beam_size_bounds():
     """Test beam size validation at boundaries."""
     # Test minimum valid beam size

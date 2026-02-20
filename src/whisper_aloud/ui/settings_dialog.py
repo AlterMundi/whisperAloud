@@ -713,9 +713,12 @@ class SettingsDialog(Gtk.Window):
             if lang:
                 validated_lang = sanitize_language_code(lang)
                 if validated_lang is None:
-                    raise ValidationError(f"Invalid language code '{lang}'. Must be a 2-letter ISO code (e.g., 'en', 'es').")
+                    raise ValidationError(
+                        f"Invalid language code '{lang}'. Use 'auto' or a 2-letter ISO code "
+                        "(e.g., 'en', 'es')."
+                    )
             else:
-                validated_lang = None
+                validated_lang = "auto"
 
             self._config.transcription.language = validated_lang
 

@@ -413,6 +413,11 @@ class WhisperAloudConfig:
 
     def _sanitize(self) -> None:
         """Sanitize configuration values."""
+        # Keep a stable representation for auto-detected language.
+        if self.transcription.language is None:
+            self.transcription.language = "auto"
+            return
+
         # Sanitize language code
         sanitized = sanitize_language_code(self.transcription.language)
         if sanitized is None:
@@ -441,6 +446,14 @@ class WhisperAloudConfig:
         valid_compute_types = ["int8", "float16", "float32"]
         if self.model.compute_type not in valid_compute_types:
             raise ConfigurationError(f"Invalid compute type '{self.model.compute_type}'. Valid: {', '.join(valid_compute_types)}")
+
+        # Validate language ("auto" or 2-letter code)
+        sanitized_language = sanitize_language_code(self.transcription.language)
+        if sanitized_language is None:
+            raise ConfigurationError(
+                f"Invalid language '{self.transcription.language}'. "
+                "Valid: 'auto' or 2-letter ISO code (e.g., 'en', 'es')"
+            )
 
         # Validate beam size
         if not (1 <= self.transcription.beam_size <= 10):
