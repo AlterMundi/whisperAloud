@@ -13,6 +13,8 @@ try:
     from gi.repository import AyatanaAppIndicator3, Gtk
     HAS_INDICATOR = True
 except (ImportError, ValueError) as e:
+    AyatanaAppIndicator3 = None
+    Gtk = None
     HAS_INDICATOR = False
     logger.info(f"AppIndicator not available: {e}")
 

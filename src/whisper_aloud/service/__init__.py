@@ -2,11 +2,17 @@
 
 from importlib import import_module
 
-__all__ = ["WhisperAloudService", "WhisperAloudClient", "HotkeyManager"]
+__all__ = [
+    "WhisperAloudService",
+    "WhisperAloudClient",
+    "DaemonHistoryManager",
+    "HotkeyManager",
+]
 
 _LAZY_EXPORTS = {
     "WhisperAloudService": ("daemon", "WhisperAloudService"),
     "WhisperAloudClient": ("client", "WhisperAloudClient"),
+    "DaemonHistoryManager": ("history_client", "DaemonHistoryManager"),
     "HotkeyManager": ("hotkey", "HotkeyManager"),
 }
 

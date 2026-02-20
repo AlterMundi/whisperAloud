@@ -169,6 +169,46 @@ class WhisperAloudClient:
             logger.warning(f"get_history failed: {e}")
             return []
 
+    def search_history(self, query: str, limit: int = 50) -> list:
+        """Search transcription history by text."""
+        if not self._connected or not self._proxy:
+            return []
+        try:
+            return self._proxy.SearchHistory(query, limit)
+        except Exception as e:
+            logger.warning(f"search_history failed: {e}")
+            return []
+
+    def get_favorite_history(self, limit: int = 50) -> list:
+        """Get favorite transcription history entries."""
+        if not self._connected or not self._proxy:
+            return []
+        try:
+            return self._proxy.GetFavoriteHistory(limit)
+        except Exception as e:
+            logger.warning(f"get_favorite_history failed: {e}")
+            return []
+
+    def toggle_history_favorite(self, entry_id: int) -> bool:
+        """Toggle favorite status for a history entry."""
+        if not self._connected or not self._proxy:
+            return False
+        try:
+            return self._proxy.ToggleHistoryFavorite(entry_id)
+        except Exception as e:
+            logger.warning(f"toggle_history_favorite failed: {e}")
+            return False
+
+    def delete_history_entry(self, entry_id: int) -> bool:
+        """Delete a history entry by id."""
+        if not self._connected or not self._proxy:
+            return False
+        try:
+            return self._proxy.DeleteHistoryEntry(entry_id)
+        except Exception as e:
+            logger.warning(f"delete_history_entry failed: {e}")
+            return False
+
     def get_config(self) -> dict:
         """Get current configuration."""
         if not self._connected or not self._proxy:

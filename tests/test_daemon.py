@@ -272,6 +272,11 @@ class TestDaemonMethods:
         mock_entry.timestamp = "2026-01-01T00:00:00"
         mock_entry.duration = 1.5
         mock_entry.language = "en"
+        mock_entry.confidence = 0.88
+        mock_entry.processing_time = 0.5
+        mock_entry.favorite = True
+        mock_entry.notes = "note"
+        mock_entry.tags = ["tag1"]
         daemon.history_manager.get_recent.return_value = [mock_entry]
         result = daemon.GetHistory(10)
         assert isinstance(result, list)
@@ -283,6 +288,56 @@ class TestDaemonMethods:
         id_val = result[0]["id"]
         id_int = id_val if isinstance(id_val, int) else int(str(id_val))
         assert id_int == 1
+        assert result[0]["favorite"] is True
+        assert result[0]["tags"] == ["tag1"]
+
+    def test_search_history(self, daemon):
+        """SearchHistory should delegate to HistoryManager.search."""
+        mock_entry = MagicMock()
+        mock_entry.id = 2
+        mock_entry.text = "matched text"
+        mock_entry.timestamp = "2026-01-02T00:00:00"
+        mock_entry.duration = 2.0
+        mock_entry.language = "es"
+        mock_entry.confidence = 0.9
+        mock_entry.processing_time = 0.7
+        mock_entry.favorite = False
+        mock_entry.notes = ""
+        mock_entry.tags = []
+        daemon.history_manager.search.return_value = [mock_entry]
+
+        result = daemon.SearchHistory("matched", 15)
+        daemon.history_manager.search.assert_called_once_with("matched", limit=15)
+        assert len(result) == 1
+        assert result[0]["text"] == "matched text"
+
+    def test_search_history_empty_query_falls_back_to_recent(self, daemon):
+        """SearchHistory with empty query should return GetHistory output."""
+        daemon.history_manager.get_recent.return_value = []
+        result = daemon.SearchHistory("   ", 5)
+        daemon.history_manager.get_recent.assert_called_once_with(limit=5)
+        assert result == []
+
+    def test_get_favorite_history(self, daemon):
+        """GetFavoriteHistory should delegate to HistoryManager.get_favorites."""
+        daemon.history_manager.get_favorites.return_value = []
+        result = daemon.GetFavoriteHistory(20)
+        daemon.history_manager.get_favorites.assert_called_once_with(limit=20)
+        assert result == []
+
+    def test_toggle_history_favorite(self, daemon):
+        """ToggleHistoryFavorite should delegate to HistoryManager.toggle_favorite."""
+        daemon.history_manager.toggle_favorite.return_value = True
+        result = daemon.ToggleHistoryFavorite(3)
+        daemon.history_manager.toggle_favorite.assert_called_once_with(3)
+        assert result is True
+
+    def test_delete_history_entry(self, daemon):
+        """DeleteHistoryEntry should delegate to HistoryManager.delete."""
+        daemon.history_manager.delete.return_value = True
+        result = daemon.DeleteHistoryEntry(4)
+        daemon.history_manager.delete.assert_called_once_with(4)
+        assert result is True
 
 
     # ─── Deferred model loading ────────────────────────────────────────
@@ -530,6 +585,10 @@ class TestDaemonIntrospection:
         assert "CancelRecording" in doc
         assert "GetStatus" in doc
         assert "GetHistory" in doc
+        assert "SearchHistory" in doc
+        assert "GetFavoriteHistory" in doc
+        assert "ToggleHistoryFavorite" in doc
+        assert "DeleteHistoryEntry" in doc
         assert "GetConfig" in doc
         assert "SetConfig" in doc
         assert "ReloadConfig" in doc

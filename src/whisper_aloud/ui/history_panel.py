@@ -3,18 +3,48 @@
 import logging
 import threading
 from datetime import datetime
-from typing import List
+from typing import List, Protocol
 
 import gi
 
 gi.require_version('Gtk', '4.0')
 from gi.repository import GLib, GObject, Gtk
 
-from ..persistence.history_manager import HistoryManager
 from ..persistence.models import HistoryEntry
 from .history_item import HistoryItem
 
 logger = logging.getLogger(__name__)
+
+
+class HistoryBackend(Protocol):
+    """Protocol consumed by HistoryPanel for data and exports."""
+
+    def get_recent(self, limit: int | None = 50) -> List[HistoryEntry]:
+        """Return recent entries."""
+
+    def search(self, query: str, limit: int = 50) -> List[HistoryEntry]:
+        """Search entries."""
+
+    def get_favorites(self, limit: int = 50) -> List[HistoryEntry]:
+        """Return favorite entries."""
+
+    def toggle_favorite(self, entry_id: int) -> bool:
+        """Toggle favorite flag."""
+
+    def delete(self, entry_id: int) -> bool:
+        """Delete one entry."""
+
+    def export_json(self, entries: List[HistoryEntry], path) -> None:
+        """Export JSON."""
+
+    def export_markdown(self, entries: List[HistoryEntry], path) -> None:
+        """Export Markdown."""
+
+    def export_csv(self, entries: List[HistoryEntry], path) -> None:
+        """Export CSV."""
+
+    def export_text(self, entries: List[HistoryEntry], path) -> None:
+        """Export plain text."""
 
 
 class HistoryPanel(Gtk.Box):
@@ -24,12 +54,12 @@ class HistoryPanel(Gtk.Box):
         'entry-selected': (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # Emits HistoryEntry
     }
 
-    def __init__(self, history_manager: HistoryManager):
+    def __init__(self, history_manager: HistoryBackend):
         """
         Initialize history panel.
 
         Args:
-            history_manager: HistoryManager instance
+            history_manager: History backend implementation
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.history_manager = history_manager

@@ -1,22 +1,6 @@
 """Tests for WhisperAloud system tray indicator."""
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-# Skip all tests in this module if AyatanaAppIndicator3 is not available
-try:
-    import gi
-    gi.require_version('AyatanaAppIndicator3', '0.1')
-    from gi.repository import AyatanaAppIndicator3  # noqa: F401
-    _has_indicator = True
-except (ImportError, ValueError):
-    _has_indicator = False
-
-pytestmark = pytest.mark.skipif(
-    not _has_indicator,
-    reason="AyatanaAppIndicator3 not available (system package not installed)"
-)
-
 
 class TestIndicatorCreation:
     """Tests for indicator creation and availability."""

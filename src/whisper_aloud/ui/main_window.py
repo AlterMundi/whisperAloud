@@ -11,7 +11,7 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GLib, Gtk
 
 from ..config import WhisperAloudConfig
-from ..persistence.history_manager import HistoryManager
+from ..service.history_client import DaemonHistoryManager
 from .error_handler import (
     handle_model_load_error,
 )
@@ -59,8 +59,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # Local config for UI settings (language dropdown, settings dialog)
         self.config: Optional[WhisperAloudConfig] = None
 
-        # Local read-only HistoryManager (reads shared SQLite DB written by daemon)
-        self.history_manager: Optional[HistoryManager] = None
+        # Daemon-backed history manager adapter (all data via D-Bus)
+        self.history_manager: Optional[DaemonHistoryManager] = None
 
         # Sound feedback (initialized early as it's lightweight)
         self.sound_feedback = SoundFeedback(enabled=True)
@@ -390,11 +390,8 @@ class MainWindow(Gtk.ApplicationWindow):
             logger.warning(f"Failed to load local config, using defaults: {e}")
             self.config = WhisperAloudConfig()
 
-        # Initialize local read-only HistoryManager for the history panel
-        try:
-            self.history_manager = HistoryManager(self.config.persistence)
-        except Exception as e:
-            logger.warning(f"Failed to init history manager: {e}")
+        # Initialize daemon-backed history adapter for the history panel
+        self.history_manager = DaemonHistoryManager(self.client)
 
         # Hide loading dialog
         self._hide_loading_dialog()
@@ -411,7 +408,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if current_lang in self._language_codes:
                 self.lang_dropdown.set_selected(self._language_codes.index(current_lang))
 
-        # Initialize History Panel with local read-only HistoryManager
+        # Initialize History Panel with daemon-backed history data
         if self.history_manager:
             self.history_panel = HistoryPanel(self.history_manager)
             self.history_panel.connect("entry-selected", self._on_history_entry_selected)

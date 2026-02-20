@@ -138,6 +138,40 @@ class TestWhisperAloudClient:
         assert isinstance(result, list)
         assert len(result) == 1
 
+    def test_search_history_calls_daemon(self):
+        """search_history should call proxy.SearchHistory."""
+        _, client, _, mock_proxy = self._make_client()
+        mock_proxy.SearchHistory.return_value = [{"text": "needle"}]
+        result = client.search_history("needle", limit=10)
+        mock_proxy.SearchHistory.assert_called_once_with("needle", 10)
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_get_favorite_history_calls_daemon(self):
+        """get_favorite_history should call proxy.GetFavoriteHistory."""
+        _, client, _, mock_proxy = self._make_client()
+        mock_proxy.GetFavoriteHistory.return_value = [{"favorite": True}]
+        result = client.get_favorite_history(limit=20)
+        mock_proxy.GetFavoriteHistory.assert_called_once_with(20)
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_toggle_history_favorite_calls_daemon(self):
+        """toggle_history_favorite should call proxy.ToggleHistoryFavorite."""
+        _, client, _, mock_proxy = self._make_client()
+        mock_proxy.ToggleHistoryFavorite.return_value = True
+        result = client.toggle_history_favorite(7)
+        mock_proxy.ToggleHistoryFavorite.assert_called_once_with(7)
+        assert result is True
+
+    def test_delete_history_entry_calls_daemon(self):
+        """delete_history_entry should call proxy.DeleteHistoryEntry."""
+        _, client, _, mock_proxy = self._make_client()
+        mock_proxy.DeleteHistoryEntry.return_value = True
+        result = client.delete_history_entry(9)
+        mock_proxy.DeleteHistoryEntry.assert_called_once_with(9)
+        assert result is True
+
     def test_get_config_calls_daemon(self):
         """get_config should call proxy.GetConfig."""
         _, client, _, mock_proxy = self._make_client()
@@ -181,6 +215,10 @@ class TestWhisperAloudClient:
         assert client.cancel_recording() is False
         assert client.get_status() == {}
         assert client.get_history() == []
+        assert client.search_history("hello") == []
+        assert client.get_favorite_history() == []
+        assert client.toggle_history_favorite(1) is False
+        assert client.delete_history_entry(1) is False
         assert client.get_config() == {}
         assert client.set_config({}) is False
         assert client.reload_config() is False
