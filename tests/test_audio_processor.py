@@ -104,8 +104,8 @@ def test_trim_silence_no_voice():
 
 def test_process_recording():
     """Test complete audio processing pipeline."""
-    # Create stereo audio at 44.1kHz
-    audio = np.random.randn(2, 44100).astype(np.float32) * 0.1
+    # Create stereo audio at 44.1kHz (samples x channels)
+    audio = np.random.randn(44100, 2).astype(np.float32) * 0.1
 
     processed = AudioProcessor.process_recording(
         audio,
@@ -117,7 +117,7 @@ def test_process_recording():
 
     # Should be mono, resampled, normalized
     assert processed.ndim == 1
-    assert len(processed) < len(audio)  # Resampled down
+    assert len(processed) < 44100  # Resampled down from 44100 samples
     assert np.max(np.abs(processed)) <= 1.0
 
 

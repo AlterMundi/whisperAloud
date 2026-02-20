@@ -3,6 +3,8 @@
 import pytest
 from unittest.mock import Mock, patch
 
+import sounddevice as sd
+
 from whisper_aloud.audio import DeviceManager, AudioDevice
 from whisper_aloud.exceptions import AudioDeviceError
 
@@ -38,15 +40,15 @@ def test_get_default_device():
 @patch('sounddevice.default')
 def test_get_device_by_id(mock_default, mock_query):
     """Test getting device by ID."""
-    # Mock devices
+    # Mock devices as dicts (sounddevice returns dict-like DeviceList)
     mock_query.return_value = [
-        Mock(max_input_channels=2, name="Test Mic", default_samplerate=44100.0, hostapi=0),
-        Mock(max_input_channels=0, name="Output Only", default_samplerate=44100.0, hostapi=0),
+        {'max_input_channels': 2, 'name': 'Test Mic', 'default_samplerate': 44100.0, 'hostapi': 0},
+        {'max_input_channels': 0, 'name': 'Output Only', 'default_samplerate': 44100.0, 'hostapi': 0},
     ]
     mock_default.device = [0, 1]
 
-    # Mock hostapis
-    with patch('sounddevice.query_hostapis', return_value=[{"name": "ALSA"}]):
+    # Mock hostapis - query_hostapis(index) returns a single dict
+    with patch('sounddevice.query_hostapis', return_value={"name": "ALSA"}):
         device = DeviceManager.get_device_by_id(0)
         assert isinstance(device, AudioDevice)
         assert device.id == 0
@@ -99,10 +101,11 @@ def test_validate_device_stream_failure(mock_get_device, mock_stream):
     """Test validation fails when stream creation fails."""
     mock_device = Mock()
     mock_device.name = "Bad Device"
+    mock_device.channels = 2
     mock_get_device.return_value = mock_device
 
-    # Mock stream failure
-    mock_stream.side_effect = Exception("Stream error")
+    # Mock stream failure with PortAudioError (what sounddevice raises)
+    mock_stream.side_effect = sd.PortAudioError("Stream error")
 
     with pytest.raises(AudioDeviceError, match="doesn't support"):
         DeviceManager.validate_device(0, 16000, 1)
