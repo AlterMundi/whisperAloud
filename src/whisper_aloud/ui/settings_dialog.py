@@ -14,10 +14,10 @@ from ..config import (
     PersistenceConfig,
     WhisperAloudConfig,
 )
-from ..utils.validation_helpers import sanitize_language_code
 from .error_handler import InputValidator, ValidationError
 from .settings_logic import (
     has_unsaved_changes,
+    normalize_language_input,
     should_auto_close_on_focus_loss,
     should_block_close,
 )
@@ -709,18 +709,11 @@ class SettingsDialog(Gtk.Window):
             self._config.model.name = models[self.model_dropdown.get_selected()]
 
             # Validate language code
-            lang = self.language_entry.get_text().strip()
-            if lang:
-                validated_lang = sanitize_language_code(lang)
-                if validated_lang is None:
-                    raise ValidationError(
-                        f"Invalid language code '{lang}'. Use 'auto' or a 2-letter ISO code "
-                        "(e.g., 'en', 'es')."
-                    )
-            else:
-                validated_lang = "auto"
-
-            self._config.transcription.language = validated_lang
+            lang = self.language_entry.get_text()
+            try:
+                self._config.transcription.language = normalize_language_input(lang)
+            except ValueError as e:
+                raise ValidationError(str(e)) from e
 
             devices = ["cpu", "cuda"]
             selected_compute_idx = self.compute_device_dropdown.get_selected()

@@ -6,6 +6,7 @@ from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 
 from ..persistence.models import HistoryEntry
 from .history_logic import (
+    build_history_metadata,
     format_transcription_preview,
     should_emit_favorite_toggle,
 )
@@ -62,8 +63,11 @@ class HistoryItem(Gtk.ListBoxRow):
         content_box.append(text_label)
 
         # Metadata: language • confidence% • duration
-        confidence_pct = int(entry.confidence * 100)
-        meta_text = f"{entry.language} • {confidence_pct}% • {entry.duration:.1f}s"
+        meta_text = build_history_metadata(
+            language=entry.language,
+            confidence=entry.confidence,
+            duration=entry.duration,
+        )
         meta_label = Gtk.Label(label=meta_text)
         meta_label.add_css_class("dim-label")
         meta_label.add_css_class("caption")

@@ -31,3 +31,16 @@ def format_transcription_preview(
 def should_emit_favorite_toggle(previous_value: bool, new_value: bool) -> bool:
     """Return True only when favorite state actually changed."""
     return previous_value != new_value
+
+
+def build_history_metadata(
+    language: str | None,
+    confidence: float | None,
+    duration: float | None,
+) -> str:
+    """Format compact metadata line for a history entry."""
+    lang_value = (language or "auto").strip() or "auto"
+    confidence_value = max(0.0, min(1.0, float(confidence or 0.0)))
+    duration_value = max(0.0, float(duration or 0.0))
+    confidence_pct = int(confidence_value * 100)
+    return f"{lang_value} • {confidence_pct}% • {duration_value:.1f}s"

@@ -1,7 +1,10 @@
 """Logic tests for settings dialog behavior without GTK runtime."""
 
+import pytest
+
 from whisper_aloud.ui.settings_logic import (
     has_unsaved_changes,
+    normalize_language_input,
     should_auto_close_on_focus_loss,
     should_block_close,
 )
@@ -53,3 +56,21 @@ def test_focus_loss_no_close_when_not_visible():
         is_active=False,
         is_visible=False,
     ) is False
+
+
+def test_normalize_language_input_empty_to_auto():
+    assert normalize_language_input("") == "auto"
+    assert normalize_language_input("   ") == "auto"
+
+
+def test_normalize_language_input_valid_code():
+    assert normalize_language_input("EN") == "en"
+
+
+def test_normalize_language_input_keeps_auto():
+    assert normalize_language_input("auto") == "auto"
+
+
+def test_normalize_language_input_invalid_raises():
+    with pytest.raises(ValueError, match="Invalid language code"):
+        normalize_language_input("english")
