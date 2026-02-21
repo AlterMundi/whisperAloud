@@ -60,6 +60,20 @@ class StatusBar(Gtk.Box):
         self.cpu_label.add_css_class("wa-status-text")
         self.append(self.cpu_label)
 
+        # Spacer — pushes status message to the right
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        self.append(spacer)
+
+        # Transient status message
+        self.status_msg_label = Gtk.Label(label="")
+        self.status_msg_label.add_css_class("dim-label")
+        self.status_msg_label.add_css_class("wa-status-text")
+        self.status_msg_label.set_halign(Gtk.Align.END)
+        self.append(self.status_msg_label)
+
+        self._status_clear_id: int = 0
+
         # Start monitoring thread
         self._monitoring = True
         self._monitor_thread = threading.Thread(target=self._monitor_resources, daemon=True)
@@ -77,6 +91,30 @@ class StatusBar(Gtk.Box):
         self.model_label.set_text(f"Model: {name} ({device})")
         if language:
             self.language_label.set_text(f"Lang: {language}")
+
+    def set_status(self, text: str, timeout_ms: int = 4000) -> None:
+        """Display a transient status message that auto-clears.
+
+        Args:
+            text: Message to display. Empty string clears immediately.
+            timeout_ms: Milliseconds before auto-clear (default 4000).
+        """
+        if self._status_clear_id:
+            GLib.source_remove(self._status_clear_id)
+            self._status_clear_id = 0
+
+        self.status_msg_label.set_text(text)
+
+        if text:
+            self._status_clear_id = GLib.timeout_add(
+                timeout_ms, self._clear_status
+            )
+
+    def _clear_status(self) -> bool:
+        """Clear the transient status label (GLib timeout callback)."""
+        self.status_msg_label.set_text("")
+        self._status_clear_id = 0
+        return False
 
     def _monitor_resources(self):
         """Monitor system resources in background."""
