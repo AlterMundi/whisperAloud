@@ -173,11 +173,22 @@ class AudioProcessingConfig:
     noise_gate_threshold_db: float = -40.0
     agc_enabled: bool = True
     agc_target_db: float = -18.0
-    agc_max_gain_db: float = 30.0
+    agc_max_gain_db: float = 20.0
     denoising_enabled: bool = True
     denoising_strength: float = 0.5
     limiter_enabled: bool = True
     limiter_ceiling_db: float = -1.0
+
+
+@dataclass
+class RecordingFlowConfig:
+    """Configuration for smart recording flow (MPRIS + hardware gain)."""
+    pause_media: bool = True            # Pause active MPRIS players on record start
+    raise_mic_gain: bool = True         # Raise mic gain to target before recording
+    target_gain_linear: float = 0.85   # Target mic gain (0.0–1.5, applied only if above current)
+    pre_pause_delay_ms: int = 0        # Optional delay after pausing media before recording
+    post_resume_delay_ms: int = 0      # Optional delay after recording before resuming media
+    gain_restore_on_crash: bool = True  # Persist gain snapshot for restore after crash
 
 
 # =============================================================================
@@ -195,6 +206,7 @@ class WhisperAloudConfig:
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     audio_processing: AudioProcessingConfig = field(default_factory=AudioProcessingConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
+    recording_flow: RecordingFlowConfig = field(default_factory=RecordingFlowConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for serialization."""
@@ -262,6 +274,14 @@ class WhisperAloudConfig:
                 "toggle_recording": self.hotkey.toggle_recording,
                 "cancel_recording": self.hotkey.cancel_recording,
             },
+            "recording_flow": {
+                "pause_media": self.recording_flow.pause_media,
+                "raise_mic_gain": self.recording_flow.raise_mic_gain,
+                "target_gain_linear": self.recording_flow.target_gain_linear,
+                "pre_pause_delay_ms": self.recording_flow.pre_pause_delay_ms,
+                "post_resume_delay_ms": self.recording_flow.post_resume_delay_ms,
+                "gain_restore_on_crash": self.recording_flow.gain_restore_on_crash,
+            },
         }
 
     @classmethod
@@ -310,6 +330,11 @@ class WhisperAloudConfig:
             for key, value in data["hotkey"].items():
                 if hasattr(config.hotkey, key):
                     setattr(config.hotkey, key, value)
+
+        if "recording_flow" in data:
+            for key, value in data["recording_flow"].items():
+                if hasattr(config.recording_flow, key):
+                    setattr(config.recording_flow, key, value)
 
         return config
 
@@ -410,6 +435,26 @@ class WhisperAloudConfig:
         self.persistence.auto_cleanup_enabled = parse_bool_env('WHISPER_ALOUD_AUTO_CLEANUP', self.persistence.auto_cleanup_enabled)
         self.persistence.auto_cleanup_days = parse_int_env('WHISPER_ALOUD_CLEANUP_DAYS', self.persistence.auto_cleanup_days)
         self.persistence.max_entries = parse_int_env('WHISPER_ALOUD_MAX_ENTRIES', self.persistence.max_entries)
+
+        # Recording flow
+        self.recording_flow.pause_media = parse_bool_env(
+            'WHISPER_ALOUD_PAUSE_MEDIA', self.recording_flow.pause_media
+        )
+        self.recording_flow.raise_mic_gain = parse_bool_env(
+            'WHISPER_ALOUD_RAISE_MIC_GAIN', self.recording_flow.raise_mic_gain
+        )
+        self.recording_flow.target_gain_linear = parse_float_env(
+            'WHISPER_ALOUD_TARGET_GAIN_LINEAR', self.recording_flow.target_gain_linear
+        )
+        self.recording_flow.pre_pause_delay_ms = parse_int_env(
+            'WHISPER_ALOUD_PRE_PAUSE_DELAY_MS', self.recording_flow.pre_pause_delay_ms
+        )
+        self.recording_flow.post_resume_delay_ms = parse_int_env(
+            'WHISPER_ALOUD_POST_RESUME_DELAY_MS', self.recording_flow.post_resume_delay_ms
+        )
+        self.recording_flow.gain_restore_on_crash = parse_bool_env(
+            'WHISPER_ALOUD_GAIN_RESTORE_ON_CRASH', self.recording_flow.gain_restore_on_crash
+        )
 
     def _sanitize(self) -> None:
         """Sanitize configuration values."""

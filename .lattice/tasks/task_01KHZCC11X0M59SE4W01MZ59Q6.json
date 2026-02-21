@@ -1,0 +1,31 @@
+{
+  "artifact_refs": [],
+  "assigned_to": null,
+  "branch_links": [
+    {
+      "branch": "fix/audio-chain-audit",
+      "linked_at": "2026-02-21T05:57:20Z",
+      "linked_by": "agent:claude",
+      "repo": null
+    }
+  ],
+  "comment_count": 1,
+  "complexity": null,
+  "created_at": "2026-02-21T05:57:12Z",
+  "created_by": "agent:claude",
+  "custom_fields": {},
+  "description": null,
+  "done_at": "2026-02-21T06:05:05Z",
+  "id": "task_01KHZCC11X0M59SE4W01MZ59Q6",
+  "last_event_id": "ev_01KHZCTEPAT294S6VMMKBSW7K8",
+  "priority": "medium",
+  "relationships_out": [],
+  "schema_version": 1,
+  "short_id": "WHISP-6",
+  "status": "done",
+  "tags": null,
+  "title": "C2+H3: add STOPPING state, fix stop() race, fix max-duration path",
+  "type": "task",
+  "updated_at": "2026-02-21T06:05:05Z",
+  "urgency": null
+}

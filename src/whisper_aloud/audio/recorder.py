@@ -22,6 +22,7 @@ class RecordingState(Enum):
     """Recording state machine."""
     IDLE = "idle"
     RECORDING = "recording"
+    STOPPING = "stopping"  # transitional: stream closing, no new frames
     PAUSED = "paused"
     STOPPED = "stopped"
     ERROR = "error"
@@ -67,7 +68,7 @@ class AudioRecorder:
         self._start_time: Optional[float] = None
 
         # Components
-        self._level_meter = LevelMeter(smoothing=0.3)
+        self._level_meter = LevelMeter(attack_ms=10.0, release_ms=300.0, sample_rate=config.sample_rate)
         self._processor = AudioProcessor()  # Keep for format conversion utilities
         self._pipeline = AudioPipeline(processing_config or AudioProcessingConfig())
 
@@ -127,10 +128,19 @@ class AudioRecorder:
             except Exception as e:
                 logger.error(f"Level callback error: {e}")
 
-        # Check max duration
+        # Check max duration — audio callbacks must not block, so delegate to a thread
         if self.recording_duration >= self.config.max_recording_duration:
             logger.warning(f"Max recording duration reached: {self.config.max_recording_duration}s")
-            self._set_state(RecordingState.STOPPED)
+            self._set_state(RecordingState.STOPPING)
+            threading.Thread(target=self._auto_stop, daemon=True).start()
+
+    def _auto_stop(self) -> None:
+        """Stop recording when max duration is reached (called from a thread, not the callback)."""
+        try:
+            self.stop()
+        except Exception as e:
+            logger.error(f"Auto-stop failed: {e}")
+            self._set_state(RecordingState.ERROR)
 
     def start(self, device_id: Optional[int] = None) -> None:
         """
@@ -194,25 +204,30 @@ class AudioRecorder:
         Raises:
             AudioRecordingError: If stop fails or no data recorded
         """
-        if self.state not in (RecordingState.RECORDING, RecordingState.PAUSED):
+        if self.state not in (RecordingState.RECORDING, RecordingState.STOPPING, RecordingState.PAUSED):
             raise AudioRecordingError(f"Cannot stop recording in state: {self.state.value}")
 
         try:
             logger.info("Stopping recording...")
-            self._set_state(RecordingState.STOPPED)
+            self._set_state(RecordingState.STOPPING)
 
-            # Stop and close stream
+            # Close stream FIRST so the callback stops appending frames
             if self._stream:
                 self._stream.stop()
                 self._stream.close()
                 self._stream = None
 
+            # Now safe to read _frames — callback cannot append after stream is closed
+            with self._state_lock:
+                frames_snapshot = list(self._frames)
+
             # Concatenate frames
-            if not self._frames:
+            if not frames_snapshot:
                 logger.warning("No audio frames recorded")
+                self._set_state(RecordingState.IDLE)
                 return np.array([], dtype=np.float32)
 
-            raw_audio = np.concatenate(self._frames)
+            raw_audio = np.concatenate(frames_snapshot)
             logger.info(f"Recorded {len(raw_audio) / self.config.sample_rate:.2f}s of audio")
 
             # Format conversion (mono, resample)

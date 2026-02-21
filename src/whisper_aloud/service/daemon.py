@@ -21,6 +21,7 @@ from ..persistence import HistoryManager
 from ..transcriber import Transcriber
 from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
+from .media_control import GainController, MprisController
 
 logger = logging.getLogger(__name__)
 
@@ -225,10 +226,16 @@ class WhisperAloudService:
             self.recorder = AudioRecorder(
                 self.config.audio,
                 level_callback=self._on_level,
+                processing_config=self.config.audio_processing,
             )
             self.transcriber = Transcriber(self.config)
             # Model loading deferred to _ensure_model_loaded()
             self._model_loaded = False
+
+            # Smart recording flow controllers
+            self._mpris = MprisController()
+            self._gain = GainController()
+            self._gain.restore_from_crash_file()
             logger.info("Components initialized (model loading deferred)")
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
@@ -253,6 +260,9 @@ class WhisperAloudService:
             bus = SessionBus()
             bus.publish("org.fede.whisperaloud", self)
             logger.info("D-Bus service published as org.fede.whisperaloud")
+
+            # Inject bus into MPRIS controller now that we have one
+            self._mpris.set_bus(bus)
 
             # Use GLib main loop
             loop = GLib.MainLoop()
@@ -281,6 +291,18 @@ class WhisperAloudService:
             return False
 
         try:
+            rf = self.config.recording_flow
+
+            # Pause media before recording
+            if rf.pause_media:
+                self._mpris.pause_all_playing()
+                if rf.pre_pause_delay_ms > 0:
+                    time.sleep(rf.pre_pause_delay_ms / 1000.0)
+
+            # Raise mic gain before recording
+            if rf.raise_mic_gain:
+                self._gain.raise_to(rf.target_gain_linear)
+
             self.recorder.start()
             self._start_level_timer()
             self.RecordingStarted()
@@ -292,6 +314,9 @@ class WhisperAloudService:
             logger.info("Recording started via D-Bus")
             return True
         except Exception as e:
+            # Best-effort cleanup on start failure
+            self._gain.restore()
+            self._mpris.clear()
             self.Error("recording_failed", str(e))
             return False
 
@@ -304,6 +329,19 @@ class WhisperAloudService:
         try:
             self._stop_level_timer()
             audio_data = self.recorder.stop()
+
+            # Restore mic gain and resume media (try/finally ensures both run)
+            rf = self.config.recording_flow
+            try:
+                self._gain.restore()
+            except Exception as e:
+                logger.warning(f"Gain restore failed: {e}")
+            try:
+                if rf.pause_media:
+                    self._mpris.resume_ours(delay_ms=rf.post_resume_delay_ms)
+            except Exception as e:
+                logger.warning(f"Media resume failed: {e}")
+
             self.RecordingStopped()
             self.StatusChanged("transcribing")
             if self.indicator:
@@ -339,6 +377,16 @@ class WhisperAloudService:
         if self.recorder and self.recorder.is_recording:
             self._stop_level_timer()
             self.recorder.cancel()
+            # Restore gain and resume media on cancel too
+            try:
+                self._gain.restore()
+            except Exception as e:
+                logger.warning(f"Gain restore on cancel failed: {e}")
+            try:
+                if self.config.recording_flow.pause_media:
+                    self._mpris.resume_ours()
+            except Exception as e:
+                logger.warning(f"Media resume on cancel failed: {e}")
             self.StatusChanged("idle")
             if self.indicator:
                 self.indicator.set_state("idle")
