@@ -685,6 +685,24 @@ class WhisperAloudService:
                         logger.info("Transcription copied to clipboard")
                     except Exception as e:
                         logger.warning(f"Failed to copy to clipboard: {e}")
+                if (self.config.clipboard.auto_copy
+                        and self.config.clipboard.auto_paste
+                        and self.clipboard_manager
+                        and result.text):
+                    try:
+                        from ..clipboard import PasteSimulator
+                        import threading as _threading
+                        simulator = PasteSimulator(
+                            self.clipboard_manager._session_type,
+                            self.config.clipboard,
+                        )
+                        _threading.Thread(
+                            target=simulator.simulate_paste,
+                            daemon=True,
+                        ).start()
+                        logger.info("Auto-paste triggered")
+                    except Exception as e:
+                        logger.warning(f"Failed to trigger auto-paste: {e}")
                 if self.notifications:
                     self.notifications.show_transcription_completed(result.text)
                 logger.info("Transcription completed and signals emitted")
