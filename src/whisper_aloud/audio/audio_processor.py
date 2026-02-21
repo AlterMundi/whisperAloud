@@ -218,20 +218,45 @@ class AGC:
 
 
 class PeakLimiter:
-    """Hard peak limiter to prevent clipping.
+    """Soft-knee peak limiter with passthrough below the knee.
+
+    Signals below the knee point pass through unchanged.  Signals at or above
+    the knee are smoothly saturated toward the ceiling using tanh — no hard
+    plateau or discontinuity at the ceiling boundary.
 
     Args:
-        ceiling_db: Maximum output level in dBFS (default -1.0).
+        ceiling_db: Asymptotic output ceiling in dBFS (default -1.0).
+        knee_ratio: Knee starts at ``knee_ratio * ceiling`` (default 0.9).
+            Below the knee the transfer is linear (unity gain).
     """
 
-    def __init__(self, ceiling_db: float = -1.0):
+    def __init__(self, ceiling_db: float = -1.0, knee_ratio: float = 0.9):
         self.ceiling = 10 ** (ceiling_db / 20.0)
+        self.ceiling_db = ceiling_db
+        self.knee_ratio = knee_ratio
 
     def process(self, audio: np.ndarray) -> np.ndarray:
-        """Apply hard limiter."""
+        """Apply soft-knee limiting.
+
+        Below ``knee_ratio * ceiling``: unity gain (passthrough).
+        Above knee: tanh saturation anchored at the knee so the output
+        asymptotically approaches the ceiling with no plateau.
+        """
         if audio.size == 0:
             return audio
-        return np.clip(audio, -self.ceiling, self.ceiling)
+
+        knee = self.knee_ratio * self.ceiling
+        scale = self.ceiling - knee  # room between knee and ceiling
+
+        abs_audio = np.abs(audio).astype(np.float64)
+        above_knee = abs_audio > knee
+
+        out = audio.astype(np.float64)
+        if np.any(above_knee):
+            excess = abs_audio[above_knee] - knee
+            out[above_knee] = np.sign(audio[above_knee]) * (knee + scale * np.tanh(excess / scale))
+
+        return out.astype(np.float32)
 
 
 class Denoiser:

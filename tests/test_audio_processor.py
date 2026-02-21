@@ -217,3 +217,30 @@ def test_processing_config_default_max_gain_is_20db():
     """AudioProcessingConfig default agc_max_gain_db must be 20.0."""
     from whisper_aloud.config import AudioProcessingConfig
     assert AudioProcessingConfig().agc_max_gain_db == 20.0
+
+
+# ── M4: PeakLimiter soft-knee ─────────────────────────────────────────────────
+
+def test_peak_limiter_ceiling_not_exceeded():
+    """Output must never exceed ceiling (−1 dBFS ≈ 0.891 linear)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import PeakLimiter
+    limiter = PeakLimiter(ceiling_db=-1.0)
+    audio = np.ones(1000, dtype=np.float32) * 2.0  # 2x over ceiling
+    result = limiter.process(audio)
+    ceiling_linear = 10 ** (-1.0 / 20.0)
+    assert np.max(np.abs(result)) <= ceiling_linear + 1e-4
+
+
+def test_peak_limiter_soft_knee_no_plateau():
+    """Soft-knee limiter must not produce a plateau (hard-clip signature)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import PeakLimiter
+    limiter = PeakLimiter(ceiling_db=-1.0)
+    # Linearly increasing signal through and above ceiling
+    audio = np.linspace(0.7, 1.2, 2000, dtype=np.float32)
+    result = limiter.process(audio)
+    # Hard clip: diff == 0 in plateau; soft knee: diff always > 0
+    diffs = np.diff(result.astype(np.float64))
+    assert not np.any(diffs == 0.0), "Hard-clipping plateau detected in limiter output"
+    assert np.all(diffs >= 0.0), "Monotonicity violated"
