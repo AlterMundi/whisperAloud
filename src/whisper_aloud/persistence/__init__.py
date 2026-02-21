@@ -3,7 +3,6 @@
 from importlib import import_module
 
 from .database import TranscriptionDatabase
-from .history_manager import HistoryManager
 from .models import HistoryEntry
 
 __all__ = [
@@ -15,6 +14,7 @@ __all__ = [
 
 _LAZY_EXPORTS = {
     "AudioArchive": ("audio_archive", "AudioArchive"),
+    "HistoryManager": ("history_manager", "HistoryManager"),
 }
 
 
