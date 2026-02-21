@@ -27,6 +27,21 @@ class PasteSimulator:
         self.config = config
         logger.debug(f"PasteSimulator initialized for {session_type}")
 
+    def _ydotool_keys(self) -> list:
+        """Return ydotool key sequence for the configured paste shortcut."""
+        if getattr(self.config, 'paste_shortcut', 'ctrl+v') == 'ctrl+shift+v':
+            # Ctrl=29, Shift=42, V=47
+            return ['29:1', '42:1', '47:1', '47:0', '42:0', '29:0']
+        # Default: Ctrl+V
+        return ['29:1', '47:1', '47:0', '29:0']
+
+    def _xdotool_shortcut(self) -> str:
+        """Return xdotool shortcut string for the configured paste shortcut."""
+        shortcut = getattr(self.config, 'paste_shortcut', 'ctrl+v')
+        if shortcut == 'ctrl+shift+v':
+            return 'ctrl+shift+v'
+        return 'ctrl+v'
+
     def simulate_paste(self) -> bool:
         """
         Simulate Ctrl+V keypress.
@@ -59,7 +74,7 @@ class PasteSimulator:
             # ydotool keycodes: 29=Ctrl, 47=V
             # Format: keycode:1 (press), keycode:0 (release)
             subprocess.run(
-                ['ydotool', 'key', '29:1', '47:1', '47:0', '29:0'],
+                ['ydotool', 'key'] + self._ydotool_keys(),
                 timeout=self.config.timeout_seconds,
                 check=True,
                 capture_output=True
@@ -94,7 +109,7 @@ class PasteSimulator:
         """
         try:
             subprocess.run(
-                ['xdotool', 'key', 'ctrl+v'],
+                ['xdotool', 'key', self._xdotool_shortcut()],
                 timeout=self.config.timeout_seconds,
                 check=True,
                 capture_output=True
