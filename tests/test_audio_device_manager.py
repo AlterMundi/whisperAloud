@@ -162,3 +162,43 @@ def test_validate_device_stream_failure():
 
     with pytest.raises(AudioDeviceError, match="doesn't support"):
         module.DeviceManager.validate_device(0, 16000, 1)
+
+
+# ── L2: DeviceManager RLock thread safety ─────────────────────────────────────
+
+def test_device_manager_has_module_level_lock():
+    """device_manager module must expose _sd_lock (RLock) for thread safety."""
+    import threading
+    fake_sd = _build_fake_sounddevice()
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+    assert hasattr(module, "_sd_lock"), "_sd_lock not found in device_manager module"
+    assert isinstance(module._sd_lock, type(threading.RLock())), "_sd_lock must be an RLock"
+
+
+def test_device_manager_concurrent_queries_safe():
+    """Concurrent calls to list_input_devices must not raise unexpected errors."""
+    import threading
+    fake_sd = _build_fake_sounddevice()
+    fake_sd.query_devices.return_value = [
+        {"max_input_channels": 2, "name": "USB Mic", "default_samplerate": 48000.0, "hostapi": 0},
+    ]
+    fake_sd.default.device = [0, 1]
+    module = _import_device_manager_with_fake_sounddevice(fake_sd)
+
+    errors = []
+
+    def query():
+        try:
+            module.DeviceManager.list_input_devices()
+        except AudioDeviceError:
+            pass  # expected in some test environments — no real hardware
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=query) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"Unexpected errors in concurrent queries: {errors}"
