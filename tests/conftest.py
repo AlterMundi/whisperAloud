@@ -5,7 +5,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
 from whisper_aloud.persistence.database import TranscriptionDatabase
@@ -91,6 +90,7 @@ def mock_whisper_model():
 @pytest.fixture
 def sample_audio():
     """Generate sample audio data for testing."""
+    import numpy as np
     duration = 3.0  # seconds
     sample_rate = 16000
     samples = int(duration * sample_rate)
