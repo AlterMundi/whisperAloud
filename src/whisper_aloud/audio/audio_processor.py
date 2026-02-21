@@ -165,14 +165,17 @@ class AGC:
         )
 
         # Apply smoothed gain tracking with attack/release coefficients.
-        # This is a per-sample IIR with varying coefficient; we process
-        # in a tight loop but with numpy-precomputed targets.
+        # Process in 10ms blocks rather than per-sample to avoid a Python
+        # loop over every sample (which is slow on long recordings).
+        block_size = max(1, int(sample_rate * 0.010))  # ~10ms
         gain_arr = np.empty(n, dtype=np.float64)
         gain = self._current_gain
-        for i in range(n):
-            coeff = attack_coeff if desired_gain[i] < gain else release_coeff
-            gain = coeff * gain + (1 - coeff) * desired_gain[i]
-            gain_arr[i] = gain
+        for start in range(0, n, block_size):
+            end = min(start + block_size, n)
+            block_target = float(desired_gain[start:end].mean())
+            coeff = attack_coeff if block_target < gain else release_coeff
+            gain = coeff * gain + (1 - coeff) * block_target
+            gain_arr[start:end] = gain
 
         self._current_gain = float(gain)
         return (audio * gain_arr).astype(np.float32)

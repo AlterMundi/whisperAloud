@@ -127,3 +127,25 @@ def test_process_recording_empty():
     processed = AudioProcessor.process_recording(empty, 16000)
 
     assert len(processed) == 0
+
+
+# ── H1/H2: AGC vectorization tests ───────────────────────────────────────────
+
+def test_agc_no_per_sample_loop():
+    """AGC.process must not iterate sample-by-sample (for i in range(n))."""
+    import inspect
+    from whisper_aloud.audio.audio_processor import AGC
+    src = inspect.getsource(AGC.process)
+    assert 'for i in range' not in src, "Per-sample Python loop detected in AGC.process"
+
+
+def test_agc_amplifies_quiet_signal():
+    """AGC should boost a signal that is below target."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import AGC
+    sr = 16000
+    agc = AGC(target_db=-18.0, max_gain_db=20.0)
+    audio = np.ones(sr, dtype=np.float32) * 0.01  # very quiet
+    result = agc.process(audio, sr)
+    assert np.abs(result).mean() > np.abs(audio).mean(), "AGC should boost quiet signal"
+    assert np.all(np.isfinite(result)), "AGC output must be finite"
