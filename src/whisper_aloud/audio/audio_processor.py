@@ -13,71 +13,103 @@ logger = logging.getLogger(__name__)
 
 
 class NoiseGate:
-    """Noise gate with smooth attack/release."""
+    """Noise gate with smooth attack/release, hysteresis, and hold time."""
 
-    def __init__(self, threshold_db: float = -40.0, attack_ms: float = 5.0, release_ms: float = 50.0):
+    def __init__(
+        self,
+        threshold_db: float = -40.0,
+        attack_ms: float = 5.0,
+        release_ms: float = 50.0,
+        hold_ms: float = 60.0,
+        hysteresis_db: float = 6.0,
+    ):
         """Initialise the noise gate.
 
         Args:
-            threshold_db: Gate open threshold in dBFS.  Audio whose RMS level
-                exceeds this value causes the gate to open; audio below it
-                causes the gate to close.
+            threshold_db: Gate open threshold in dBFS. Audio whose RMS level
+                exceeds this value causes the gate to open.
             attack_ms: Time in milliseconds for the gain to ramp linearly from
-                0 to 1 once the signal crosses the threshold (linear ramp, not
-                an RC constant).
+                0 to 1 once the signal crosses the open threshold.
             release_ms: RC time constant (1/e decay) in milliseconds for the
-                gain to fall after the signal drops below the threshold.  This
-                is *not* the time to reach silence: at t = release_ms the gain
-                has fallen to ~37 % of its starting value; at t = 3*release_ms
-                it is ~5 %.
+                gain to fall after hold expires and signal is below close threshold.
+            hold_ms: Time in milliseconds the gate stays open after signal drops
+                below the close threshold (prevents chatter on brief dips).
+            hysteresis_db: Separation in dB between open and close thresholds.
+                Close threshold = threshold_db - hysteresis_db. Prevents rapid
+                toggling near the threshold.
         """
         self.threshold_db = threshold_db
         self.attack_ms = attack_ms
         self.release_ms = release_ms
+        self.hold_ms = hold_ms
+        self.hysteresis_db = hysteresis_db
         self._envelope = 0.0
+        self._gate_open = False
+        self._hold_remaining = 0  # samples left in hold period
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply noise gate to audio chunk.
 
-        Uses RMS-based level detection to determine gate open/close state,
-        then applies smooth exponential attack/release to the gain envelope.
+        Uses a 25ms RMS window for level detection, hysteresis between open/close
+        thresholds, and a hold timer to prevent gate chatter.
         """
         if audio.size == 0:
             return audio
 
-        threshold_linear = 10 ** (self.threshold_db / 20.0)
+        open_threshold = 10 ** (self.threshold_db / 20.0)
+        close_threshold = 10 ** ((self.threshold_db - self.hysteresis_db) / 20.0)
+        hold_samples = int(self.hold_ms * sample_rate / 1000.0)
         release_samples = max(1.0, self.release_ms * sample_rate / 1000.0)
         release_coeff = np.exp(-1.0 / release_samples)
 
         n = len(audio)
 
-        # Step 1: Compute per-sample RMS level using a short sliding window
-        # to smooth over waveform zero-crossings.
-        # win is clamped to n so that chunks shorter than ~2ms do not crash.
-        win = min(max(2, int(sample_rate * 0.002)), n)
+        # Step 1: Compute per-sample RMS level using a 25ms sliding window
+        # to smooth over waveform zero-crossings (was 2ms — too short for speech).
+        win = min(max(2, int(sample_rate * 0.025)), n)
         sq = audio.astype(np.float64) ** 2
         cumsum = np.cumsum(sq)
         rms = np.empty(n, dtype=np.float64)
         if n <= win:
-            # Chunk is shorter than the RMS window: use a growing prefix average.
             rms[:] = np.sqrt(cumsum / np.arange(1, n + 1))
         else:
             rms[:win] = np.sqrt(cumsum[:win] / np.arange(1, win + 1))
             rms[win:] = np.sqrt((cumsum[win:] - cumsum[:-win]) / win)
 
-        # Step 2: Determine gate target (1.0 = open, 0.0 = closed)
-        gate_open = rms > threshold_linear
+        # Step 2: Compute gate state with hysteresis + hold in 10ms blocks.
+        # This avoids a per-sample Python loop while handling stateful hold logic.
+        block_size = max(1, int(sample_rate * 0.010))
+        gate_state = np.empty(n, dtype=bool)
+        gate_open = self._gate_open
+        hold_remaining = self._hold_remaining
 
-        # Step 3: Apply smooth attack/release envelope using vectorized
-        # segment processing.  Attack uses linear ramp, release uses
-        # exponential decay.  We iterate over contiguous open/closed
-        # segments (typically few) rather than per-sample.
+        for start in range(0, n, block_size):
+            end = min(start + block_size, n)
+            block_rms = float(rms[start:end].mean())
+
+            if block_rms >= open_threshold:
+                # Signal above open threshold: open gate and reset hold
+                gate_open = True
+                hold_remaining = hold_samples
+            elif block_rms < close_threshold:
+                # Signal below close threshold: count down hold, then close
+                if hold_remaining > 0:
+                    hold_remaining = max(0, hold_remaining - (end - start))
+                else:
+                    gate_open = False
+            # else: between thresholds → maintain current state (hysteresis zone)
+
+            gate_state[start:end] = gate_open
+
+        self._gate_open = gate_open
+        self._hold_remaining = hold_remaining
+
+        # Step 3: Apply smooth attack/release envelope using vectorized segment processing.
         attack_step = 1.0 / max(1, int(self.attack_ms * sample_rate / 1000.0))
         envelope = self._envelope
         gain = np.empty(n, dtype=np.float64)
 
-        # Find segment boundaries where gate state changes
-        changes = np.diff(gate_open.astype(np.int8))
+        changes = np.diff(gate_state.astype(np.int8))
         seg_starts = np.concatenate(([0], np.nonzero(changes)[0] + 1, [n]))
 
         for seg_idx in range(len(seg_starts) - 1):
@@ -85,14 +117,12 @@ class NoiseGate:
             end = seg_starts[seg_idx + 1]
             seg_len = end - start
 
-            if gate_open[start]:
-                # Attack: linear ramp from envelope toward 1.0
+            if gate_state[start]:
                 ramp = envelope + attack_step * np.arange(1, seg_len + 1)
                 np.clip(ramp, 0.0, 1.0, out=ramp)
                 gain[start:end] = ramp
                 envelope = ramp[-1]
             else:
-                # Release: exponential decay from envelope toward 0.0
                 decay_factors = release_coeff ** np.arange(1, seg_len + 1)
                 gain[start:end] = envelope * decay_factors
                 envelope = gain[end - 1]

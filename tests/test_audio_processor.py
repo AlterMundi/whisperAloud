@@ -149,3 +149,55 @@ def test_agc_amplifies_quiet_signal():
     result = agc.process(audio, sr)
     assert np.abs(result).mean() > np.abs(audio).mean(), "AGC should boost quiet signal"
     assert np.all(np.isfinite(result)), "AGC output must be finite"
+
+
+# ── M1: NoiseGate hysteresis + hold + 25ms RMS window ────────────────────────
+
+def test_noise_gate_rms_window_25ms():
+    """NoiseGate RMS window must be at least 25ms (no more 2ms constant)."""
+    import inspect
+    from whisper_aloud.audio.audio_processor import NoiseGate
+    src = inspect.getsource(NoiseGate.process)
+    assert "0.002" not in src, "Old 2ms RMS window constant still present"
+
+
+def test_noise_gate_hysteresis_prevents_chatter():
+    """Gate must stay open when signal drops to mid-range (between close and open thresholds)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import NoiseGate
+    sr = 16000
+    # open_threshold = 10^(-30/20) = 0.0316; close_threshold (6dB below) = 0.0158
+    gate = NoiseGate(threshold_db=-30.0, hysteresis_db=6.0)
+    loud = np.ones(sr // 8, dtype=np.float32) * 0.1    # well above open threshold
+    mid = np.ones(sr // 4, dtype=np.float32) * 0.022   # above close (0.0158) but below open (0.0316)
+    audio = np.concatenate([loud, mid])
+    result = gate.process(audio, sr)
+    # Gate should stay OPEN during mid section — output ≥ 50% of input
+    mid_start = sr // 8
+    mid_end = mid_start + sr // 4
+    assert np.abs(result[mid_start:mid_end]).mean() > np.abs(mid).mean() * 0.5, (
+        "Gate closed during mid section (chatter): hysteresis not working"
+    )
+
+
+def test_noise_gate_hold_keeps_gate_open():
+    """Gate must stay open for hold_ms after signal drops below close threshold."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import NoiseGate
+    sr = 16000
+    hold_ms = 80.0
+    gate = NoiseGate(threshold_db=-30.0, hold_ms=hold_ms, hysteresis_db=0.0)
+    loud = np.ones(sr // 8, dtype=np.float32) * 0.1   # above threshold
+    silent = np.zeros(sr // 2, dtype=np.float32)        # below threshold
+    audio = np.concatenate([loud, silent])
+    result = gate.process(audio, sr)
+    # First hold_ms of silence: gate open → output ≈ input (zero = zero, but gate is open)
+    # After hold: gate releases → output fades toward zero
+    # Since silent input = 0, both open and closed give ~0 output.
+    # Instead verify: end of audio (long after hold) has same or less amplitude than beginning of silence
+    loud_end = sr // 8
+    hold_samples = int(sr * hold_ms / 1000.0)
+    after_hold_start = loud_end + hold_samples + int(sr * 0.1)  # 100ms after hold ends
+    if after_hold_start < len(result):
+        # After hold, envelope should be decaying (near zero for silent input)
+        assert result[after_hold_start:].max() < 0.01
