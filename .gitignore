@@ -65,3 +65,4 @@ config.toml
 test_audio_*.wav
 sample_*.wav
 recording_*.wav
+.worktrees/
