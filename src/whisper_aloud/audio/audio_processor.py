@@ -287,7 +287,7 @@ class Denoiser:
                 stationary=True,
             ).astype(np.float32)
         except Exception as e:
-            logger.warning(f"Denoising failed, passing through: {e}")
+            logger.error(f"Denoising failed, returning original audio: {e}", exc_info=True)
             return audio
 
 

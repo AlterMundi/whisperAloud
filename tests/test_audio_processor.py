@@ -273,3 +273,31 @@ def test_vad_respects_sample_rate():
     speech_end = speech_start + int(sr * 1.0)
     assert start <= speech_start
     assert end >= speech_end
+
+
+# ── L1: Denoiser exception promotion ─────────────────────────────────────────
+
+def test_denoiser_exception_logged_as_error(caplog):
+    """Denoiser failures must be logged at ERROR level (not WARNING)."""
+    import logging
+    import numpy as np
+    from unittest.mock import patch
+    from whisper_aloud.audio.audio_processor import Denoiser
+
+    denoiser = Denoiser(strength=0.5)
+    denoiser._noisereduce = object()  # non-None so process() tries to call it
+
+    with patch.object(
+        denoiser,
+        '_noisereduce',
+        new_callable=lambda: type('FakeNR', (), {
+            'reduce_noise': staticmethod(lambda **kw: (_ for _ in ()).throw(RuntimeError("oom")))
+        })
+    ):
+        with caplog.at_level(logging.WARNING, logger='whisper_aloud.audio.audio_processor'):
+            audio = np.zeros(1000, dtype=np.float32)
+            result = denoiser.process(audio, 16000)
+
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(error_records) > 0, "No ERROR log emitted on denoiser failure"
+    assert result is not None, "process() must still return audio on failure"
