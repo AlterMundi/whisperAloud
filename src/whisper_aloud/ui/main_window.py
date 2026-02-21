@@ -144,12 +144,12 @@ class MainWindow(Gtk.ApplicationWindow):
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         # Recording panel
-        recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         recording_panel_box.add_css_class("wa-surface")
-        recording_panel_box.set_margin_start(32)
-        recording_panel_box.set_margin_end(32)
-        recording_panel_box.set_margin_top(16)
-        recording_panel_box.set_margin_bottom(16)
+        recording_panel_box.set_margin_start(24)
+        recording_panel_box.set_margin_end(24)
+        recording_panel_box.set_margin_top(10)
+        recording_panel_box.set_margin_bottom(10)
         recording_panel_box.set_halign(Gtk.Align.CENTER)  # Center the recording controls
 
         # Record button
@@ -157,7 +157,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.record_button.add_css_class("suggested-action")
         self.record_button.add_css_class("pill")
         self.record_button.add_css_class("wa-primary-action")
-        self.record_button.set_size_request(200, 56)  # Fixed width for consistent look
+        self.record_button.set_size_request(200, 44)  # Fixed width for consistent look
         self.record_button.set_sensitive(False)  # Disabled until daemon connects
         self.record_button.set_tooltip_text("Start/stop recording (Space)")
         self.record_button.connect("clicked", self._on_record_button_clicked)
@@ -168,7 +168,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.cancel_button.add_css_class("destructive-action")
         self.cancel_button.add_css_class("pill")
         self.cancel_button.add_css_class("wa-primary-action")
-        self.cancel_button.set_size_request(200, 56)  # Same size as record button
+        self.cancel_button.set_size_request(200, 44)  # Same size as record button
         self.cancel_button.set_visible(False)  # Hidden by default
         self.cancel_button.set_tooltip_text("Cancel transcription (Ctrl+X)")
         self.cancel_button.connect("clicked", self._on_cancel_clicked)
@@ -176,13 +176,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Timer label
         self.timer_label = Gtk.Label(label="0:00")
-        self.timer_label.add_css_class("title-1")
-        self.timer_label.set_margin_top(8)
+        self.timer_label.add_css_class("title-2")
+        self.timer_label.set_margin_top(4)
         recording_panel_box.append(self.timer_label)
 
         # Level meter
         self.level_meter = LevelMeterPanel()
-        self.level_meter.set_margin_top(8)
+        self.level_meter.set_margin_top(4)
         self.level_meter.set_size_request(280, -1)  # Fixed width for level meter
         recording_panel_box.append(self.level_meter)
 
