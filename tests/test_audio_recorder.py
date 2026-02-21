@@ -152,10 +152,11 @@ def test_max_duration_enforcement(mock_stream, mock_validate):
     recorder._start_time = 0  # Mock start time
 
     with patch('time.time', return_value=2.0):  # 2 seconds later
-        # Call audio callback which should check duration
+        # Call audio callback — triggers STOPPING + spawns auto-stop thread
         recorder._audio_callback(np.zeros((1, 160), dtype=np.float32), 160, None, None)
 
-        assert recorder.state == RecordingState.STOPPED
+    # Immediately after callback, state must be at least STOPPING (not RECORDING)
+    assert recorder.state in (RecordingState.STOPPING, RecordingState.IDLE)
 
 
 @patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
@@ -218,3 +219,74 @@ def test_recording_duration_calculation():
     recorder._start_time = 100.0
     with patch('time.time', return_value=105.5):
         assert recorder.recording_duration == 5.5
+
+
+# ── C2 + H3 tests ────────────────────────────────────────────────────────────
+
+def test_stopping_state_exists():
+    """RecordingState must include STOPPING transitional state."""
+    assert hasattr(RecordingState, 'STOPPING')
+    assert RecordingState.STOPPING.value == "stopping"
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_stop_closes_stream_before_concatenating_frames(mock_stream, mock_validate):
+    """Stream must be closed before frames are read — no callback can append after close."""
+    mock_device = Mock()
+    mock_device.name = "Test Mic"
+    mock_validate.return_value = mock_device
+
+    close_called_before_concat = []
+    mock_stream_instance = Mock()
+    mock_stream.return_value = mock_stream_instance
+
+    config = AudioConfig()
+    recorder = AudioRecorder(config)
+    recorder.start()
+
+    # Inject one frame so stop() has data to process
+    recorder._frames = [np.zeros(160, dtype=np.float32)]
+
+    # Patch np.concatenate to detect when it's called relative to stream.close()
+    import numpy as _np
+    original_concat = _np.concatenate
+
+    def patched_concat(arrays, *args, **kwargs):
+        # At the moment of concatenation, stream should already be closed
+        close_called_before_concat.append(mock_stream_instance.close.called)
+        return original_concat(arrays, *args, **kwargs)
+
+    with patch('whisper_aloud.audio.recorder.np.concatenate', side_effect=patched_concat):
+        recorder.stop()
+
+    assert close_called_before_concat, "np.concatenate was never called"
+    assert all(close_called_before_concat), "Stream was not closed before frames were concatenated"
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_max_duration_triggers_full_stop_path(mock_stream, mock_validate):
+    """Max-duration reached in callback must result in stream closed and state IDLE."""
+    import time as _time
+    mock_device = Mock()
+    mock_device.name = "Test Mic"
+    mock_validate.return_value = mock_device
+
+    mock_stream_instance = Mock()
+    mock_stream.return_value = mock_stream_instance
+
+    config = AudioConfig(max_recording_duration=0.01)
+    recorder = AudioRecorder(config)
+    recorder.start()
+    recorder._start_time = _time.time() - 1.0  # force elapsed > max
+    recorder._frames = [np.zeros(160, dtype=np.float32)]
+
+    # Trigger callback — should schedule auto-stop thread
+    recorder._audio_callback(np.zeros((160, 1), dtype=np.float32), 160, None, None)
+
+    # Wait for the auto-stop thread to complete
+    _time.sleep(0.3)
+
+    assert recorder.state == RecordingState.IDLE, f"Expected IDLE, got {recorder.state}"
+    assert recorder._stream is None, "Stream was not closed by auto-stop"
