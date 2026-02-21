@@ -167,13 +167,19 @@ class AGC:
         # Apply smoothed gain tracking with attack/release coefficients.
         # Process in 10ms blocks rather than per-sample to avoid a Python
         # loop over every sample (which is slow on long recordings).
+        # The per-block coefficient is scaled so the overall time constant
+        # matches the per-sample IIR: coeff_block = exp(-B / tau_samples).
         block_size = max(1, int(sample_rate * 0.010))  # ~10ms
+        tau_attack = max(1.0, self.attack_ms * sample_rate / 1000.0)
+        tau_release = max(1.0, self.release_ms * sample_rate / 1000.0)
+        block_attack_coeff = np.exp(-block_size / tau_attack)
+        block_release_coeff = np.exp(-block_size / tau_release)
         gain_arr = np.empty(n, dtype=np.float64)
         gain = self._current_gain
         for start in range(0, n, block_size):
             end = min(start + block_size, n)
             block_target = float(desired_gain[start:end].mean())
-            coeff = attack_coeff if block_target < gain else release_coeff
+            coeff = block_attack_coeff if block_target < gain else block_release_coeff
             gain = coeff * gain + (1 - coeff) * block_target
             gain_arr[start:end] = gain
 
