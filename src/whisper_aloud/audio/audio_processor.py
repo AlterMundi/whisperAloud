@@ -361,13 +361,19 @@ class AudioProcessor:
             raise AudioProcessingError(f"Resampling failed: {e}") from e
 
     @staticmethod
-    def detect_voice_activity(audio: np.ndarray, threshold: float = 0.02) -> np.ndarray:
+    def detect_voice_activity(
+        audio: np.ndarray,
+        threshold: float = 0.02,
+        sample_rate: int = 16000,
+    ) -> np.ndarray:
         """
         Detect voice activity (energy-based VAD).
 
         Args:
             audio: Input audio array
             threshold: RMS threshold for voice detection
+            sample_rate: Sample rate in Hz — used to compute window/hop sizes
+                so VAD behaves correctly at any sample rate (not only 16 kHz).
 
         Returns:
             Boolean array (True = voice, False = silence)
@@ -375,9 +381,9 @@ class AudioProcessor:
         if audio.size == 0:
             return np.array([], dtype=bool)
 
-        # Calculate RMS in sliding windows
-        window_size = 400  # ~25ms at 16kHz
-        hop_size = 160     # ~10ms at 16kHz
+        # Window/hop sizes derived from sample_rate (previously hardcoded for 16kHz)
+        window_size = max(1, int(sample_rate * 0.025))  # 25ms
+        hop_size = max(1, int(sample_rate * 0.010))     # 10ms
 
         activity = np.zeros(len(audio), dtype=bool)
 
@@ -412,8 +418,8 @@ class AudioProcessor:
         if audio.size == 0:
             return audio, 0, 0
 
-        # Detect voice activity
-        activity = AudioProcessor.detect_voice_activity(audio, threshold)
+        # Detect voice activity (pass sample_rate so windows scale correctly)
+        activity = AudioProcessor.detect_voice_activity(audio, threshold, sample_rate)
 
         # Find first and last voice activity
         voice_indices = np.where(activity)[0]

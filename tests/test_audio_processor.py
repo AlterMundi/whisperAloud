@@ -244,3 +244,32 @@ def test_peak_limiter_soft_knee_no_plateau():
     diffs = np.diff(result.astype(np.float64))
     assert not np.any(diffs == 0.0), "Hard-clipping plateau detected in limiter output"
     assert np.all(diffs >= 0.0), "Monotonicity violated"
+
+
+# ── M5: VAD sample-rate-aware windows ────────────────────────────────────────
+
+def test_vad_accepts_sample_rate_param():
+    """detect_voice_activity must accept a sample_rate parameter."""
+    import inspect
+    from whisper_aloud.audio.audio_processor import AudioProcessor
+    sig = inspect.signature(AudioProcessor.detect_voice_activity)
+    assert "sample_rate" in sig.parameters
+
+
+def test_vad_respects_sample_rate():
+    """trim_silence must work correctly at sample rates other than 16kHz."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import AudioProcessor
+    sr = 48000
+    # 2 seconds: 0.5s silence, 1s speech, 0.5s silence
+    silence = np.zeros(int(sr * 0.5), dtype=np.float32)
+    speech = np.ones(int(sr * 1.0), dtype=np.float32) * 0.1
+    audio = np.concatenate([silence, speech, silence])
+    trimmed, start, end = AudioProcessor.trim_silence(audio, sr)
+    # Bounds must be within the audio
+    assert 0 <= start <= end <= len(audio)
+    # Speech portion must be included
+    speech_start = int(sr * 0.5)
+    speech_end = speech_start + int(sr * 1.0)
+    assert start <= speech_start
+    assert end >= speech_end
