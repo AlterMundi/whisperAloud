@@ -574,6 +574,148 @@ class SettingsDialog(Gtk.Window):
         delay_box.append(self.paste_delay_entry)
         page.append(delay_box)
 
+        # --- Audio Pipeline Section ---
+        pipeline_section = Gtk.Label(label="Audio Pipeline")
+        pipeline_section.set_halign(Gtk.Align.START)
+        pipeline_section.add_css_class("heading")
+        pipeline_section.add_css_class("wa-section-title")
+        pipeline_section.set_margin_top(12)
+        page.append(pipeline_section)
+
+        # Noise gate
+        self.noise_gate_switch = Gtk.Switch()
+        self.noise_gate_switch.set_active(self._config.audio_processing.noise_gate_enabled)
+        ng_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        ng_label = Gtk.Label(label="Noise gate:")
+        ng_label.set_halign(Gtk.Align.START)
+        ng_label.set_hexpand(True)
+        ng_box.append(ng_label)
+        ng_box.append(self.noise_gate_switch)
+        page.append(ng_box)
+
+        # Noise gate threshold
+        ng_thresh_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        ng_thresh_label = Gtk.Label(label="Noise gate threshold (dB):")
+        ng_thresh_label.set_halign(Gtk.Align.START)
+        ng_thresh_label.set_hexpand(True)
+        self.noise_gate_threshold_entry = Gtk.Entry()
+        self.noise_gate_threshold_entry.set_text(str(self._config.audio_processing.noise_gate_threshold_db))
+        self.noise_gate_threshold_entry.set_width_chars(8)
+        ng_thresh_box.append(ng_thresh_label)
+        ng_thresh_box.append(self.noise_gate_threshold_entry)
+        page.append(ng_thresh_box)
+
+        # AGC
+        self.agc_switch = Gtk.Switch()
+        self.agc_switch.set_active(self._config.audio_processing.agc_enabled)
+        agc_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        agc_label = Gtk.Label(label="Auto gain control (AGC):")
+        agc_label.set_halign(Gtk.Align.START)
+        agc_label.set_hexpand(True)
+        agc_box.append(agc_label)
+        agc_box.append(self.agc_switch)
+        page.append(agc_box)
+
+        # AGC target
+        agc_target_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        agc_target_label = Gtk.Label(label="AGC target level (dBFS):")
+        agc_target_label.set_halign(Gtk.Align.START)
+        agc_target_label.set_hexpand(True)
+        self.agc_target_entry = Gtk.Entry()
+        self.agc_target_entry.set_text(str(self._config.audio_processing.agc_target_db))
+        self.agc_target_entry.set_width_chars(8)
+        agc_target_box.append(agc_target_label)
+        agc_target_box.append(self.agc_target_entry)
+        page.append(agc_target_box)
+
+        # AGC max gain
+        agc_max_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        agc_max_label = Gtk.Label(label="AGC max gain (dB):")
+        agc_max_label.set_halign(Gtk.Align.START)
+        agc_max_label.set_hexpand(True)
+        self.agc_max_gain_entry = Gtk.Entry()
+        self.agc_max_gain_entry.set_text(str(self._config.audio_processing.agc_max_gain_db))
+        self.agc_max_gain_entry.set_width_chars(8)
+        agc_max_box.append(agc_max_label)
+        agc_max_box.append(self.agc_max_gain_entry)
+        page.append(agc_max_box)
+
+        # Denoiser
+        self.denoising_switch = Gtk.Switch()
+        self.denoising_switch.set_active(self._config.audio_processing.denoising_enabled)
+        denoise_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        denoise_label = Gtk.Label(label="Noise reduction:")
+        denoise_label.set_halign(Gtk.Align.START)
+        denoise_label.set_hexpand(True)
+        denoise_box.append(denoise_label)
+        denoise_box.append(self.denoising_switch)
+        page.append(denoise_box)
+
+        # Denoiser strength
+        denoise_str_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        denoise_str_label = Gtk.Label(label="Noise reduction strength (0–1):")
+        denoise_str_label.set_halign(Gtk.Align.START)
+        denoise_str_label.set_hexpand(True)
+        self.denoising_strength_entry = Gtk.Entry()
+        self.denoising_strength_entry.set_text(str(self._config.audio_processing.denoising_strength))
+        self.denoising_strength_entry.set_width_chars(8)
+        denoise_str_box.append(denoise_str_label)
+        denoise_str_box.append(self.denoising_strength_entry)
+        page.append(denoise_str_box)
+
+        # Peak limiter
+        self.limiter_switch = Gtk.Switch()
+        self.limiter_switch.set_active(self._config.audio_processing.limiter_enabled)
+        limiter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        limiter_label = Gtk.Label(label="Peak limiter:")
+        limiter_label.set_halign(Gtk.Align.START)
+        limiter_label.set_hexpand(True)
+        limiter_box.append(limiter_label)
+        limiter_box.append(self.limiter_switch)
+        page.append(limiter_box)
+
+        # --- Recording Section ---
+        recording_section = Gtk.Label(label="Recording")
+        recording_section.set_halign(Gtk.Align.START)
+        recording_section.add_css_class("heading")
+        recording_section.add_css_class("wa-section-title")
+        recording_section.set_margin_top(12)
+        page.append(recording_section)
+
+        # Pause media
+        self.pause_media_switch = Gtk.Switch()
+        self.pause_media_switch.set_active(self._config.recording_flow.pause_media)
+        pause_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        pause_label = Gtk.Label(label="Pause media on record:")
+        pause_label.set_halign(Gtk.Align.START)
+        pause_label.set_hexpand(True)
+        pause_box.append(pause_label)
+        pause_box.append(self.pause_media_switch)
+        page.append(pause_box)
+
+        # Raise mic gain
+        self.raise_mic_gain_switch = Gtk.Switch()
+        self.raise_mic_gain_switch.set_active(self._config.recording_flow.raise_mic_gain)
+        gain_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        gain_label = Gtk.Label(label="Raise mic gain on record:")
+        gain_label.set_halign(Gtk.Align.START)
+        gain_label.set_hexpand(True)
+        gain_box.append(gain_label)
+        gain_box.append(self.raise_mic_gain_switch)
+        page.append(gain_box)
+
+        # Target gain
+        target_gain_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        target_gain_label = Gtk.Label(label="Target mic gain (0.0–1.5):")
+        target_gain_label.set_halign(Gtk.Align.START)
+        target_gain_label.set_hexpand(True)
+        self.target_gain_entry = Gtk.Entry()
+        self.target_gain_entry.set_text(str(self._config.recording_flow.target_gain_linear))
+        self.target_gain_entry.set_width_chars(8)
+        target_gain_box.append(target_gain_label)
+        target_gain_box.append(self.target_gain_entry)
+        page.append(target_gain_box)
+
         # --- History Section ---
         history_section = Gtk.Label(label="History & Storage")
         history_section.set_halign(Gtk.Align.START)
@@ -809,6 +951,46 @@ class SettingsDialog(Gtk.Window):
             audio_path_text = self.audio_archive_entry.get_text().strip()
             if audio_path_text:
                 self._config.persistence.audio_archive_path = Path(audio_path_text)
+
+            logger.debug("Updating audio pipeline config")
+            self._config.audio_processing.noise_gate_enabled = self.noise_gate_switch.get_active()
+            self._config.audio_processing.noise_gate_threshold_db = InputValidator.validate_float(
+                self.noise_gate_threshold_entry.get_text(),
+                min_value=-80.0,
+                max_value=0.0,
+                field_name="Noise gate threshold"
+            )
+            self._config.audio_processing.agc_enabled = self.agc_switch.get_active()
+            self._config.audio_processing.agc_target_db = InputValidator.validate_float(
+                self.agc_target_entry.get_text(),
+                min_value=-60.0,
+                max_value=0.0,
+                field_name="AGC target level"
+            )
+            self._config.audio_processing.agc_max_gain_db = InputValidator.validate_float(
+                self.agc_max_gain_entry.get_text(),
+                min_value=0.0,
+                max_value=40.0,
+                field_name="AGC max gain"
+            )
+            self._config.audio_processing.denoising_enabled = self.denoising_switch.get_active()
+            self._config.audio_processing.denoising_strength = InputValidator.validate_float(
+                self.denoising_strength_entry.get_text(),
+                min_value=0.0,
+                max_value=1.0,
+                field_name="Noise reduction strength"
+            )
+            self._config.audio_processing.limiter_enabled = self.limiter_switch.get_active()
+
+            logger.debug("Updating recording flow config")
+            self._config.recording_flow.pause_media = self.pause_media_switch.get_active()
+            self._config.recording_flow.raise_mic_gain = self.raise_mic_gain_switch.get_active()
+            self._config.recording_flow.target_gain_linear = InputValidator.validate_float(
+                self.target_gain_entry.get_text(),
+                min_value=0.0,
+                max_value=1.5,
+                field_name="Target mic gain"
+            )
 
             logger.debug("Saving config to file")
             # Save to file using config's built-in save method
