@@ -1,16 +1,23 @@
 """History item widget for the history panel."""
 
 import logging
-import textwrap
-from gi.repository import Gtk, GObject, Pango, Gdk
+
+from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 
 from ..persistence.models import HistoryEntry
+from .history_logic import (
+    build_history_metadata,
+    format_transcription_preview,
+    should_emit_favorite_toggle,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class HistoryItem(Gtk.ListBoxRow):
     """Individual history entry widget."""
+
+    _PREVIEW_DELAY_MS = 80
 
     __gsignals__ = {
         'favorite-toggled': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
@@ -56,8 +63,11 @@ class HistoryItem(Gtk.ListBoxRow):
         content_box.append(text_label)
 
         # Metadata: language • confidence% • duration
-        confidence_pct = int(entry.confidence * 100)
-        meta_text = f"{entry.language} • {confidence_pct}% • {entry.duration:.1f}s"
+        meta_text = build_history_metadata(
+            language=entry.language,
+            confidence=entry.confidence,
+            duration=entry.duration,
+        )
         meta_label = Gtk.Label(label=meta_text)
         meta_label.add_css_class("dim-label")
         meta_label.add_css_class("caption")
@@ -74,12 +84,15 @@ class HistoryItem(Gtk.ListBoxRow):
         fav_button.set_valign(Gtk.Align.CENTER)
         fav_button.add_css_class("flat")
         fav_button.add_css_class("wa-ghost")
+        fav_button.set_tooltip_text("Toggle favorite")
         fav_button.connect("toggled", self._on_favorite_toggled)
         box.append(fav_button)
 
         self.set_child(box)
-        self._preview_text = self._format_transcription_tooltip(entry.text)
+        self._preview_text = format_transcription_preview(entry.text, line_width=42)
         self._preview_popover: Gtk.Popover | None = None
+        self._preview_show_timeout_id: int | None = None
+        self._context_popover: Gtk.Popover | None = None
         self._setup_hover_preview()
 
         # Context menu
@@ -95,6 +108,7 @@ class HistoryItem(Gtk.ListBoxRow):
         self._preview_popover.set_autohide(False)
         self._preview_popover.set_parent(self)
         self._preview_popover.set_position(Gtk.PositionType.TOP)
+        self._preview_popover.set_size_request(360, -1)
         self._preview_popover.add_css_class("wa-preview-popover")
 
         preview_label = Gtk.Label(label=self._preview_text)
@@ -102,6 +116,7 @@ class HistoryItem(Gtk.ListBoxRow):
         preview_label.set_yalign(0.0)
         preview_label.set_wrap(True)
         preview_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        preview_label.set_max_width_chars(65)
         preview_label.add_css_class("monospace")
         preview_label.add_css_class("wa-preview-label")
         self._preview_popover.set_child(preview_label)
@@ -112,33 +127,41 @@ class HistoryItem(Gtk.ListBoxRow):
         self.add_controller(hover_controller)
 
     def _on_hover_enter(self, _controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
-        """Show preview popover anchored to the top edge of the row."""
+        """Schedule preview popover for delayed show."""
         if not self._preview_popover:
             return
-        width = max(1, self.get_allocated_width())
-        self._preview_popover.set_pointing_to(Gdk.Rectangle(x=width // 2, y=0, width=1, height=1))
-        self._preview_popover.popup()
+        self._cancel_preview_timer()
+        self._preview_show_timeout_id = GLib.timeout_add(
+            self._PREVIEW_DELAY_MS,
+            self._show_preview_popover,
+        )
 
     def _on_hover_leave(self, _controller: Gtk.EventControllerMotion) -> None:
         """Hide preview popover when pointer leaves the row."""
+        self._cancel_preview_timer()
         if self._preview_popover:
             self._preview_popover.popdown()
 
+    def _cancel_preview_timer(self) -> None:
+        """Cancel pending preview timer if one is active."""
+        if self._preview_show_timeout_id is not None:
+            GLib.source_remove(self._preview_show_timeout_id)
+            self._preview_show_timeout_id = None
+
+    def _show_preview_popover(self) -> bool:
+        """Show preview popover anchored to the row top center."""
+        self._preview_show_timeout_id = None
+        if not self._preview_popover:
+            return GLib.SOURCE_REMOVE
+        width = max(1, self.get_allocated_width())
+        self._preview_popover.set_pointing_to(Gdk.Rectangle(x=width // 2, y=0, width=1, height=1))
+        self._preview_popover.popup()
+        return GLib.SOURCE_REMOVE
+
     @staticmethod
     def _format_transcription_tooltip(text: str) -> str:
-        """Format transcription tooltip as max 5 lines x 25 chars."""
-        cleaned = " ".join((text or "").split())
-        if not cleaned:
-            return ""
-
-        lines = textwrap.wrap(cleaned, width=25, break_long_words=True, replace_whitespace=True)
-        if len(lines) > 5:
-            lines = lines[:5]
-            if len(lines[-1]) >= 3:
-                lines[-1] = lines[-1][:-3] + "..."
-            else:
-                lines[-1] = lines[-1] + "..."
-        return "\n".join(lines)
+        """Backwards-compatible wrapper for preview formatting."""
+        return format_transcription_preview(text)
 
     def _on_favorite_toggled(self, button: Gtk.ToggleButton) -> None:
         """
@@ -149,22 +172,22 @@ class HistoryItem(Gtk.ListBoxRow):
         """
         is_active = button.get_active()
         button.set_icon_name("starred-symbolic" if is_active else "non-starred-symbolic")
-        
+
         # Only emit if state actually changed (avoid loops if updated externally)
-        if is_active != self.entry.favorite:
+        if should_emit_favorite_toggle(self.entry.favorite, is_active):
             self.entry.favorite = is_active
             self.emit("favorite-toggled", self.entry.id)
 
     def _setup_context_menu(self) -> None:
         """Set up right-click context menu."""
         # Create popover menu
-        menu = Gtk.PopoverMenu()
-        
+        Gtk.PopoverMenu()
+
         # Create menu model
         # Note: In GTK4, we typically use Gio.Menu, but for simplicity in this custom widget
         # we might use a Gtk.Popover with buttons if Gio.Menu is too complex to set up here.
         # However, Gtk.ListBoxRow doesn't easily support right-click without an EventController.
-        
+
         controller = Gtk.GestureClick()
         controller.set_button(0)  # Listen to all buttons
         controller.connect("pressed", self._on_mouse_pressed)
@@ -173,7 +196,7 @@ class HistoryItem(Gtk.ListBoxRow):
     def _on_mouse_pressed(self, gesture, n_press, x, y):
         """Handle mouse press for context menu."""
         from gi.repository import Gdk
-        
+
         # Check for right click (button 3)
         button = gesture.get_current_button()
         if button == Gdk.BUTTON_SECONDARY:
@@ -182,23 +205,33 @@ class HistoryItem(Gtk.ListBoxRow):
 
     def _show_context_menu(self, x, y):
         """Show context menu popover."""
+        if self._preview_popover:
+            self._preview_popover.popdown()
+
+        if self._context_popover:
+            self._context_popover.popdown()
+
         popover = Gtk.Popover()
         popover.set_parent(self)
+        popover.set_autohide(True)
         popover.set_pointing_to(Gdk.Rectangle(x=int(x), y=int(y), width=1, height=1))
-        
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        
+
         # Delete button
         delete_btn = Gtk.Button(label="Delete")
         delete_btn.add_css_class("flat")
         delete_btn.add_css_class("wa-ghost")
+        delete_btn.set_tooltip_text("Delete this history entry")
         delete_btn.connect("clicked", lambda b: self._on_delete_clicked(popover))
         box.append(delete_btn)
-        
+
         popover.set_child(box)
+        self._context_popover = popover
         popover.popup()
 
     def _on_delete_clicked(self, popover):
         """Handle delete action."""
         popover.popdown()
+        self._context_popover = None
         self.emit("delete-requested", self.entry.id)

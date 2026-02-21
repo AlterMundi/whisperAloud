@@ -3,23 +3,22 @@
 import logging
 import os
 import signal as signal_module
+import threading
 import time
 import uuid
-from pydbus.generic import signal
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from gi.repository import GLib
 from pydbus import SessionBus
+from pydbus.generic import signal
 
-from ..audio.recorder import AudioRecorder, RecordingState
+from ..audio.recorder import AudioRecorder
 from ..clipboard import ClipboardManager
 from ..config import WhisperAloudConfig
-from ..exceptions import WhisperAloudError
-from ..transcriber import Transcriber
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
+from ..transcriber import Transcriber
 from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
 
@@ -48,6 +47,23 @@ class WhisperAloudService:
         <method name="GetHistory">
           <arg direction="in" type="u" name="limit"/>
           <arg direction="out" type="aa{sv}" name="entries"/>
+        </method>
+        <method name="SearchHistory">
+          <arg direction="in" type="s" name="query"/>
+          <arg direction="in" type="u" name="limit"/>
+          <arg direction="out" type="aa{sv}" name="entries"/>
+        </method>
+        <method name="GetFavoriteHistory">
+          <arg direction="in" type="u" name="limit"/>
+          <arg direction="out" type="aa{sv}" name="entries"/>
+        </method>
+        <method name="ToggleHistoryFavorite">
+          <arg direction="in" type="i" name="entry_id"/>
+          <arg direction="out" type="b" name="success"/>
+        </method>
+        <method name="DeleteHistoryEntry">
+          <arg direction="in" type="i" name="entry_id"/>
+          <arg direction="out" type="b" name="success"/>
         </method>
         <method name="GetConfig">
           <arg direction="out" type="a{sv}" name="config"/>
@@ -130,19 +146,31 @@ class WhisperAloudService:
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         if has_display:
             try:
-                # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering
+                gtk_ready = True
+                # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering.
+                # init_check avoids hard failures in headless sessions with stale DISPLAY.
                 try:
                     import gi
+
                     gi.require_version('Gtk', '3.0')
                     from gi.repository import Gtk as Gtk3
-                    Gtk3.init(None)
-                except Exception:
-                    pass  # GTK3 may already be initialized or unavailable
 
-                self.indicator = WhisperAloudIndicator(
-                    on_toggle=self._safe_toggle,
-                    on_quit=self._safe_quit,
-                )
+                    init_result = Gtk3.init_check(None)
+                    if isinstance(init_result, tuple):
+                        gtk_ready = bool(init_result[0])
+                    else:
+                        gtk_ready = bool(init_result)
+                except Exception:
+                    gtk_ready = False
+
+                if gtk_ready:
+                    self.indicator = WhisperAloudIndicator(
+                        on_toggle=self._safe_toggle,
+                        on_quit=self._safe_quit,
+                    )
+                else:
+                    logger.info("GUI session not available; skipping tray indicator")
+                    self.indicator = None
             except Exception as e:
                 logger.warning(f"Failed to initialize indicator: {e}")
                 self.indicator = None
@@ -197,6 +225,7 @@ class WhisperAloudService:
             self.recorder = AudioRecorder(
                 self.config.audio,
                 level_callback=self._on_level,
+                processing_config=self.config.audio_processing,
             )
             self.transcriber = Transcriber(self.config)
             # Model loading deferred to _ensure_model_loaded()
@@ -308,14 +337,24 @@ class WhisperAloudService:
 
     def CancelRecording(self) -> bool:
         """Cancel active recording without transcribing."""
-        if not self.recorder or not self.recorder.is_recording:
-            return False
-        self._stop_level_timer()
-        self.recorder.cancel()
-        self.StatusChanged("idle")
-        if self.indicator:
-            self.indicator.set_state("idle")
-        return True
+        if self.recorder and self.recorder.is_recording:
+            self._stop_level_timer()
+            self.recorder.cancel()
+            self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
+            return True
+
+        if self._transcribing and self.transcriber:
+            self.transcriber.cancel_transcription()
+            self._transcribing = False
+            self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
+            logger.info("Transcription cancellation requested via D-Bus")
+            return True
+
+        return False
 
     def GetStatus(self) -> dict:
         """Get current service status as a dict."""
@@ -334,17 +373,52 @@ class WhisperAloudService:
 
     def GetHistory(self, limit: int) -> list:
         """Return recent history entries."""
-        entries = self.history_manager.get_recent(limit=limit)
-        return [
-            {
-                "id": GLib.Variant("i", e.id if e.id is not None else 0),
-                "text": GLib.Variant("s", e.text),
-                "timestamp": GLib.Variant("s", str(e.timestamp)),
-                "duration": GLib.Variant("d", e.duration or 0.0),
-                "language": GLib.Variant("s", e.language or ""),
-            }
-            for e in entries
-        ]
+        safe_limit = max(1, int(limit))
+        entries = self.history_manager.get_recent(limit=safe_limit)
+        return [self._serialize_history_entry(entry) for entry in entries]
+
+    def SearchHistory(self, query: str, limit: int) -> list:
+        """Search history entries by text."""
+        safe_limit = max(1, int(limit))
+        safe_query = (query or "").strip()
+        if not safe_query:
+            return self.GetHistory(safe_limit)
+        try:
+            entries = self.history_manager.search(safe_query, limit=safe_limit)
+        except Exception as e:
+            logger.error("SearchHistory failed: %s", e)
+            self.Error("history_search_failed", str(e))
+            return []
+        return [self._serialize_history_entry(entry) for entry in entries]
+
+    def GetFavoriteHistory(self, limit: int) -> list:
+        """Return favorite history entries."""
+        safe_limit = max(1, int(limit))
+        try:
+            entries = self.history_manager.get_favorites(limit=safe_limit)
+        except Exception as e:
+            logger.error("GetFavoriteHistory failed: %s", e)
+            self.Error("history_fetch_failed", str(e))
+            return []
+        return [self._serialize_history_entry(entry) for entry in entries]
+
+    def ToggleHistoryFavorite(self, entry_id: int) -> bool:
+        """Toggle favorite status for a history entry."""
+        try:
+            return self.history_manager.toggle_favorite(int(entry_id))
+        except Exception as e:
+            logger.error("ToggleHistoryFavorite failed: %s", e)
+            self.Error("history_update_failed", str(e))
+            return False
+
+    def DeleteHistoryEntry(self, entry_id: int) -> bool:
+        """Delete a history entry."""
+        try:
+            return self.history_manager.delete(int(entry_id))
+        except Exception as e:
+            logger.error("DeleteHistoryEntry failed: %s", e)
+            self.Error("history_delete_failed", str(e))
+            return False
 
     def GetConfig(self) -> dict:
         """Return current configuration flattened to GLib variants."""
@@ -447,6 +521,30 @@ class WhisperAloudService:
             os._exit(0)
         return True
 
+    def _serialize_history_entry(self, entry) -> dict:
+        """Convert a HistoryEntry instance to a D-Bus-friendly dictionary."""
+        timestamp = ""
+        if getattr(entry, "timestamp", None):
+            ts = entry.timestamp
+            timestamp = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+
+        tags = getattr(entry, "tags", None) or []
+        if not isinstance(tags, list):
+            tags = []
+
+        return {
+            "id": GLib.Variant("i", int(entry.id) if entry.id is not None else 0),
+            "text": GLib.Variant("s", entry.text or ""),
+            "timestamp": GLib.Variant("s", timestamp),
+            "duration": GLib.Variant("d", float(entry.duration or 0.0)),
+            "language": GLib.Variant("s", entry.language or ""),
+            "confidence": GLib.Variant("d", float(entry.confidence or 0.0)),
+            "processing_time": GLib.Variant("d", float(entry.processing_time or 0.0)),
+            "favorite": GLib.Variant("b", bool(entry.favorite)),
+            "notes": GLib.Variant("s", entry.notes or ""),
+            "tags": GLib.Variant("as", [str(tag) for tag in tags]),
+        }
+
     # ─── Level tracking ────────────────────────────────────────────────
 
     def _on_level(self, level):
@@ -548,16 +646,17 @@ class WhisperAloudService:
             GLib.idle_add(_emit_success)
 
         except Exception as e:
-            logger.error(f"Transcription failed: {e}")
+            error_message = str(e)
+            logger.error(f"Transcription failed: {error_message}")
 
             def _emit_error():
                 self._transcribing = False
                 self.StatusChanged("idle")
                 if self.indicator:
                     self.indicator.set_state("idle")
-                self.Error("transcription_failed", str(e))
+                self.Error("transcription_failed", error_message)
                 if self.notifications:
-                    self.notifications.show_error(str(e))
+                    self.notifications.show_error(error_message)
                 return False
 
             GLib.idle_add(_emit_error)

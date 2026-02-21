@@ -1,6 +1,5 @@
 """Tests for validation helper functions."""
 
-import pytest
 
 from whisper_aloud.utils.validation_helpers import sanitize_language_code
 
@@ -14,6 +13,7 @@ class TestSanitizeLanguageCode:
         assert sanitize_language_code("ES") == "es"  # Should lowercase
         assert sanitize_language_code("fr") == "fr"
         assert sanitize_language_code("  de  ") == "de"  # Should strip
+        assert sanitize_language_code("auto") == "auto"
 
     def test_sanitize_language_code_invalid_returns_none(self):
         """Test that invalid codes return None."""

@@ -84,7 +84,7 @@ def main():
         else:
             print("\n⚠️  Slow performance - consider using 'tiny' model or GPU acceleration.")
 
-        print("\nNext: Try 'python demo_quick.py' to record and transcribe real audio!\n")
+        print("\nNext: Try 'python examples/demo_quick.py' to record and transcribe real audio!\n")
 
         return 0
 

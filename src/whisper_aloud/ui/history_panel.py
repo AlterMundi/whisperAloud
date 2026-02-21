@@ -2,18 +2,54 @@
 
 import logging
 import threading
-from typing import List, Optional
 from datetime import datetime
+from typing import List, Protocol
 
 import gi
-gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib, GObject
 
-from ..persistence.history_manager import HistoryManager
+gi.require_version('Gtk', '4.0')
+from gi.repository import GLib, GObject, Gtk
+
 from ..persistence.models import HistoryEntry
 from .history_item import HistoryItem
+from .history_panel_logic import (
+    filter_entries_by_query,
+    group_entries_by_date,
+    resolve_history_query_mode,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class HistoryBackend(Protocol):
+    """Protocol consumed by HistoryPanel for data and exports."""
+
+    def get_recent(self, limit: int | None = 50) -> List[HistoryEntry]:
+        """Return recent entries."""
+
+    def search(self, query: str, limit: int = 50) -> List[HistoryEntry]:
+        """Search entries."""
+
+    def get_favorites(self, limit: int = 50) -> List[HistoryEntry]:
+        """Return favorite entries."""
+
+    def toggle_favorite(self, entry_id: int) -> bool:
+        """Toggle favorite flag."""
+
+    def delete(self, entry_id: int) -> bool:
+        """Delete one entry."""
+
+    def export_json(self, entries: List[HistoryEntry], path) -> None:
+        """Export JSON."""
+
+    def export_markdown(self, entries: List[HistoryEntry], path) -> None:
+        """Export Markdown."""
+
+    def export_csv(self, entries: List[HistoryEntry], path) -> None:
+        """Export CSV."""
+
+    def export_text(self, entries: List[HistoryEntry], path) -> None:
+        """Export plain text."""
 
 
 class HistoryPanel(Gtk.Box):
@@ -23,12 +59,12 @@ class HistoryPanel(Gtk.Box):
         'entry-selected': (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # Emits HistoryEntry
     }
 
-    def __init__(self, history_manager: HistoryManager):
+    def __init__(self, history_manager: HistoryBackend):
         """
         Initialize history panel.
 
         Args:
-            history_manager: HistoryManager instance
+            history_manager: History backend implementation
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.history_manager = history_manager
@@ -40,7 +76,7 @@ class HistoryPanel(Gtk.Box):
         self._show_favorites_only = False
 
         self._build_ui()
-        
+
         # Load initial data
         self.refresh_recent()
 
@@ -59,7 +95,7 @@ class HistoryPanel(Gtk.Box):
         label.add_css_class("heading")
         label.add_css_class("wa-section-title")
         header_box.append(label)
-        
+
         # Refresh button
         refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
         refresh_btn.set_tooltip_text("Refresh history")
@@ -67,13 +103,13 @@ class HistoryPanel(Gtk.Box):
         refresh_btn.add_css_class("wa-ghost")
         refresh_btn.connect("clicked", lambda b: self.refresh_recent())
         header_box.append(refresh_btn)
-        
+
         self.append(header_box)
 
         # Search box
         search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         search_box.add_css_class("wa-history-search")
-        
+
         self.search_entry = Gtk.SearchEntry()
         # Use props for GTK4 version compatibility
         self.search_entry.props.placeholder_text = "Search transcriptions..."
@@ -131,7 +167,7 @@ class HistoryPanel(Gtk.Box):
         # Schedule new search
         query = entry.get_text().strip()
         self._current_query = query
-        
+
         self._search_timeout_id = GLib.timeout_add(
             self._search_debounce_ms,
             self._trigger_search,
@@ -156,14 +192,15 @@ class HistoryPanel(Gtk.Box):
         def search_thread():
             """Background search thread."""
             try:
-                if self._show_favorites_only:
+                mode, normalized_query = resolve_history_query_mode(
+                    query,
+                    self._show_favorites_only,
+                )
+                if mode == "favorites":
                     results = self.history_manager.get_favorites(limit=50)
-                    # Apply text filter in memory if needed (since get_favorites doesn't take query)
-                    if query:
-                        query_lower = query.lower()
-                        results = [r for r in results if query_lower in r.text.lower()]
-                elif query:
-                    results = self.history_manager.search(query, limit=50)
+                    results = filter_entries_by_query(results, normalized_query)
+                elif mode == "search":
+                    results = self.history_manager.search(normalized_query, limit=50)
                 else:
                     results = self.history_manager.get_recent(limit=50)
 
@@ -179,7 +216,7 @@ class HistoryPanel(Gtk.Box):
     def _populate_list(self, entries: List[HistoryEntry]) -> bool:
         """
         Populate list with entries (main thread).
-        
+
         Returns:
             False to remove idle callback
         """
@@ -207,7 +244,7 @@ class HistoryPanel(Gtk.Box):
             header.set_margin_top(12)
             header.set_margin_bottom(4)
             header.set_margin_start(4)
-            
+
             # Wrap header in a non-selectable row
             header_row = Gtk.ListBoxRow()
             header_row.set_selectable(False)
@@ -221,31 +258,12 @@ class HistoryPanel(Gtk.Box):
                 item.connect("favorite-toggled", self._on_favorite_toggled_item)
                 item.connect("delete-requested", self._on_delete_requested)
                 self.list_box.append(item)
-        
+
         return False
 
     def _group_by_date(self, entries: List[HistoryEntry]) -> dict:
         """Group entries by date string."""
-        grouped = {}
-        today = datetime.now().date()
-        
-        for entry in entries:
-            if not entry.timestamp:
-                key = "Unknown Date"
-            else:
-                date = entry.timestamp.date()
-                if date == today:
-                    key = "Today"
-                elif (today - date).days == 1:
-                    key = "Yesterday"
-                else:
-                    key = date.strftime("%B %d, %Y")
-            
-            if key not in grouped:
-                grouped[key] = []
-            grouped[key].append(entry)
-            
-        return grouped
+        return group_entries_by_date(entries)
 
     def _on_row_activated(self, list_box, row):
         """Handle row click."""
@@ -257,7 +275,7 @@ class HistoryPanel(Gtk.Box):
         """Handle favorite toggle from item."""
         # Update in database
         self.history_manager.toggle_favorite(entry_id)
-        
+
         # If we are filtering by favorites and this was unchecked, refresh list
         if self._show_favorites_only and not item.entry.favorite:
             self.refresh_recent()
@@ -275,7 +293,7 @@ class HistoryPanel(Gtk.Box):
             "This action cannot be undone. The transcription will be permanently removed."
         )
 
-        cancel_btn = dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         delete_btn = dialog.add_button("Delete", Gtk.ResponseType.ACCEPT)
         delete_btn.add_css_class("destructive-action")
 
@@ -299,26 +317,26 @@ class HistoryPanel(Gtk.Box):
             accept_label="Export",
             cancel_label="Cancel"
         )
-        
+
         dialog.set_modal(True)
         dialog.set_current_name(f"whisper_history_{datetime.now().strftime('%Y%m%d')}.json")
-        
+
         # Add filters
         filter_json = Gtk.FileFilter()
         filter_json.set_name("JSON (*.json)")
         filter_json.add_pattern("*.json")
         dialog.add_filter(filter_json)
-        
+
         filter_md = Gtk.FileFilter()
         filter_md.set_name("Markdown (*.md)")
         filter_md.add_pattern("*.md")
         dialog.add_filter(filter_md)
-        
+
         filter_csv = Gtk.FileFilter()
         filter_csv.set_name("CSV (*.csv)")
         filter_csv.add_pattern("*.csv")
         dialog.add_filter(filter_csv)
-        
+
         filter_txt = Gtk.FileFilter()
         filter_txt.set_name("Text (*.txt)")
         filter_txt.add_pattern("*.txt")
@@ -332,7 +350,7 @@ class HistoryPanel(Gtk.Box):
         if response == Gtk.ResponseType.ACCEPT:
             file = dialog.get_file()
             path = file.get_path()
-            
+
             # Determine format from extension
             if path.endswith(".md"):
                 format_type = "markdown"
@@ -342,9 +360,9 @@ class HistoryPanel(Gtk.Box):
                 format_type = "text"
             else:
                 format_type = "json"
-                
+
             self._perform_export(path, format_type)
-            
+
         dialog.destroy()
 
     def _perform_export(self, path, format_type):
@@ -361,10 +379,10 @@ class HistoryPanel(Gtk.Box):
                         entries = self.history_manager.search(self._current_query, limit=1000)
                 else:
                     entries = self.history_manager.get_recent(limit=None)
-                
+
                 from pathlib import Path
                 file_path = Path(path)
-                
+
                 if format_type == "markdown":
                     self.history_manager.export_markdown(entries, file_path)
                 elif format_type == "csv":
@@ -373,9 +391,9 @@ class HistoryPanel(Gtk.Box):
                     self.history_manager.export_text(entries, file_path)
                 else:
                     self.history_manager.export_json(entries, file_path)
-                    
+
                 logger.info(f"Exported history to {path}")
-                
+
             except Exception as e:
                 logger.error(f"Export failed: {e}", exc_info=True)
 

@@ -1,13 +1,14 @@
 """Tests for transcriber functionality."""
 
 import math
-import numpy as np
-import pytest
 from unittest.mock import Mock, patch
 
+import numpy as np
+import pytest
+
 from whisper_aloud.config import WhisperAloudConfig
-from whisper_aloud.transcriber import Transcriber, TranscriptionResult
 from whisper_aloud.exceptions import AudioFormatError
+from whisper_aloud.transcriber import Transcriber, TranscriptionResult
 
 
 def test_transcriber_lazy_loading():
@@ -211,11 +212,38 @@ def test_transcribe_numpy_with_kwargs(mock_whisper_model):
     assert result.language == "en"  # From mock info
 
 
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_numpy_auto_language_uses_none(mock_whisper_model):
+    """'auto' should map to language=None for faster-whisper auto-detection."""
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+
+    mock_segment = Mock()
+    mock_segment.text = "test"
+    mock_segment.start = 0.0
+    mock_segment.end = 1.0
+    mock_segment.avg_logprob = -0.1
+
+    mock_info = Mock()
+    mock_info.language = "en"
+    mock_info.duration = 1.0
+
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio = np.zeros(16000, dtype=np.float32)
+    config = WhisperAloudConfig.load()
+    transcriber = Transcriber(config)
+    transcriber.transcribe_numpy(audio, language="auto")
+
+    call_args = mock_model_instance.transcribe.call_args
+    assert call_args[1]["language"] is None
+
+
 def test_transcriber_initialization_logging():
     """Test that transcriber logs initialization."""
     config = WhisperAloudConfig.load()
     with patch('whisper_aloud.transcriber.logger') as mock_logger:
-        transcriber = Transcriber(config)
+        Transcriber(config)
         mock_logger.info.assert_called_with(
             "Transcriber initialized with model: %s, device: %s",
             config.model.name, config.model.device

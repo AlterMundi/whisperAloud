@@ -3,12 +3,9 @@
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
-
-from whisper_aloud import ClipboardManager, ClipboardConfig, PasteSimulator
-from whisper_aloud.exceptions import ClipboardError
+from whisper_aloud import ClipboardConfig, ClipboardManager, PasteSimulator
 
 
 class TestSessionDetection:
@@ -79,7 +76,7 @@ class TestClipboardCopy:
         config = ClipboardConfig()
         manager = ClipboardManager(config)
 
-        with patch.object(manager, '_copy_fallback', return_value=True) as mock_fallback:
+        with patch.object(manager, '_copy_fallback', return_value=True):
             result = manager.copy("Test text")
 
             assert result is True
@@ -359,24 +356,17 @@ class TestConfiguration:
             assert config.clipboard.timeout_seconds == 10.0
 
 
-class TestIntegration:
-    """Integration tests (can be skipped in CI)."""
+class TestSmoke:
+    """Deterministic clipboard smoke tests."""
 
-    @pytest.mark.integration
-    @pytest.mark.skipif(os.getenv("CI"), reason="Skip in CI environment")
-    def test_real_clipboard_copy(self):
-        """Test with real clipboard (requires clipboard tools)."""
-        try:
-            config = ClipboardConfig()
-            manager = ClipboardManager(config)
+    @patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}, clear=False)
+    def test_copy_uses_fallback_without_display(self, tmp_path):
+        """Copy should succeed via fallback path in headless environments."""
+        fallback_path = tmp_path / "clipboard_fallback.txt"
+        config = ClipboardConfig(fallback_path=str(fallback_path))
+        manager = ClipboardManager(config)
 
-            # At minimum, fallback should work
-            result = manager.copy("Integration test text")
-            assert result is True
-
-            # Verify fallback file exists
-            fallback_path = Path(config.fallback_path)
-            assert fallback_path.exists()
-            assert "Integration test text" in fallback_path.read_text()
-        except Exception as e:
-            pytest.skip(f"Clipboard tools not available: {e}")
+        result = manager.copy("Integration test text")
+        assert result is True
+        assert fallback_path.exists()
+        assert "Integration test text" in fallback_path.read_text(encoding="utf-8")

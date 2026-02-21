@@ -1,7 +1,6 @@
 """Tests for configuration save functionality."""
 
 import json
-from pathlib import Path
 
 import pytest
 

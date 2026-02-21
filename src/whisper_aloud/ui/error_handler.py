@@ -1,10 +1,11 @@
 """Error handling utilities for the UI."""
 
 import logging
-from typing import Optional, Callable
 from enum import Enum
+from typing import Callable, Optional
 
 import gi
+
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 

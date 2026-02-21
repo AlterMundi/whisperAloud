@@ -1,7 +1,6 @@
 """Tests for HotkeyManager with 3-level backend fallback."""
 
-from unittest.mock import MagicMock, patch, PropertyMock
-import pytest
+from unittest.mock import MagicMock, patch
 
 
 class TestHotkeyManager:
@@ -118,7 +117,8 @@ class TestPortalBackendDetection:
             with patch("whisper_aloud.service.hotkey._try_import_keybinder", return_value=None):
                 manager = HotkeyManager()
                 assert manager.backend == "portal"
-                cb = lambda: None
+                def cb():
+                    return None
                 result = manager.register("<Super><Alt>r", callback=cb)
                 assert isinstance(result, bool)
 
@@ -147,7 +147,8 @@ class TestKeybinderBackendDetection:
         with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
             with patch("whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb):
                 manager = HotkeyManager()
-                cb = lambda: None
+                def cb():
+                    return None
                 result = manager.register("<Super><Alt>r", callback=cb)
                 assert result is True
                 mock_kb.bind.assert_called_once()
@@ -173,7 +174,7 @@ class TestKeybinderBackendDetection:
 
         with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
             with patch("whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb):
-                manager = HotkeyManager()
+                HotkeyManager()
                 mock_kb.init.assert_called_once()
 
 

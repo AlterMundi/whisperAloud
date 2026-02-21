@@ -53,7 +53,7 @@ The easiest way to install WhisperAloud:
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/whisperAloud.git
+git clone https://github.com/AlterMundi/whisperAloud.git
 cd whisperAloud
 
 # Run automated installer
@@ -69,6 +69,28 @@ The installer will:
 3. Create a virtual environment with system package access
 4. Install WhisperAloud and verify the installation
 5. Install a desktop file for easy launching
+
+### Installer Modes Matrix
+
+| Mode | System deps | User service (`systemctl --user`) | Daemon start command |
+|------|-------------|------------------------------------|----------------------|
+| `./install.sh` | Install | Install + enable when available | `systemctl --user start whisper-aloud` |
+| `./install.sh --skip-system` | Skip | Install + enable when available | `systemctl --user start whisper-aloud` |
+| `./install.sh --skip-user-service` | Install | Skip | `whisper-aloud-daemon` |
+| `./install.sh --skip-system --skip-user-service` | Skip | Skip | `whisper-aloud-daemon` |
+
+Use dry-run mode to inspect behavior on the current machine without making changes:
+
+```bash
+./install.sh --dry-run
+./install.sh --dry-run --skip-system --skip-user-service --no-cuda
+```
+
+Validate documented scenarios automatically:
+
+```bash
+./scripts/validate_install_matrix.sh
+```
 
 ### Manual Quick Install (Debian/Ubuntu)
 
@@ -201,12 +223,12 @@ alias whisper-env='source ~/.venvs/whisper_aloud/bin/activate'
 
 ```bash
 # If using git:
-git clone https://github.com/your-org/whisperAloud.git
+git clone https://github.com/AlterMundi/whisperAloud.git
 cd whisperAloud
 
 # Or download and extract the release tarball:
-tar -xzf whisperAloud-0.1.0.tar.gz
-cd whisperAloud-0.1.0
+tar -xzf whisperAloud-0.2.0.tar.gz
+cd whisperAloud-0.2.0
 ```
 
 ### Step 4: Install WhisperAloud
@@ -730,12 +752,11 @@ After successful installation:
 
 ## Version History
 
-### v0.1.0 (Current)
-- Initial release
-- Phase 1: Core transcription engine ✅
-- Phase 2: Audio recording ✅
-- Test coverage: 77%
-- Unit tests: 47/53 passing (89%)
+### v0.2.0 (Current target)
+- Refactored daemon-first architecture on `master`
+- D-Bus lifecycle commands and reconnect logic consolidated
+- Documentation refresh (README + install + troubleshooting alignment)
+- CI profile split into deterministic fast path plus release smoke checklist
 
 ---
 

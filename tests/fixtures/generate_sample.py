@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generate test audio fixtures for WhisperAloud tests."""
 
-import numpy as np
 import wave
 from pathlib import Path
+
+import numpy as np
 
 
 def generate_tone(frequency: float, duration: float, sample_rate: int = 16000) -> np.ndarray:

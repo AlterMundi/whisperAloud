@@ -1,9 +1,10 @@
 """Tests for WhisperAloud D-Bus daemon service."""
+import importlib
 import sys
-import pytest
-import numpy as np
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pytest
 
 # ── Bootstrap: patch pydbus and GLib before daemon module loads ──────────
 # pydbus signal() is a descriptor that prevents instance-level assignment.
@@ -31,28 +32,75 @@ class _FakeSignal:
         self._store[id(obj)] = value
 
 
-_fake_pydbus_generic = MagicMock()
-_fake_pydbus_generic.signal = _FakeSignal
-_fake_pydbus = MagicMock()
-_fake_pydbus.generic = _fake_pydbus_generic
-_fake_pydbus.SessionBus = MagicMock
+def _build_stub_modules():
+    """Build local stubs used for daemon imports and runtime checks."""
+    fake_pydbus_generic = MagicMock()
+    fake_pydbus_generic.signal = _FakeSignal
+    fake_pydbus = MagicMock()
+    fake_pydbus.generic = fake_pydbus_generic
+    fake_pydbus.SessionBus = MagicMock
 
-# Inject fakes into sys.modules before any import of daemon
-sys.modules.setdefault('pydbus', _fake_pydbus)
-sys.modules.setdefault('pydbus.generic', _fake_pydbus_generic)
+    # Keep daemon imports deterministic and non-blocking in headless CI.
+    fake_gtk = MagicMock()
+    fake_gtk.init_check.return_value = (True, [])
+    fake_glib = MagicMock()
+    fake_glib.Variant = lambda t, v: v
+    fake_glib.idle_add = lambda fn, *args: fn(*args)
+    fake_glib.SOURCE_REMOVE = False
+    fake_glib.PRIORITY_DEFAULT = 0
+    fake_glib.unix_signal_add = MagicMock(return_value=1)
+    fake_glib.timeout_add = MagicMock(return_value=1)
+    fake_glib.source_remove = MagicMock()
+
+    fake_gi_repo = MagicMock()
+    fake_gi_repo.Gtk = fake_gtk
+    fake_gi_repo.GLib = fake_glib
+    fake_gi = MagicMock()
+    fake_gi.repository = fake_gi_repo
+
+    fake_scipy = MagicMock()
+    fake_scipy.signal = MagicMock()
+    fake_faster_whisper = MagicMock()
+    fake_faster_whisper.WhisperModel = MagicMock()
+
+    return {
+        "pydbus": fake_pydbus,
+        "pydbus.generic": fake_pydbus_generic,
+        "gi": fake_gi,
+        "gi.repository": fake_gi_repo,
+        "sounddevice": MagicMock(),
+        "scipy": fake_scipy,
+        "faster_whisper": fake_faster_whisper,
+    }
+
+
+def _import_daemon_module(stub_modules):
+    """Import daemon module with local D-Bus/GLib stubs."""
+
+    with patch.dict(
+        sys.modules,
+        stub_modules,
+    ):
+        sys.modules.pop("whisper_aloud.service.daemon", None)
+        module = importlib.import_module("whisper_aloud.service.daemon")
+    return module
 
 
 def _make_daemon(indicator_fails=False, hotkey_fails=False):
     """Create a daemon instance with all external dependencies mocked."""
-    with patch('whisper_aloud.service.daemon.SessionBus'), \
-         patch('whisper_aloud.service.daemon.AudioRecorder'), \
-         patch('whisper_aloud.service.daemon.Transcriber'), \
-         patch('whisper_aloud.service.daemon.NotificationManager'), \
-         patch('whisper_aloud.service.daemon.HistoryManager'), \
-         patch('whisper_aloud.service.daemon.ClipboardManager'), \
-         patch('whisper_aloud.service.daemon.WhisperAloudIndicator') as mock_ind_cls, \
-         patch('whisper_aloud.service.daemon.HotkeyManager') as mock_hk_cls, \
-         patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+    stub_modules = _build_stub_modules()
+    daemon_module = _import_daemon_module(stub_modules)
+    with patch.dict(sys.modules, stub_modules), \
+         patch.dict("os.environ", {"DISPLAY": ":0"}, clear=False), \
+         patch.object(daemon_module, "SessionBus"), \
+         patch.object(daemon_module, "AudioRecorder"), \
+         patch.object(daemon_module, "Transcriber"), \
+         patch.object(daemon_module, "NotificationManager"), \
+         patch.object(daemon_module, "HistoryManager"), \
+         patch.object(daemon_module, "ClipboardManager"), \
+         patch.object(daemon_module, "WhisperAloudIndicator") as mock_ind_cls, \
+         patch.object(daemon_module, "HotkeyManager") as mock_hk_cls, \
+         patch.object(daemon_module, "GLib") as mock_glib:
         # GLib.Variant passthrough for test assertions
         mock_glib.Variant = lambda t, v: v
         # GLib.idle_add should invoke the callback immediately in tests
@@ -68,10 +116,10 @@ def _make_daemon(indicator_fails=False, hotkey_fails=False):
             mock_hk_cls.return_value.available = True
             mock_hk_cls.return_value.backend = "keybinder"
 
-        from whisper_aloud.service.daemon import WhisperAloudService
         from whisper_aloud.config import WhisperAloudConfig
         config = WhisperAloudConfig()
-        service = WhisperAloudService(config=config)
+        service = daemon_module.WhisperAloudService(config=config)
+        service._daemon_module = daemon_module
         service._mock_glib = mock_glib
         service._mock_indicator_cls = mock_ind_cls
         service._mock_hotkey_cls = mock_hk_cls
@@ -131,6 +179,16 @@ class TestDaemonMethods:
         daemon.recorder.is_recording = False
         result = daemon.CancelRecording()
         assert result is False
+
+    def test_cancel_recording_during_transcribing(self, daemon):
+        """CancelRecording should cancel an in-flight transcription."""
+        daemon.recorder.is_recording = False
+        daemon._transcribing = True
+        result = daemon.CancelRecording()
+        assert result is True
+        assert daemon._transcribing is False
+        daemon.transcriber.cancel_transcription.assert_called_once()
+        daemon.StatusChanged.assert_called_with("idle")
 
     def test_toggle_recording_starts(self, daemon):
         """ToggleRecording when idle should start recording."""
@@ -194,14 +252,14 @@ class TestDaemonMethods:
 
     def test_reload_config_returns_bool(self, daemon):
         """ReloadConfig should return True on success."""
-        with patch('whisper_aloud.service.daemon.WhisperAloudConfig') as mock_conf:
+        with patch.object(daemon._daemon_module, "WhisperAloudConfig") as mock_conf:
             mock_conf.load.return_value = daemon.config
             result = daemon.ReloadConfig()
             assert result is True
 
     def test_reload_config_failure(self, daemon):
         """ReloadConfig should return False on failure."""
-        with patch('whisper_aloud.service.daemon.WhisperAloudConfig') as mock_conf:
+        with patch.object(daemon._daemon_module, "WhisperAloudConfig") as mock_conf:
             mock_conf.load.side_effect = Exception("config error")
             result = daemon.ReloadConfig()
             assert result is False
@@ -214,6 +272,11 @@ class TestDaemonMethods:
         mock_entry.timestamp = "2026-01-01T00:00:00"
         mock_entry.duration = 1.5
         mock_entry.language = "en"
+        mock_entry.confidence = 0.88
+        mock_entry.processing_time = 0.5
+        mock_entry.favorite = True
+        mock_entry.notes = "note"
+        mock_entry.tags = ["tag1"]
         daemon.history_manager.get_recent.return_value = [mock_entry]
         result = daemon.GetHistory(10)
         assert isinstance(result, list)
@@ -225,6 +288,56 @@ class TestDaemonMethods:
         id_val = result[0]["id"]
         id_int = id_val if isinstance(id_val, int) else int(str(id_val))
         assert id_int == 1
+        assert result[0]["favorite"] is True
+        assert result[0]["tags"] == ["tag1"]
+
+    def test_search_history(self, daemon):
+        """SearchHistory should delegate to HistoryManager.search."""
+        mock_entry = MagicMock()
+        mock_entry.id = 2
+        mock_entry.text = "matched text"
+        mock_entry.timestamp = "2026-01-02T00:00:00"
+        mock_entry.duration = 2.0
+        mock_entry.language = "es"
+        mock_entry.confidence = 0.9
+        mock_entry.processing_time = 0.7
+        mock_entry.favorite = False
+        mock_entry.notes = ""
+        mock_entry.tags = []
+        daemon.history_manager.search.return_value = [mock_entry]
+
+        result = daemon.SearchHistory("matched", 15)
+        daemon.history_manager.search.assert_called_once_with("matched", limit=15)
+        assert len(result) == 1
+        assert result[0]["text"] == "matched text"
+
+    def test_search_history_empty_query_falls_back_to_recent(self, daemon):
+        """SearchHistory with empty query should return GetHistory output."""
+        daemon.history_manager.get_recent.return_value = []
+        result = daemon.SearchHistory("   ", 5)
+        daemon.history_manager.get_recent.assert_called_once_with(limit=5)
+        assert result == []
+
+    def test_get_favorite_history(self, daemon):
+        """GetFavoriteHistory should delegate to HistoryManager.get_favorites."""
+        daemon.history_manager.get_favorites.return_value = []
+        result = daemon.GetFavoriteHistory(20)
+        daemon.history_manager.get_favorites.assert_called_once_with(limit=20)
+        assert result == []
+
+    def test_toggle_history_favorite(self, daemon):
+        """ToggleHistoryFavorite should delegate to HistoryManager.toggle_favorite."""
+        daemon.history_manager.toggle_favorite.return_value = True
+        result = daemon.ToggleHistoryFavorite(3)
+        daemon.history_manager.toggle_favorite.assert_called_once_with(3)
+        assert result is True
+
+    def test_delete_history_entry(self, daemon):
+        """DeleteHistoryEntry should delegate to HistoryManager.delete."""
+        daemon.history_manager.delete.return_value = True
+        result = daemon.DeleteHistoryEntry(4)
+        daemon.history_manager.delete.assert_called_once_with(4)
+        assert result is True
 
 
     # ─── Deferred model loading ────────────────────────────────────────
@@ -253,7 +366,7 @@ class TestDaemonMethods:
     def test_start_recording_starts_level_timer(self, daemon):
         """StartRecording should start the level emission timer."""
         daemon.recorder.is_recording = False
-        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
             mock_glib.Variant = lambda t, v: v
             daemon.StartRecording()
             mock_glib.timeout_add.assert_called_once_with(100, daemon._emit_level)
@@ -263,7 +376,7 @@ class TestDaemonMethods:
         daemon.recorder.is_recording = True
         daemon.recorder.stop.return_value = np.zeros(16000, dtype=np.float32)
         daemon._level_timer_id = 42
-        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
             mock_glib.Variant = lambda t, v: v
             daemon.StopRecording()
             mock_glib.source_remove.assert_called_once_with(42)
@@ -273,7 +386,7 @@ class TestDaemonMethods:
         """CancelRecording should stop the level timer."""
         daemon.recorder.is_recording = True
         daemon._level_timer_id = 42
-        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
             mock_glib.Variant = lambda t, v: v
             daemon.CancelRecording()
             mock_glib.source_remove.assert_called_once_with(42)
@@ -328,7 +441,7 @@ class TestDaemonMethods:
         daemon.transcriber.transcribe_numpy.return_value = mock_result
         daemon.history_manager.add_transcription.return_value = 1
 
-        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
             mock_glib.Variant = lambda t, v: v
             mock_glib.idle_add = lambda fn, *args: fn(*args)
             daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
@@ -346,11 +459,31 @@ class TestDaemonMethods:
         daemon.transcriber.transcribe_numpy.return_value = mock_result
         daemon.history_manager.add_transcription.return_value = 1
 
-        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
             mock_glib.Variant = lambda t, v: v
             mock_glib.idle_add = lambda fn, *args: fn(*args)
-            daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+        daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
         daemon.clipboard_manager.copy.assert_not_called()
+
+    def test_transcribe_error_emits_later_without_closure_failure(self, daemon):
+        """Deferred error callback should not depend on except-scope variable lifetime."""
+        daemon.transcriber.transcribe_numpy.side_effect = Exception("boom")
+        deferred_callbacks = []
+
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+
+            def _capture_idle(fn, *args):
+                deferred_callbacks.append((fn, args))
+                return 1
+
+            mock_glib.idle_add = _capture_idle
+            daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
+
+        assert len(deferred_callbacks) == 1
+        fn, args = deferred_callbacks[0]
+        fn(*args)
+        daemon.Error.assert_called_once_with("transcription_failed", "boom")
 
 
     # ─── Task 3.2: Indicator integration tests ─────────────────────────
@@ -385,7 +518,7 @@ class TestDaemonMethods:
         daemon.transcriber.transcribe_numpy.return_value = mock_result
         daemon.history_manager.add_transcription.return_value = 1
 
-        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
             mock_glib.Variant = lambda t, v: v
             mock_glib.idle_add = lambda fn, *args: fn(*args)
             daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
@@ -432,7 +565,7 @@ class TestDaemonMethods:
         daemon.recorder.state = MagicMock()
         daemon.recorder.state.value = "idle"
         daemon._transcribing = False
-        with patch('whisper_aloud.service.daemon.GLib') as mock_glib:
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
             mock_glib.Variant = lambda t, v: v
             result = daemon.GetStatus()
         assert "hotkey_backend" in result
@@ -444,14 +577,18 @@ class TestDaemonIntrospection:
 
     def test_docstring_contains_interface(self):
         """Service docstring should contain the interface XML."""
-        from whisper_aloud.service.daemon import WhisperAloudService
-        doc = WhisperAloudService.__doc__
+        daemon_module = _import_daemon_module(_build_stub_modules())
+        doc = daemon_module.WhisperAloudService.__doc__
         assert "org.fede.whisperaloud.Control" in doc
         assert "StartRecording" in doc
         assert "StopRecording" in doc
         assert "CancelRecording" in doc
         assert "GetStatus" in doc
         assert "GetHistory" in doc
+        assert "SearchHistory" in doc
+        assert "GetFavoriteHistory" in doc
+        assert "ToggleHistoryFavorite" in doc
+        assert "DeleteHistoryEntry" in doc
         assert "GetConfig" in doc
         assert "SetConfig" in doc
         assert "ReloadConfig" in doc
@@ -466,8 +603,44 @@ class TestDaemonIntrospection:
 
     def test_bus_name_unified(self):
         """Bus name should use lowercase 'whisperaloud'."""
-        from whisper_aloud.service.daemon import WhisperAloudService
-        doc = WhisperAloudService.__doc__
+        daemon_module = _import_daemon_module(_build_stub_modules())
+        doc = daemon_module.WhisperAloudService.__doc__
         # Should NOT contain old camelCase name
         assert "org.fede.whisperAloud" not in doc
         assert "org.fede.whisperaloud" in doc
+
+
+class TestRecorderInitialization:
+    """Tests for recorder construction in daemon _init_components."""
+
+    def test_recorder_initialized_with_processing_config(self):
+        """AudioRecorder must be constructed with processing_config from daemon config."""
+        stub_modules = _build_stub_modules()
+        daemon_module = _import_daemon_module(stub_modules)
+        with (
+            patch.dict(sys.modules, stub_modules),
+            patch.dict("os.environ", {"DISPLAY": ":0"}, clear=False),
+            patch.object(daemon_module, "SessionBus"),
+            patch.object(daemon_module, "AudioRecorder") as mock_ar,
+            patch.object(daemon_module, "Transcriber"),
+            patch.object(daemon_module, "NotificationManager"),
+            patch.object(daemon_module, "HistoryManager"),
+            patch.object(daemon_module, "ClipboardManager"),
+            patch.object(daemon_module, "WhisperAloudIndicator"),
+            patch.object(daemon_module, "HotkeyManager") as mock_hk_cls,
+            patch.object(daemon_module, "GLib") as mock_glib,
+        ):
+            mock_glib.Variant = lambda t, v: v
+            mock_glib.idle_add = lambda fn, *args: fn(*args)
+            mock_glib.SOURCE_REMOVE = False
+            mock_hk_cls.return_value.available = True
+            mock_hk_cls.return_value.backend = "keybinder"
+
+            from whisper_aloud.config import WhisperAloudConfig
+
+            config = WhisperAloudConfig()
+            daemon_module.WhisperAloudService(config=config)
+
+            _, kwargs = mock_ar.call_args
+            assert "processing_config" in kwargs, "processing_config not passed to AudioRecorder"
+            assert kwargs["processing_config"] == config.audio_processing

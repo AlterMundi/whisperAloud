@@ -1,24 +1,26 @@
 """Settings dialog for WhisperAloud configuration."""
 
 import logging
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
 import gi
+
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib
+from gi.repository import Gdk, GLib, Gtk
 
 from ..config import (
-    WhisperAloudConfig,
-    ModelConfig,
-    AudioConfig,
-    ClipboardConfig,
     NotificationConfig,
     PersistenceConfig,
+    WhisperAloudConfig,
 )
-from ..audio import DeviceManager
 from .error_handler import InputValidator, ValidationError
-from ..utils.validation_helpers import sanitize_language_code
+from .settings_logic import (
+    has_unsaved_changes,
+    normalize_language_input,
+    should_auto_close_on_focus_loss,
+    should_block_close,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,28 +57,34 @@ class SettingsDialog(Gtk.Window):
 
         # Build UI
         self._build_ui()
+        self._setup_keyboard_shortcuts()
         self._allow_close = False
         self._child_dialog_open = False
         self._dirty = False
         self._initial_ui_state = self._capture_ui_state()
         self._connect_dirty_tracking()
-        self.connect("notify::is-active", self._on_window_active_changed)
+        self._focus_controller = Gtk.EventControllerFocus()
+        self._focus_controller.connect("notify::contains-focus", self._on_focus_changed)
+        self.add_controller(self._focus_controller)
         self.connect("close-request", self._on_close_request)
 
         logger.info("Settings dialog initialized")
 
-    def _on_window_active_changed(self, window: Gtk.Window, _param: object) -> None:
-        """Auto-close settings when user clicks outside and window loses focus."""
-        if self._child_dialog_open:
-            return
-        if not window.get_property("is-active") and window.is_visible():
-            GLib.idle_add(window.close)
+    def _on_focus_changed(self, controller: Gtk.EventControllerFocus, _param: object) -> None:
+        """Auto-close settings when focus leaves the entire window widget tree."""
+        if should_auto_close_on_focus_loss(
+            child_dialog_open=self._child_dialog_open,
+            contains_focus=controller.get_contains_focus(),
+            is_visible=self.is_visible(),
+        ):
+            GLib.idle_add(self.close)
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         """Intercept close to protect unsaved changes."""
-        if self._allow_close:
-            return False
-        if self._has_unsaved_changes():
+        if should_block_close(
+            allow_close=self._allow_close,
+            unsaved_changes=self._has_unsaved_changes(),
+        ):
             self._show_discard_confirmation()
             return True
         return False
@@ -119,6 +127,7 @@ class SettingsDialog(Gtk.Window):
         # Cancel button
         cancel_button = Gtk.Button(label="Cancel")
         cancel_button.add_css_class("wa-ghost")
+        cancel_button.set_tooltip_text("Discard and close (Esc)")
         cancel_button.connect("clicked", self._on_cancel_clicked)
         header_bar.pack_start(cancel_button)
 
@@ -126,6 +135,7 @@ class SettingsDialog(Gtk.Window):
         save_button = Gtk.Button(label="Save")
         save_button.add_css_class("suggested-action")
         save_button.add_css_class("wa-primary-action")
+        save_button.set_tooltip_text("Save settings (Ctrl+S)")
         save_button.connect("clicked", self._on_save_clicked)
         header_bar.pack_end(save_button)
         self.set_titlebar(header_bar)
@@ -148,6 +158,32 @@ class SettingsDialog(Gtk.Window):
         self._add_advanced_page()
 
         main_box.append(self.stack)
+
+    def _setup_keyboard_shortcuts(self) -> None:
+        """Enable dialog-local keyboard shortcuts for accessibility."""
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_controller)
+
+    def _on_key_pressed(
+        self,
+        _controller: Gtk.EventControllerKey,
+        keyval: int,
+        _keycode: int,
+        state: Gdk.ModifierType,
+    ) -> bool:
+        """Handle keyboard shortcuts in settings dialog."""
+        ctrl_pressed = bool(state & Gdk.ModifierType.CONTROL_MASK)
+
+        if keyval == Gdk.KEY_Escape:
+            self._on_cancel_clicked(None)
+            return True
+
+        if ctrl_pressed and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            self._on_save_clicked(None)
+            return True
+
+        return False
 
     def _add_general_page(self) -> None:
         """Add general settings page with common options."""
@@ -200,6 +236,7 @@ class SettingsDialog(Gtk.Window):
         device_label.set_halign(Gtk.Align.START)
         device_label.set_hexpand(True)
 
+        from ..audio import DeviceManager
         self._devices = DeviceManager.list_input_devices()
         device_names = [
             f"{d.name}" + (" ⭐" if d.is_default else "")
@@ -388,7 +425,7 @@ class SettingsDialog(Gtk.Window):
 
     def _has_unsaved_changes(self) -> bool:
         """Return True when current UI state differs from initial state."""
-        return self._capture_ui_state() != self._initial_ui_state
+        return has_unsaved_changes(self._initial_ui_state, self._capture_ui_state())
 
     def _mark_dirty(self, *_args: object) -> None:
         """Update dirty flag based on current form state."""
@@ -658,12 +695,12 @@ class SettingsDialog(Gtk.Window):
         self._style_setting_rows_in_page(page)
         self.stack.add_titled(scrolled, "advanced", "Advanced")
 
-    def _on_save_clicked(self, button: Gtk.Button) -> None:
+    def _on_save_clicked(self, button: Optional[Gtk.Button]) -> None:
         """
         Handle save button click.
 
         Args:
-            button: The button that was clicked
+            button: The button that was clicked (or None from keyboard shortcut)
         """
         logger.info("Saving settings")
 
@@ -674,15 +711,11 @@ class SettingsDialog(Gtk.Window):
             self._config.model.name = models[self.model_dropdown.get_selected()]
 
             # Validate language code
-            lang = self.language_entry.get_text().strip()
-            if lang:
-                validated_lang = sanitize_language_code(lang)
-                if validated_lang is None:
-                    raise ValidationError(f"Invalid language code '{lang}'. Must be a 2-letter ISO code (e.g., 'en', 'es').")
-            else:
-                validated_lang = None
-            
-            self._config.transcription.language = validated_lang
+            lang = self.language_entry.get_text()
+            try:
+                self._config.transcription.language = normalize_language_input(lang)
+            except ValueError as e:
+                raise ValidationError(str(e)) from e
 
             devices = ["cpu", "cuda"]
             selected_compute_idx = self.compute_device_dropdown.get_selected()
@@ -698,6 +731,7 @@ class SettingsDialog(Gtk.Window):
 
             # Update channels based on selected device
             if self._config.audio.device_id is not None:
+                from ..audio import DeviceManager
                 device = DeviceManager.get_device_by_id(self._config.audio.device_id)
                 # If device is mono-only, force mono. If stereo-capable, respect config or default to stereo?
                 # For now, let's just ensure we don't ask for more channels than available
@@ -780,17 +814,6 @@ class SettingsDialog(Gtk.Window):
             # Save to file using config's built-in save method
             self._config.save()
 
-            logger.debug("Notifying daemon of config changes")
-            # Notify daemon to reload config
-            try:
-                from pydbus import SessionBus
-                bus = SessionBus()
-                daemon = bus.get('org.fede.whisperaloud')
-                result = daemon.ReloadConfig()
-                logger.info(f"Daemon config reload: {result}")
-            except Exception as e:
-                logger.debug(f"No daemon to notify: {e}")
-
             logger.debug("Triggering save callback")
             # Trigger callback
             if self._on_save_callback:
@@ -815,12 +838,12 @@ class SettingsDialog(Gtk.Window):
             self._show_message(f"Error saving settings: {e}", Gtk.MessageType.ERROR)
 
 
-    def _on_cancel_clicked(self, button: Gtk.Button) -> None:
+    def _on_cancel_clicked(self, button: Optional[Gtk.Button]) -> None:
         """
         Handle cancel button click.
 
         Args:
-            button: The button that was clicked
+            button: The button that was clicked (or None from keyboard shortcut)
         """
         logger.info("Settings dialog cancelled")
         self.close()
@@ -842,12 +865,12 @@ class SettingsDialog(Gtk.Window):
             text=message,
         )
         self._child_dialog_open = True
-        
+
         def on_response(d, r):
             self._child_dialog_open = False
             d.close()
             if on_close:
                 on_close()
-                
+
         dialog.connect("response", on_response)
         dialog.present()

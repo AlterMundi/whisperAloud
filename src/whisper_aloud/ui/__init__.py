@@ -2,7 +2,7 @@
 
 from importlib import import_module
 
-from .utils import AppState, format_duration, format_confidence, format_file_size
+from .utils import AppState, format_confidence, format_duration, format_file_size
 
 __all__ = [
     "WhisperAloudApp",
@@ -47,6 +47,7 @@ def __getattr__(name):
 def main() -> None:
     """Entry point for the GUI application."""
     import sys
+
     from .app import WhisperAloudApp
 
     app = WhisperAloudApp()

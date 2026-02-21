@@ -250,6 +250,8 @@ class Transcriber:
             if sanitized is None:
                 logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
                 language = None
+            elif sanitized == "auto":
+                language = None
             else:
                 language = sanitized
 
@@ -331,6 +333,8 @@ class Transcriber:
             sanitized = sanitize_language_code(language)
             if sanitized is None:
                 logger.warning(f"Invalid language code '{language}', falling back to auto-detection")
+                language = None
+            elif sanitized == "auto":
                 language = None
             else:
                 language = sanitized

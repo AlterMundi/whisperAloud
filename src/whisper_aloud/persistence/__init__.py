@@ -2,9 +2,9 @@
 
 from importlib import import_module
 
-from .models import HistoryEntry
 from .database import TranscriptionDatabase
 from .history_manager import HistoryManager
+from .models import HistoryEntry
 
 __all__ = [
     "HistoryEntry",

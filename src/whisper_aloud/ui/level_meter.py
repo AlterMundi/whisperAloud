@@ -1,12 +1,18 @@
 """Audio level meter widget for real-time visualization."""
 
 import logging
-import math
-from typing import Optional
+from typing import Any
 
 import gi
+
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gdk
+from gi.repository import Gtk
+
+from .level_meter_logic import (
+    format_db_label,
+    level_color_zone,
+    normalize_meter_levels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +51,7 @@ class LevelMeterWidget(Gtk.DrawingArea):
             peak: Peak level (0.0 to 1.0)
             db: Decibel level (typically -60 to 0)
         """
-        self._rms = max(0.0, min(1.0, rms))
-        self._peak = max(0.0, min(1.0, peak))
+        self._rms, self._peak = normalize_meter_levels(rms, peak)
         self._db = db
 
         # Trigger redraw
@@ -62,7 +67,7 @@ class LevelMeterWidget(Gtk.DrawingArea):
     def _draw(
         self,
         area: Gtk.DrawingArea,
-        ctx: 'cairo.Context',
+        ctx: Any,
         width: int,
         height: int
     ) -> None:
@@ -90,10 +95,11 @@ class LevelMeterWidget(Gtk.DrawingArea):
         rms_width = bar_width * self._rms
 
         # Color based on level (green -> yellow -> red)
-        if self._rms < 0.5:
+        zone = level_color_zone(self._rms)
+        if zone == "green":
             # Green zone
             ctx.set_source_rgb(0.3, 0.8, 0.3)
-        elif self._rms < 0.8:
+        elif zone == "yellow":
             # Yellow zone
             ctx.set_source_rgb(0.9, 0.9, 0.2)
         else:
@@ -123,7 +129,7 @@ class LevelMeterWidget(Gtk.DrawingArea):
 
     def _draw_db_markers(
         self,
-        ctx: 'cairo.Context',
+        ctx: Any,
         x: float,
         y: float,
         width: float,
@@ -207,10 +213,7 @@ class LevelMeterPanel(Gtk.Box):
         self.meter.update_level(rms, peak, db)
 
         # Update dB label
-        if db <= -60:
-            self.db_label.set_text("-∞ dB")
-        else:
-            self.db_label.set_text(f"{db:.1f} dB")
+        self.db_label.set_text(format_db_label(db))
 
     def reset(self) -> None:
         """Reset the level meter."""

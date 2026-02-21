@@ -1,6 +1,7 @@
 """Tests for configuration management."""
 
 import os
+
 import pytest
 
 from whisper_aloud.config import WhisperAloudConfig
@@ -124,6 +125,27 @@ def test_language_validation_edge_cases():
         assert config.transcription.language == 'es'
     finally:
         os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
+
+
+def test_language_auto_is_preserved():
+    """'auto' language mode should be accepted and persisted."""
+    os.environ['WHISPER_ALOUD_LANGUAGE'] = 'auto'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.language == "auto"
+        config.save()
+        loaded = WhisperAloudConfig.load()
+        assert loaded.transcription.language == "auto"
+    finally:
+        os.environ.pop('WHISPER_ALOUD_LANGUAGE', None)
+
+
+def test_validate_rejects_invalid_transcription_language():
+    """validate() should reject unsupported language tokens."""
+    config = WhisperAloudConfig.load()
+    config.transcription.language = "english"
+    with pytest.raises(ConfigurationError, match="Invalid language"):
+        config.validate()
 
 
 def test_beam_size_bounds():

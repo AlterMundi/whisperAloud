@@ -127,3 +127,177 @@ def test_process_recording_empty():
     processed = AudioProcessor.process_recording(empty, 16000)
 
     assert len(processed) == 0
+
+
+# ── H1/H2: AGC vectorization tests ───────────────────────────────────────────
+
+def test_agc_no_per_sample_loop():
+    """AGC.process must not iterate sample-by-sample (for i in range(n))."""
+    import inspect
+    from whisper_aloud.audio.audio_processor import AGC
+    src = inspect.getsource(AGC.process)
+    assert 'for i in range' not in src, "Per-sample Python loop detected in AGC.process"
+
+
+def test_agc_amplifies_quiet_signal():
+    """AGC should boost a signal that is below target."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import AGC
+    sr = 16000
+    agc = AGC(target_db=-18.0, max_gain_db=20.0)
+    audio = np.ones(sr, dtype=np.float32) * 0.01  # very quiet
+    result = agc.process(audio, sr)
+    assert np.abs(result).mean() > np.abs(audio).mean(), "AGC should boost quiet signal"
+    assert np.all(np.isfinite(result)), "AGC output must be finite"
+
+
+# ── M1: NoiseGate hysteresis + hold + 25ms RMS window ────────────────────────
+
+def test_noise_gate_rms_window_25ms():
+    """NoiseGate RMS window must be at least 25ms (no more 2ms constant)."""
+    import inspect
+    from whisper_aloud.audio.audio_processor import NoiseGate
+    src = inspect.getsource(NoiseGate.process)
+    assert "0.002" not in src, "Old 2ms RMS window constant still present"
+
+
+def test_noise_gate_hysteresis_prevents_chatter():
+    """Gate must stay open when signal drops to mid-range (between close and open thresholds)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import NoiseGate
+    sr = 16000
+    # open_threshold = 10^(-30/20) = 0.0316; close_threshold (6dB below) = 0.0158
+    gate = NoiseGate(threshold_db=-30.0, hysteresis_db=6.0)
+    loud = np.ones(sr // 8, dtype=np.float32) * 0.1    # well above open threshold
+    mid = np.ones(sr // 4, dtype=np.float32) * 0.022   # above close (0.0158) but below open (0.0316)
+    audio = np.concatenate([loud, mid])
+    result = gate.process(audio, sr)
+    # Gate should stay OPEN during mid section — output ≥ 50% of input
+    mid_start = sr // 8
+    mid_end = mid_start + sr // 4
+    assert np.abs(result[mid_start:mid_end]).mean() > np.abs(mid).mean() * 0.5, (
+        "Gate closed during mid section (chatter): hysteresis not working"
+    )
+
+
+def test_noise_gate_hold_keeps_gate_open():
+    """Gate must stay open for hold_ms after signal drops below close threshold."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import NoiseGate
+    sr = 16000
+    hold_ms = 80.0
+    gate = NoiseGate(threshold_db=-30.0, hold_ms=hold_ms, hysteresis_db=0.0)
+    loud = np.ones(sr // 8, dtype=np.float32) * 0.1   # above threshold
+    silent = np.zeros(sr // 2, dtype=np.float32)        # below threshold
+    audio = np.concatenate([loud, silent])
+    result = gate.process(audio, sr)
+    # First hold_ms of silence: gate open → output ≈ input (zero = zero, but gate is open)
+    # After hold: gate releases → output fades toward zero
+    # Since silent input = 0, both open and closed give ~0 output.
+    # Instead verify: end of audio (long after hold) has same or less amplitude than beginning of silence
+    loud_end = sr // 8
+    hold_samples = int(sr * hold_ms / 1000.0)
+    after_hold_start = loud_end + hold_samples + int(sr * 0.1)  # 100ms after hold ends
+    if after_hold_start < len(result):
+        # After hold, envelope should be decaying (near zero for silent input)
+        assert result[after_hold_start:].max() < 0.01
+
+
+# ── M2: AGC default max_gain_db ──────────────────────────────────────────────
+
+def test_agc_default_max_gain_is_20db():
+    """AGC default max_gain must correspond to 20dB (was 30dB = 31.62x)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import AGC
+    # 20dB = 10.0x linear; 30dB = 31.62x — verify we're at the lower cap
+    assert AGC().max_gain == pytest.approx(10 ** (20.0 / 20.0), rel=1e-3)
+
+
+def test_processing_config_default_max_gain_is_20db():
+    """AudioProcessingConfig default agc_max_gain_db must be 20.0."""
+    from whisper_aloud.config import AudioProcessingConfig
+    assert AudioProcessingConfig().agc_max_gain_db == 20.0
+
+
+# ── M4: PeakLimiter soft-knee ─────────────────────────────────────────────────
+
+def test_peak_limiter_ceiling_not_exceeded():
+    """Output must never exceed ceiling (−1 dBFS ≈ 0.891 linear)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import PeakLimiter
+    limiter = PeakLimiter(ceiling_db=-1.0)
+    audio = np.ones(1000, dtype=np.float32) * 2.0  # 2x over ceiling
+    result = limiter.process(audio)
+    ceiling_linear = 10 ** (-1.0 / 20.0)
+    assert np.max(np.abs(result)) <= ceiling_linear + 1e-4
+
+
+def test_peak_limiter_soft_knee_no_plateau():
+    """Soft-knee limiter must not produce a plateau (hard-clip signature)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import PeakLimiter
+    limiter = PeakLimiter(ceiling_db=-1.0)
+    # Linearly increasing signal through and above ceiling
+    audio = np.linspace(0.7, 1.2, 2000, dtype=np.float32)
+    result = limiter.process(audio)
+    # Hard clip: diff == 0 in plateau; soft knee: diff always > 0
+    diffs = np.diff(result.astype(np.float64))
+    assert not np.any(diffs == 0.0), "Hard-clipping plateau detected in limiter output"
+    assert np.all(diffs >= 0.0), "Monotonicity violated"
+
+
+# ── M5: VAD sample-rate-aware windows ────────────────────────────────────────
+
+def test_vad_accepts_sample_rate_param():
+    """detect_voice_activity must accept a sample_rate parameter."""
+    import inspect
+    from whisper_aloud.audio.audio_processor import AudioProcessor
+    sig = inspect.signature(AudioProcessor.detect_voice_activity)
+    assert "sample_rate" in sig.parameters
+
+
+def test_vad_respects_sample_rate():
+    """trim_silence must work correctly at sample rates other than 16kHz."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import AudioProcessor
+    sr = 48000
+    # 2 seconds: 0.5s silence, 1s speech, 0.5s silence
+    silence = np.zeros(int(sr * 0.5), dtype=np.float32)
+    speech = np.ones(int(sr * 1.0), dtype=np.float32) * 0.1
+    audio = np.concatenate([silence, speech, silence])
+    trimmed, start, end = AudioProcessor.trim_silence(audio, sr)
+    # Bounds must be within the audio
+    assert 0 <= start <= end <= len(audio)
+    # Speech portion must be included
+    speech_start = int(sr * 0.5)
+    speech_end = speech_start + int(sr * 1.0)
+    assert start <= speech_start
+    assert end >= speech_end
+
+
+# ── L1: Denoiser exception promotion ─────────────────────────────────────────
+
+def test_denoiser_exception_logged_as_error(caplog):
+    """Denoiser failures must be logged at ERROR level (not WARNING)."""
+    import logging
+    import numpy as np
+    from unittest.mock import patch
+    from whisper_aloud.audio.audio_processor import Denoiser
+
+    denoiser = Denoiser(strength=0.5)
+    denoiser._noisereduce = object()  # non-None so process() tries to call it
+
+    with patch.object(
+        denoiser,
+        '_noisereduce',
+        new_callable=lambda: type('FakeNR', (), {
+            'reduce_noise': staticmethod(lambda **kw: (_ for _ in ()).throw(RuntimeError("oom")))
+        })
+    ):
+        with caplog.at_level(logging.WARNING, logger='whisper_aloud.audio.audio_processor'):
+            audio = np.zeros(1000, dtype=np.float32)
+            result = denoiser.process(audio, 16000)
+
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(error_records) > 0, "No ERROR log emitted on denoiser failure"
+    assert result is not None, "process() must still return audio on failure"

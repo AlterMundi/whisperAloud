@@ -2,13 +2,25 @@
 set -euo pipefail
 
 # Deterministic CI profile:
-# - excludes tests requiring hardware/display/live D-Bus
-# - excludes integration tests
+# - avoids optional heavy runtime deps (audio HW, model runtime, GUI)
+# - runs stable fast tests suitable for every PR
 #
 # Usage:
 #   . .venv/bin/activate
 #   ./scripts/test_ci.sh
 
 python -m pytest \
-  -m "not integration and not requires_audio_hw and not requires_display and not requires_dbus" \
+  tests/test_audio_device_manager.py \
+  tests/test_config.py \
+  tests/test_config_persistence.py \
+  tests/test_dbus_client.py \
+  tests/test_cli.py \
+  tests/test_clipboard.py \
+  tests/test_history_daemon_manager.py \
+  tests/test_indicator.py \
+  tests/test_history_item_logic.py \
+  tests/test_history_panel_logic.py \
+  tests/test_level_meter_logic.py \
+  tests/test_main_window_logic.py \
+  tests/test_settings_dialog_logic.py \
   "$@"

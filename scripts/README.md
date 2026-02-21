@@ -72,6 +72,22 @@ python scripts/test_transcription_simple.py
 
 ## Usage Notes
 
+### Installer Matrix Validation
+
+Validate installer behavior for supported modes:
+
+```bash
+./scripts/validate_install_matrix.sh
+```
+
+This script exercises `install.sh --dry-run` with combinations such as:
+- default install
+- `--skip-system`
+- `--skip-user-service`
+- combined skip modes
+
+It fails fast if reported behavior diverges from the documented matrix in `INSTALL.md`.
+
 ### CI Test Profile
 
 Use the deterministic CI test profile:
@@ -85,6 +101,13 @@ This excludes tests marked:
 - `requires_audio_hw`
 - `requires_display`
 - `requires_dbus`
+
+GTK widget-level tests are opt-in to avoid headless crashes in CI/sandboxed
+environments. Enable them explicitly in a desktop session:
+
+```bash
+WHISPER_ALOUD_RUN_GTK_WIDGET_TESTS=1 python -m pytest tests/test_level_meter.py
+```
 
 Pass extra pytest args after the script command:
 

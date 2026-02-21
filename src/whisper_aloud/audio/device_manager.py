@@ -1,6 +1,7 @@
 """Audio device management."""
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -9,6 +10,8 @@ import sounddevice as sd
 from ..exceptions import AudioDeviceError
 
 logger = logging.getLogger(__name__)
+
+_sd_lock = threading.RLock()
 
 
 @dataclass
@@ -36,37 +39,38 @@ class DeviceManager:
         Raises:
             AudioDeviceError: If device enumeration fails
         """
-        try:
-            devices = sd.query_devices()
-            input_devices = []
+        with _sd_lock:
+            try:
+                devices = sd.query_devices()
+                input_devices = []
 
-            for idx, device in enumerate(devices):
-                # Filter for devices with input channels
-                if device['max_input_channels'] > 0:
-                    is_default = (idx == sd.default.device[0])
+                for idx, device in enumerate(devices):
+                    # Filter for devices with input channels
+                    if device['max_input_channels'] > 0:
+                        is_default = (idx == sd.default.device[0])
 
-                    input_devices.append(AudioDevice(
-                        id=idx,
-                        name=device['name'],
-                        channels=device['max_input_channels'],
-                        sample_rate=device['default_samplerate'],
-                        is_default=is_default,
-                        hostapi=sd.query_hostapis(device['hostapi'])['name'],
-                    ))
+                        input_devices.append(AudioDevice(
+                            id=idx,
+                            name=device['name'],
+                            channels=device['max_input_channels'],
+                            sample_rate=device['default_samplerate'],
+                            is_default=is_default,
+                            hostapi=sd.query_hostapis(device['hostapi'])['name'],
+                        ))
 
-            if not input_devices:
-                raise AudioDeviceError(
-                    "No audio input devices found. "
-                    "Please connect a microphone and ensure it's enabled."
-                )
+                if not input_devices:
+                    raise AudioDeviceError(
+                        "No audio input devices found. "
+                        "Please connect a microphone and ensure it's enabled."
+                    )
 
-            logger.info(f"Found {len(input_devices)} input device(s)")
-            return input_devices
+                logger.info(f"Found {len(input_devices)} input device(s)")
+                return input_devices
 
-        except sd.PortAudioError as e:
-            raise AudioDeviceError(f"Failed to enumerate audio devices: {e}") from e
-        except Exception as e:
-            raise AudioDeviceError(f"Unexpected error listing devices: {e}") from e
+            except sd.PortAudioError as e:
+                raise AudioDeviceError(f"Failed to enumerate audio devices: {e}") from e
+            except Exception as e:
+                raise AudioDeviceError(f"Unexpected error listing devices: {e}") from e
 
     @staticmethod
     def get_default_input_device() -> AudioDevice:
@@ -143,18 +147,19 @@ class DeviceManager:
             )
 
         # Try to open stream with requested settings (test only)
-        try:
-            test_stream = sd.InputStream(
-                device=device.id,
-                samplerate=sample_rate,
-                channels=channels,
-                dtype='float32',
-            )
-            test_stream.close()
-            logger.info(f"Device '{device.name}' validated for {sample_rate}Hz, {channels}ch")
-        except sd.PortAudioError as e:
-            raise AudioDeviceError(
-                f"Device '{device.name}' doesn't support {sample_rate}Hz/{channels}ch: {e}"
-            ) from e
+        with _sd_lock:
+            try:
+                test_stream = sd.InputStream(
+                    device=device.id,
+                    samplerate=sample_rate,
+                    channels=channels,
+                    dtype='float32',
+                )
+                test_stream.close()
+                logger.info(f"Device '{device.name}' validated for {sample_rate}Hz, {channels}ch")
+            except sd.PortAudioError as e:
+                raise AudioDeviceError(
+                    f"Device '{device.name}' doesn't support {sample_rate}Hz/{channels}ch: {e}"
+                ) from e
 
         return device
