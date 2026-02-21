@@ -225,6 +225,7 @@ class WhisperAloudService:
             self.recorder = AudioRecorder(
                 self.config.audio,
                 level_callback=self._on_level,
+                processing_config=self.config.audio_processing,
             )
             self.transcriber = Transcriber(self.config)
             # Model loading deferred to _ensure_model_loaded()

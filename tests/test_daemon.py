@@ -608,3 +608,39 @@ class TestDaemonIntrospection:
         # Should NOT contain old camelCase name
         assert "org.fede.whisperAloud" not in doc
         assert "org.fede.whisperaloud" in doc
+
+
+class TestRecorderInitialization:
+    """Tests for recorder construction in daemon _init_components."""
+
+    def test_recorder_initialized_with_processing_config(self):
+        """AudioRecorder must be constructed with processing_config from daemon config."""
+        stub_modules = _build_stub_modules()
+        daemon_module = _import_daemon_module(stub_modules)
+        with (
+            patch.dict(sys.modules, stub_modules),
+            patch.dict("os.environ", {"DISPLAY": ":0"}, clear=False),
+            patch.object(daemon_module, "SessionBus"),
+            patch.object(daemon_module, "AudioRecorder") as mock_ar,
+            patch.object(daemon_module, "Transcriber"),
+            patch.object(daemon_module, "NotificationManager"),
+            patch.object(daemon_module, "HistoryManager"),
+            patch.object(daemon_module, "ClipboardManager"),
+            patch.object(daemon_module, "WhisperAloudIndicator"),
+            patch.object(daemon_module, "HotkeyManager") as mock_hk_cls,
+            patch.object(daemon_module, "GLib") as mock_glib,
+        ):
+            mock_glib.Variant = lambda t, v: v
+            mock_glib.idle_add = lambda fn, *args: fn(*args)
+            mock_glib.SOURCE_REMOVE = False
+            mock_hk_cls.return_value.available = True
+            mock_hk_cls.return_value.backend = "keybinder"
+
+            from whisper_aloud.config import WhisperAloudConfig
+
+            config = WhisperAloudConfig()
+            daemon_module.WhisperAloudService(config=config)
+
+            _, kwargs = mock_ar.call_args
+            assert "processing_config" in kwargs, "processing_config not passed to AudioRecorder"
+            assert kwargs["processing_config"] == config.audio_processing
