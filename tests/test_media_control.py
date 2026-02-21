@@ -335,7 +335,7 @@ def test_recording_flow_config_defaults():
     rf = cfg.recording_flow
     assert isinstance(rf, RecordingFlowConfig)
     assert rf.pause_media is True
-    assert rf.raise_mic_gain is False
+    assert rf.raise_mic_gain is True
     assert 0.0 < rf.target_gain_linear <= 1.5
     assert rf.pre_pause_delay_ms == 0
     assert rf.post_resume_delay_ms == 0

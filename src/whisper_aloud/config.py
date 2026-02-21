@@ -184,7 +184,7 @@ class AudioProcessingConfig:
 class RecordingFlowConfig:
     """Configuration for smart recording flow (MPRIS + hardware gain)."""
     pause_media: bool = True            # Pause active MPRIS players on record start
-    raise_mic_gain: bool = False        # Opt-in: raise mic gain on record start
+    raise_mic_gain: bool = True         # Raise mic gain to target before recording
     target_gain_linear: float = 0.85   # Target mic gain (0.0–1.5, applied only if above current)
     pre_pause_delay_ms: int = 0        # Optional delay after pausing media before recording
     post_resume_delay_ms: int = 0      # Optional delay after recording before resuming media
