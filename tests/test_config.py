@@ -218,3 +218,21 @@ def test_config_immutability():
 
     # Other config should be unchanged
     assert config2.model.name == "base"
+
+
+def test_clipboard_config_default_paste_shortcut():
+    """paste_shortcut defaults to ctrl+v."""
+    from whisper_aloud.config import ClipboardConfig
+    cfg = ClipboardConfig()
+    assert cfg.paste_shortcut == "ctrl+v"
+
+
+def test_clipboard_config_paste_shortcut_roundtrip():
+    """paste_shortcut survives to_dict / from_dict roundtrip."""
+    from whisper_aloud.config import WhisperAloudConfig
+    config = WhisperAloudConfig()
+    config.clipboard.paste_shortcut = "ctrl+shift+v"
+    data = config.to_dict()
+    assert data["clipboard"]["paste_shortcut"] == "ctrl+shift+v"
+    restored = WhisperAloudConfig.from_dict(data)
+    assert restored.clipboard.paste_shortcut == "ctrl+shift+v"

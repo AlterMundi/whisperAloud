@@ -124,6 +124,7 @@ class ClipboardConfig:
     auto_copy: bool = True
     auto_paste: bool = True
     paste_delay_ms: int = 100
+    paste_shortcut: str = "ctrl+v"   # "ctrl+v" or "ctrl+shift+v"
     timeout_seconds: float = 5.0
     fallback_to_file: bool = True
     fallback_path: str = "/tmp/whisper_aloud_clipboard.txt"
@@ -238,6 +239,7 @@ class WhisperAloudConfig:
                 "auto_copy": self.clipboard.auto_copy,
                 "auto_paste": self.clipboard.auto_paste,
                 "paste_delay_ms": self.clipboard.paste_delay_ms,
+                "paste_shortcut": self.clipboard.paste_shortcut,
                 "timeout_seconds": self.clipboard.timeout_seconds,
                 "fallback_to_file": self.clipboard.fallback_to_file,
                 "fallback_path": self.clipboard.fallback_path,
@@ -407,6 +409,10 @@ class WhisperAloudConfig:
         self.clipboard.auto_copy = parse_bool_env('WHISPER_ALOUD_CLIPBOARD_AUTO_COPY', self.clipboard.auto_copy)
         self.clipboard.auto_paste = parse_bool_env('WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE', self.clipboard.auto_paste)
         self.clipboard.paste_delay_ms = parse_int_env('WHISPER_ALOUD_CLIPBOARD_PASTE_DELAY_MS', self.clipboard.paste_delay_ms)
+        self.clipboard.paste_shortcut = os.getenv(
+            'WHISPER_ALOUD_CLIPBOARD_PASTE_SHORTCUT',
+            self.clipboard.paste_shortcut
+        )
         self.clipboard.timeout_seconds = parse_float_env('WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS', self.clipboard.timeout_seconds)
         self.clipboard.fallback_to_file = parse_bool_env('WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE', self.clipboard.fallback_to_file)
         self.clipboard.fallback_path = os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH', self.clipboard.fallback_path)
