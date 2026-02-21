@@ -201,3 +201,19 @@ def test_noise_gate_hold_keeps_gate_open():
     if after_hold_start < len(result):
         # After hold, envelope should be decaying (near zero for silent input)
         assert result[after_hold_start:].max() < 0.01
+
+
+# ── M2: AGC default max_gain_db ──────────────────────────────────────────────
+
+def test_agc_default_max_gain_is_20db():
+    """AGC default max_gain must correspond to 20dB (was 30dB = 31.62x)."""
+    import numpy as np
+    from whisper_aloud.audio.audio_processor import AGC
+    # 20dB = 10.0x linear; 30dB = 31.62x — verify we're at the lower cap
+    assert AGC().max_gain == pytest.approx(10 ** (20.0 / 20.0), rel=1e-3)
+
+
+def test_processing_config_default_max_gain_is_20db():
+    """AudioProcessingConfig default agc_max_gain_db must be 20.0."""
+    from whisper_aloud.config import AudioProcessingConfig
+    assert AudioProcessingConfig().agc_max_gain_db == 20.0

@@ -173,7 +173,7 @@ class AudioProcessingConfig:
     noise_gate_threshold_db: float = -40.0
     agc_enabled: bool = True
     agc_target_db: float = -18.0
-    agc_max_gain_db: float = 30.0
+    agc_max_gain_db: float = 20.0
     denoising_enabled: bool = True
     denoising_strength: float = 0.5
     limiter_enabled: bool = True

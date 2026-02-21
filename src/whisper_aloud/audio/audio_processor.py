@@ -146,7 +146,7 @@ class AGC:
     def __init__(
         self,
         target_db: float = -18.0,
-        max_gain_db: float = 30.0,
+        max_gain_db: float = 20.0,
         min_gain_db: float = -10.0,
         attack_ms: float = 10.0,
         release_ms: float = 100.0,
