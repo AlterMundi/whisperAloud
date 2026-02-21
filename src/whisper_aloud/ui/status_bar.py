@@ -165,3 +165,6 @@ class StatusBar(Gtk.Box):
         self._monitoring = False
         if hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=1.0)
+        if self._status_clear_id:
+            GLib.source_remove(self._status_clear_id)
+            self._status_clear_id = 0
