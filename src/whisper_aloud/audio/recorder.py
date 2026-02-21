@@ -68,7 +68,7 @@ class AudioRecorder:
         self._start_time: Optional[float] = None
 
         # Components
-        self._level_meter = LevelMeter(smoothing=0.3)
+        self._level_meter = LevelMeter(attack_ms=10.0, release_ms=300.0, sample_rate=config.sample_rate)
         self._processor = AudioProcessor()  # Keep for format conversion utilities
         self._pipeline = AudioPipeline(processing_config or AudioProcessingConfig())
 

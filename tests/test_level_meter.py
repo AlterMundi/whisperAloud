@@ -95,3 +95,46 @@ def test_level_value_clamping():
         rms, peak = normalize_meter_levels(rms_in, peak_in)
         assert rms == rms_out, f"RMS clamping failed for {rms_in}"
         assert peak == peak_out, f"Peak clamping failed for {peak_in}"
+
+
+# ── M3: Audio LevelMeter ballistics ──────────────────────────────────────────
+
+def test_audio_level_meter_has_attack_release_params():
+    """Audio LevelMeter must accept attack_ms and release_ms parameters."""
+    import inspect
+    from whisper_aloud.audio.level_meter import LevelMeter
+    sig = inspect.signature(LevelMeter.__init__)
+    assert "attack_ms" in sig.parameters
+    assert "release_ms" in sig.parameters
+
+
+def test_audio_level_meter_attack_faster_than_release():
+    """Level rises faster (attack) than it falls (release) for same block size."""
+    import numpy as np
+    from whisper_aloud.audio.level_meter import LevelMeter
+
+    sr = 16000
+    block = int(sr * 0.020)  # 20ms block
+    meter = LevelMeter(attack_ms=10.0, release_ms=300.0, sample_rate=sr)
+
+    # Measure: from silence → loud, 1 block
+    meter.reset()
+    silence = np.zeros(block, dtype=np.float32)
+    loud = np.ones(block, dtype=np.float32) * 0.5
+    meter.calculate_level(silence)           # prime with silence
+    lvl_before = meter.calculate_level(silence).rms  # baseline
+    meter.reset()
+    meter.calculate_level(silence)
+    lvl_after_loud = meter.calculate_level(loud).rms  # one loud block
+    rise = lvl_after_loud - lvl_before
+
+    # Measure: from loud → silence, 1 block
+    meter.reset()
+    meter.calculate_level(loud)              # prime with loud
+    lvl_before_fall = meter.calculate_level(loud).rms
+    lvl_after_silence = meter.calculate_level(silence).rms
+    fall = lvl_before_fall - lvl_after_silence
+
+    assert rise > 0, "RMS should rise when signal appears"
+    assert fall > 0, "RMS should fall when signal disappears"
+    assert rise > fall, f"Attack ({rise:.4f}) should be faster than release ({fall:.4f})"

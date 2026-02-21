@@ -18,22 +18,37 @@ class AudioLevel:
 
 
 class LevelMeter:
-    """Calculates and smooths audio levels in real-time."""
+    """Calculates and smooths audio levels with ballistic attack/release."""
 
-    def __init__(self, smoothing: float = 0.3):
+    def __init__(
+        self,
+        smoothing: float = 0.3,
+        attack_ms: float = 10.0,
+        release_ms: float = 300.0,
+        sample_rate: int = 16000,
+    ):
         """
         Initialize level meter.
 
         Args:
-            smoothing: Smoothing factor (0.0 = no smoothing, 1.0 = maximum smoothing)
+            smoothing: Legacy uniform smoothing factor (ignored when attack_ms/release_ms
+                are provided). Kept for backward compatibility.
+            attack_ms: Attack time constant in ms — how fast the meter rises on
+                loud transients (shorter = more responsive).
+            release_ms: Release time constant in ms — how fast the meter falls when
+                the signal goes quiet (longer = more stable UI readings).
+            sample_rate: Sample rate used to compute attack/release coefficients.
         """
-        self.smoothing = max(0.0, min(1.0, smoothing))
+        # Ballistic coefficients: exp(-1/(τ_samples))
+        # A shorter time constant → coefficient closer to 0 → faster response.
+        self._attack_coeff = float(np.exp(-1.0 / max(1.0, attack_ms * sample_rate / 1000.0)))
+        self._release_coeff = float(np.exp(-1.0 / max(1.0, release_ms * sample_rate / 1000.0)))
         self._last_rms: Optional[float] = None
         self._last_peak: Optional[float] = None
 
     def calculate_level(self, audio_chunk: np.ndarray) -> AudioLevel:
         """
-        Calculate audio levels from a chunk.
+        Calculate audio levels from a chunk with ballistic smoothing.
 
         Args:
             audio_chunk: Float32 audio data [-1.0, 1.0]
@@ -50,11 +65,13 @@ class LevelMeter:
         # Calculate peak
         peak = float(np.max(np.abs(audio_chunk)))
 
-        # Apply smoothing
+        # Apply ballistic smoothing: attack when rising, release when falling
         if self._last_rms is not None:
-            rms = self.smoothing * self._last_rms + (1.0 - self.smoothing) * rms
+            coeff = self._attack_coeff if rms > self._last_rms else self._release_coeff
+            rms = coeff * self._last_rms + (1.0 - coeff) * rms
         if self._last_peak is not None:
-            peak = self.smoothing * self._last_peak + (1.0 - self.smoothing) * peak
+            coeff = self._attack_coeff if peak > self._last_peak else self._release_coeff
+            peak = coeff * self._last_peak + (1.0 - coeff) * peak
 
         self._last_rms = rms
         self._last_peak = peak
