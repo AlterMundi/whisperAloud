@@ -37,23 +37,32 @@ def test_should_not_block_close_when_clean():
 def test_focus_loss_close_ignored_when_child_dialog_open():
     assert should_auto_close_on_focus_loss(
         child_dialog_open=True,
-        is_active=False,
+        contains_focus=False,
         is_visible=True,
     ) is False
 
 
-def test_focus_loss_close_when_inactive_and_visible():
+def test_focus_loss_close_when_no_focus_and_visible():
     assert should_auto_close_on_focus_loss(
         child_dialog_open=False,
-        is_active=False,
+        contains_focus=False,
         is_visible=True,
     ) is True
+
+
+def test_focus_loss_no_close_when_focus_retained():
+    # contains_focus=True means a child widget (e.g. DropDown popup) has focus
+    assert should_auto_close_on_focus_loss(
+        child_dialog_open=False,
+        contains_focus=True,
+        is_visible=True,
+    ) is False
 
 
 def test_focus_loss_no_close_when_not_visible():
     assert should_auto_close_on_focus_loss(
         child_dialog_open=False,
-        is_active=False,
+        contains_focus=False,
         is_visible=False,
     ) is False
 

@@ -20,13 +20,22 @@ def should_block_close(allow_close: bool, unsaved_changes: bool) -> bool:
 
 def should_auto_close_on_focus_loss(
     child_dialog_open: bool,
-    is_active: bool,
+    contains_focus: bool,
     is_visible: bool,
 ) -> bool:
-    """Return True when settings should close after focus is lost."""
+    """Return True when settings should close after focus leaves the widget tree.
+
+    Uses ``contains_focus`` (from EventControllerFocus) rather than the window's
+    ``is-active`` property.  On Wayland, ``is-active`` becomes False when a
+    child Gtk.DropDown opens its list popup (the popup takes compositor surface
+    focus), which incorrectly triggers auto-close before the user can select an
+    item.  ``contains_focus`` stays True as long as any descendant widget —
+    including DropDown list popovers — holds focus, so it only fires when focus
+    genuinely leaves the settings window hierarchy.
+    """
     if child_dialog_open:
         return False
-    return (not is_active) and is_visible
+    return (not contains_focus) and is_visible
 
 
 def normalize_language_input(raw_value: str) -> str:

@@ -63,19 +63,21 @@ class SettingsDialog(Gtk.Window):
         self._dirty = False
         self._initial_ui_state = self._capture_ui_state()
         self._connect_dirty_tracking()
-        self.connect("notify::is-active", self._on_window_active_changed)
+        self._focus_controller = Gtk.EventControllerFocus()
+        self._focus_controller.connect("notify::contains-focus", self._on_focus_changed)
+        self.add_controller(self._focus_controller)
         self.connect("close-request", self._on_close_request)
 
         logger.info("Settings dialog initialized")
 
-    def _on_window_active_changed(self, window: Gtk.Window, _param: object) -> None:
-        """Auto-close settings when user clicks outside and window loses focus."""
+    def _on_focus_changed(self, controller: Gtk.EventControllerFocus, _param: object) -> None:
+        """Auto-close settings when focus leaves the entire window widget tree."""
         if should_auto_close_on_focus_loss(
             child_dialog_open=self._child_dialog_open,
-            is_active=window.get_property("is-active"),
-            is_visible=window.is_visible(),
+            contains_focus=controller.get_contains_focus(),
+            is_visible=self.is_visible(),
         ):
-            GLib.idle_add(window.close)
+            GLib.idle_add(self.close)
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         """Intercept close to protect unsaved changes."""
