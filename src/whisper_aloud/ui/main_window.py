@@ -134,10 +134,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Main content area (Paned)
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.paned.set_position(280)  # History panel width
+        self.paned.set_position(225)  # ~25% of 900px default width
         self.paned.set_wide_handle(True)
-        self.paned.set_shrink_start_child(False)  # Don't allow history to shrink below minimum
-        self.paned.set_shrink_end_child(False)  # Don't allow main area to shrink too much
+        self.paned.set_shrink_start_child(False)
+        self.paned.set_shrink_end_child(False)
+        self.paned.set_resize_start_child(True)   # history grows proportionally
+        self.paned.set_resize_end_child(True)     # controls grow proportionally
         main_box.append(self.paned)
 
         # Left side: Recording and Transcription
@@ -242,11 +244,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Left side: History Panel (placeholder until initialized)
         self.history_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.history_container.set_size_request(240, -1)
+        self.history_container.set_size_request(180, -1)
         self.paned.set_start_child(self.history_container)
 
         # Right side: Main recording/transcription panel
-        left_box.set_size_request(400, -1)  # Minimum width for main content
+        left_box.set_size_request(300, -1)  # Minimum width for main content
         self.paned.set_end_child(left_box)
 
         # Status bar
