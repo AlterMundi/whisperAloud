@@ -143,13 +143,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # Left side: Recording and Transcription
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
-        # Status label
-        self.status_label = Gtk.Label(label="Connecting to daemon...")
-        self.status_label.add_css_class("wa-status-chip")
-        self.status_label.set_margin_top(12)
-        self.status_label.set_margin_bottom(12)
-        left_box.append(self.status_label)
-
         # Recording panel
         recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         recording_panel_box.add_css_class("wa-surface")
@@ -398,7 +391,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._hide_loading_dialog()
 
         # Update UI state
-        self.status_label.set_text("Ready")
+        self.status_bar.set_status("Ready")
         self.record_button.set_sensitive(True)
         self.settings_button.set_sensitive(True)
         self.set_state(AppState.IDLE)
@@ -428,7 +421,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _handle_reconnection(self) -> bool:
         """Re-establish daemon connection on the main thread."""
         self._daemon_available = True
-        self.status_label.set_text("Reconnecting...")
+        self.status_bar.set_status("Reconnecting...")
         daemon_state = "idle"
 
         if self.client and self.client.is_connected:
@@ -447,7 +440,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.settings_button.set_sensitive(True)
         self._handle_status_change(daemon_state, force=True)
         if daemon_state == "idle":
-            self.status_label.set_text("Ready")
+            self.status_bar.set_status("Ready")
         logger.info("Reconnected to daemon after restart (state=%s)", daemon_state)
         return False
 
@@ -462,7 +455,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._timer_active = False
         self.record_button.set_sensitive(False)
         self.settings_button.set_sensitive(False)
-        self.status_label.set_text("Daemon disconnected - waiting for restart...")
+        self.status_bar.set_status("Daemon disconnected - waiting for restart...")
         self.set_state(AppState.ERROR)
         return False
 
@@ -478,7 +471,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._hide_loading_dialog()
         logger.warning("WhisperAloud daemon is not running")
 
-        self.status_label.set_text("Daemon not running")
+        self.status_bar.set_status("Daemon not running")
         self.settings_button.set_sensitive(False)
         self.set_state(AppState.ERROR)
 
@@ -613,7 +606,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._hide_loading_dialog()
 
         logger.error(f"Daemon connection error: {error_msg}")
-        self.status_label.set_text("Error connecting to daemon")
+        self.status_bar.set_status("Error connecting to daemon")
         self.settings_button.set_sensitive(False)
         self.set_state(AppState.ERROR)
 
@@ -646,7 +639,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.set_state(AppState.RECORDING)
         elif state == "transcribing":
             self.set_state(AppState.TRANSCRIBING)
-            self.status_label.set_text("Transcribing... (press Ctrl+X to cancel)")
+            self.status_bar.set_status("Transcribing... (press Ctrl+X to cancel)")
         return False
 
     def _on_daemon_transcription_ready(self, text: str, meta: dict) -> None:
@@ -674,7 +667,7 @@ class MainWindow(Gtk.ApplicationWindow):
         duration = meta.get("duration", 0.0) if isinstance(meta, dict) else 0.0
         confidence = meta.get("confidence", 0.0) if isinstance(meta, dict) else 0.0
         confidence_pct = int(confidence * 100)
-        self.status_label.set_text(
+        self.status_bar.set_status(
             f"Ready (Confidence: {confidence_pct}%, "
             f"Duration: {duration:.1f}s)"
         )
@@ -710,7 +703,7 @@ class MainWindow(Gtk.ApplicationWindow):
             False to remove this idle callback
         """
         logger.error(f"Daemon error [{code}]: {message}")
-        self.status_label.set_text(f"Error: {message}")
+        self.status_bar.set_status(f"Error: {message}")
         self.set_state(AppState.ERROR)
         return False
 
@@ -757,13 +750,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.cancel_button.set_visible(True)
                 self.cancel_button.set_sensitive(True)
                 self.cancel_button.set_label("Cancel Transcription")
-                self.status_label.set_text("Transcribing... (press Ctrl+X to cancel)")
+                self.status_bar.set_status("Transcribing... (press Ctrl+X to cancel)")
 
             elif new_state == AppState.CANCELLING:
                 logger.debug("Setting UI for CANCELLING state")
                 self.cancel_button.set_label("Cancelling...")
                 self.cancel_button.set_sensitive(False)
-                self.status_label.set_text("Cancelling transcription...")
+                self.status_bar.set_status("Cancelling transcription...")
 
             elif new_state == AppState.READY:
                 logger.debug("Setting UI for READY state")
@@ -774,7 +767,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.record_button.set_sensitive(self._daemon_available)
                 self.record_button.remove_css_class("destructive-action")
                 self.record_button.add_css_class("suggested-action")
-                self.status_label.set_text("Ready")
+                self.status_bar.set_status("Ready")
                 self.copy_button.set_sensitive(True)
                 self.clear_button.set_sensitive(True)
 
@@ -835,7 +828,7 @@ class MainWindow(Gtk.ApplicationWindow):
         try:
             logger.info("Starting audio recording via daemon")
             if not self.client or not self.client.is_connected or not self._daemon_available:
-                self.status_label.set_text("Daemon not connected")
+                self.status_bar.set_status("Daemon not connected")
                 self.set_state(AppState.ERROR)
                 return
 
@@ -845,19 +838,19 @@ class MainWindow(Gtk.ApplicationWindow):
             success = self.client.start_recording()
             if success:
                 self.set_state(AppState.RECORDING)
-                self.status_label.set_text("Recording...")
+                self.status_bar.set_status("Recording...")
 
                 # Start local timer
                 self._timer_active = True
                 self._timer_seconds = 0
                 GLib.timeout_add(1000, self._update_timer)
             else:
-                self.status_label.set_text("Failed to start recording")
+                self.status_bar.set_status("Failed to start recording")
                 self.set_state(AppState.ERROR)
 
         except Exception as e:
             logger.error(f"Failed to start recording: {e}", exc_info=True)
-            self.status_label.set_text("Recording failed")
+            self.status_bar.set_status("Recording failed")
             self.set_state(AppState.ERROR)
 
     def _stop_recording_and_transcribe(self) -> None:
@@ -873,7 +866,7 @@ class MainWindow(Gtk.ApplicationWindow):
             daemon_available=self._daemon_available,
         )
         if not daemon_ready:
-            self.status_label.set_text("Daemon not connected")
+            self.status_bar.set_status("Daemon not connected")
             self.set_state(AppState.ERROR)
             return
 
@@ -881,7 +874,7 @@ class MainWindow(Gtk.ApplicationWindow):
         result = self.client.stop_recording() if self.client else ""
         if not should_enter_transcribing(result):
             logger.warning("StopRecording returned unexpected state: %r", result)
-            self.status_label.set_text("Failed to start transcription")
+            self.status_bar.set_status("Failed to start transcription")
             self.set_state(AppState.ERROR)
             return
 
@@ -920,7 +913,7 @@ class MainWindow(Gtk.ApplicationWindow):
             daemon_available=self._daemon_available,
         )
         if not daemon_ready:
-            self.status_label.set_text("Daemon not connected")
+            self.status_bar.set_status("Daemon not connected")
             self.set_state(AppState.ERROR)
             return
 
@@ -928,7 +921,7 @@ class MainWindow(Gtk.ApplicationWindow):
         cancel_result = self.client.cancel_recording() if self.client else False
         if should_restore_transcribing_after_cancel(cancel_result):
             logger.warning("CancelRecording rejected while transcribing")
-            self.status_label.set_text("Cancel not available")
+            self.status_bar.set_status("Cancel not available")
             self.set_state(AppState.TRANSCRIBING)
 
     # ─── Clipboard ────────────────────────────────────────────────────────
@@ -959,11 +952,11 @@ class MainWindow(Gtk.ApplicationWindow):
         try:
             clipboard = self.get_clipboard()
             clipboard.set(text)
-            self.status_label.set_text("Copied to clipboard")
+            self.status_bar.set_status("Copied to clipboard")
             logger.info(f"Copied {len(text)} characters to clipboard")
         except Exception as e:
             logger.error(f"Clipboard error: {e}", exc_info=True)
-            self.status_label.set_text("Clipboard error")
+            self.status_bar.set_status("Clipboard error")
 
     # ─── Clear / History / Settings / Help ────────────────────────────────
 
@@ -1015,14 +1008,14 @@ class MainWindow(Gtk.ApplicationWindow):
             )
             if not daemon_ready:
                 logger.warning("Ignoring language change while daemon is unavailable")
-                self.status_label.set_text("Daemon unavailable: language not changed")
+                self.status_bar.set_status("Daemon unavailable: language not changed")
                 dropdown.set_selected(self._language_codes.index(current_lang))
                 return
 
             changed = self.client.set_config({"transcription.language": new_lang}) if self.client else False
             if not changed:
                 logger.warning("Daemon rejected language update")
-                self.status_label.set_text("Daemon rejected language update")
+                self.status_bar.set_status("Daemon rejected language update")
                 dropdown.set_selected(self._language_codes.index(current_lang))
                 return
 
@@ -1054,7 +1047,7 @@ class MainWindow(Gtk.ApplicationWindow):
         logger.info("Opening settings dialog")
 
         if not self.config:
-            self.status_label.set_text("Settings unavailable until daemon connects")
+            self.status_bar.set_status("Settings unavailable until daemon connects")
             return
 
         # Create and show settings dialog
@@ -1078,14 +1071,14 @@ class MainWindow(Gtk.ApplicationWindow):
             if self.client and self.client.is_connected and self._daemon_available:
                 self.client.reload_config()
             else:
-                self.status_label.set_text("Saved locally; reconnect daemon to apply")
+                self.status_bar.set_status("Saved locally; reconnect daemon to apply")
 
             # Update model info display
             self._update_model_info()
 
         except Exception as e:
             logger.error(f"Error in _on_settings_saved: {e}", exc_info=True)
-            self.status_label.set_text("Error updating settings")
+            self.status_bar.set_status("Error updating settings")
             self.set_state(AppState.ERROR)
 
     def _on_history_toggled(self, button: Gtk.ToggleButton) -> None:
@@ -1106,7 +1099,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Update status
         confidence_pct = int(entry.confidence * 100)
-        self.status_label.set_text(
+        self.status_bar.set_status(
             f"Loaded from history (Confidence: {confidence_pct}%, "
             f"Duration: {entry.duration:.1f}s)"
         )
