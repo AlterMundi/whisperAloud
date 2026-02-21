@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class HistoryItem(Gtk.ListBoxRow):
     """Individual history entry widget."""
 
-    _PREVIEW_DELAY_MS = 180
+    _PREVIEW_DELAY_MS = 80
 
     __gsignals__ = {
         'favorite-toggled': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
@@ -89,7 +89,7 @@ class HistoryItem(Gtk.ListBoxRow):
         box.append(fav_button)
 
         self.set_child(box)
-        self._preview_text = format_transcription_preview(entry.text)
+        self._preview_text = format_transcription_preview(entry.text, line_width=42)
         self._preview_popover: Gtk.Popover | None = None
         self._preview_show_timeout_id: int | None = None
         self._context_popover: Gtk.Popover | None = None
@@ -105,7 +105,7 @@ class HistoryItem(Gtk.ListBoxRow):
 
         self._preview_popover = Gtk.Popover()
         self._preview_popover.set_has_arrow(True)
-        self._preview_popover.set_autohide(True)
+        self._preview_popover.set_autohide(False)
         self._preview_popover.set_parent(self)
         self._preview_popover.set_position(Gtk.PositionType.TOP)
         self._preview_popover.set_size_request(360, -1)
@@ -126,10 +126,6 @@ class HistoryItem(Gtk.ListBoxRow):
         hover_controller.connect("leave", self._on_hover_leave)
         self.add_controller(hover_controller)
 
-        focus_controller = Gtk.EventControllerFocus()
-        focus_controller.connect("leave", self._on_focus_leave)
-        self.add_controller(focus_controller)
-
     def _on_hover_enter(self, _controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
         """Schedule preview popover for delayed show."""
         if not self._preview_popover:
@@ -142,12 +138,6 @@ class HistoryItem(Gtk.ListBoxRow):
 
     def _on_hover_leave(self, _controller: Gtk.EventControllerMotion) -> None:
         """Hide preview popover when pointer leaves the row."""
-        self._cancel_preview_timer()
-        if self._preview_popover:
-            self._preview_popover.popdown()
-
-    def _on_focus_leave(self, _controller: Gtk.EventControllerFocus) -> None:
-        """Hide preview popover when row focus is lost."""
         self._cancel_preview_timer()
         if self._preview_popover:
             self._preview_popover.popdown()

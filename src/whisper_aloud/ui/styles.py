@@ -178,12 +178,13 @@ button.wa-primary-action {
 }
 
 popover.wa-preview-popover {
-  border-radius: 10px;
+  border-radius: 12px;
 }
 
 label.wa-preview-label {
-  padding: 8px 10px;
-  font-size: 0.92em;
+  padding: 8px 12px;
+  font-size: 0.9em;
+  line-height: 1.6;
 }
 """
 
