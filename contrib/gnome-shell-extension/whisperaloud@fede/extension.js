@@ -3,6 +3,7 @@ import Gio from 'gi://Gio';
 import St from 'gi://St';
 import Shell from 'gi://Shell';
 import Meta from 'gi://Meta';
+import GLib from 'gi://GLib';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
@@ -163,6 +164,76 @@ class WhisperAloudIndicator extends PanelMenu.Button {
     }
 });
 
+// ── Window D-Bus service ────────────────────────────────────────────
+const WINDOW_IFACE_XML = `
+<node>
+  <interface name="org.fede.whisperaloud.Window">
+    <method name="GetFocusedWindow">
+      <arg direction="out" type="a{sv}" name="window"/>
+    </method>
+    <method name="ActivateWindow">
+      <arg direction="in" type="u" name="window_id"/>
+      <arg direction="out" type="b" name="success"/>
+    </method>
+  </interface>
+</node>`;
+
+// GNOME 45+ ESM: wrapJSObject requires Gio.DBusInterfaceInfo, not raw XML
+const WINDOW_NODE  = Gio.DBusNodeInfo.new_for_xml(WINDOW_IFACE_XML);
+const WINDOW_IFACE = WINDOW_NODE.interfaces[0];
+
+class WindowDBusService {
+    constructor() {
+        this._impl   = null;
+        this._nameId = null;
+    }
+
+    enable() {
+        this._impl = Gio.DBusExportedObject.wrapJSObject(WINDOW_IFACE, this);
+        this._impl.export(Gio.DBus.session, '/org/fede/whisperaloud/Window');
+        this._nameId = Gio.bus_own_name(
+            Gio.BusType.SESSION,
+            'org.gnome.Shell.Extensions.whisperaloud',
+            Gio.BusNameOwnerFlags.NONE,
+            null, null, null,
+        );
+    }
+
+    disable() {
+        if (this._impl) {
+            this._impl.unexport();
+            this._impl = null;
+        }
+        if (this._nameId) {
+            Gio.bus_unown_name(this._nameId);
+            this._nameId = null;
+        }
+    }
+
+    GetFocusedWindow() {
+        const win = global.display.get_focus_window();
+        if (!win) return {};
+        return {
+            'id':       GLib.Variant.new_uint32(win.get_id()),
+            'title':    GLib.Variant.new_string(win.get_title() || ''),
+            'wm_class': GLib.Variant.new_string(win.get_wm_class() || ''),
+        };
+    }
+
+    ActivateWindow(window_id) {
+        const actors = global.get_window_actors();
+        for (const actor of actors) {
+            const win = actor.meta_window;
+            if (win.get_id() === window_id) {
+                // Use roundtrip timestamp to avoid focus-steal prevention
+                win.activate(global.display.get_current_time_roundtrip());
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
 export default class WhisperAloudExtension extends Extension {
     enable() {
         let settings = null;
@@ -173,9 +244,15 @@ export default class WhisperAloudExtension extends Extension {
         }
         this._indicator = new WhisperAloudIndicator(settings);
         Main.panel.addToStatusArea('whisperaloud', this._indicator);
+        this._windowService = new WindowDBusService();
+        this._windowService.enable();
     }
 
     disable() {
+        if (this._windowService) {
+            this._windowService.disable();
+            this._windowService = null;
+        }
         if (this._indicator) {
             this._indicator.removeKeybinding();
             this._indicator.destroy();
