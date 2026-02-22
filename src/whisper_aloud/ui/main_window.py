@@ -978,8 +978,11 @@ class MainWindow(Gtk.ApplicationWindow):
         text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
         try:
             ok = self.client.update_history_entry(self._current_entry_id, text)
+            logger.debug(f"[EDIT] update_history_entry({self._current_entry_id}) → {ok}")
             if ok:
                 self.status_bar.set_status("Saved", timeout_ms=2000)
+                if hasattr(self, 'history_panel'):
+                    self.history_panel.refresh_recent()
             else:
                 self.status_bar.set_status("Save failed")
         except Exception as e:
