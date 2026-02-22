@@ -7,35 +7,40 @@ Backend detection order:
 """
 
 import logging
+import os
 from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
+def _is_wayland() -> bool:
+    """Return True if the current session appears to be Wayland."""
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
+    return session_type == "wayland" or bool(wayland_display)
+
+
 def _try_import_portal():
-    """Try to import Xdp (libportal) for GlobalShortcuts portal.
+    """Check whether the XDG Desktop Portal GlobalShortcuts backend is usable.
 
-    Returns the Xdp module or None.
+    Returns a truthy sentinel object (the PortalHotkeys class) when the portal
+    D-Bus service is available on a Wayland session, or None otherwise.
 
-    NOTE: Portal backend requires GNOME 46+ / KDE 6+ for GlobalShortcuts
-    support and full async session wiring (create_global_shortcuts_session +
-    bind_shortcuts).  Until that wiring is implemented, this function
-    returns None so systems fall through to keybinder or D-Bus-only mode.
+    Keeping this as a named function allows tests to patch it.
     """
-    # Portal backend is not yet fully implemented.  Uncomment and complete
-    # the async session handling when targeting GNOME 46+.
-    #
-    # try:
-    #     import gi
-    #     gi.require_version('Xdp', '1.0')
-    #     from gi.repository import Xdp
-    #     Xdp.Portal()
-    #     return Xdp
-    # except (ImportError, ValueError, TypeError, Exception) as e:
-    #     logger.debug("XDG Desktop Portal not available: %s", e)
-    #     return None
-    logger.debug("XDG Portal hotkey backend not yet implemented; skipping")
-    return None
+    if not _is_wayland():
+        logger.debug("Not a Wayland session; skipping portal backend")
+        return None
+    try:
+        from whisper_aloud.service.hotkey_portal import PortalHotkeys
+
+        if PortalHotkeys.portal_available():
+            return PortalHotkeys
+        logger.debug("XDG Portal D-Bus name not owned; skipping portal backend")
+        return None
+    except Exception as e:
+        logger.debug("Portal detection failed: %s", e)
+        return None
 
 
 def _try_import_keybinder():
@@ -45,8 +50,10 @@ def _try_import_keybinder():
     """
     try:
         import gi
-        gi.require_version('Keybinder', '3.0')
+
+        gi.require_version("Keybinder", "3.0")
         from gi.repository import Keybinder
+
         return Keybinder
     except (ImportError, ValueError, TypeError, Exception) as e:
         logger.debug("libkeybinder3 not available: %s", e)
@@ -65,9 +72,9 @@ class HotkeyManager:
 
     def __init__(self) -> None:
         self._backend: str = "none"
-        self._xdp = None  # Xdp module reference
+        self._xdp = None  # portal sentinel / PortalHotkeys class (or mock in tests)
         self._keybinder = None  # Keybinder module reference
-        self._portal = None  # Xdp.Portal() instance
+        self._portal_hotkeys = None  # PortalHotkeys instance (live session)
         self._registered_accels: List[str] = []
         self._callback: Optional[Callable[[], None]] = None
 
@@ -76,16 +83,16 @@ class HotkeyManager:
     def detect_backend(self) -> str:
         """Detect best available backend.
 
-        Tries portal first, then keybinder, then falls back to "none".
+        Tries portal first (Wayland only), then keybinder, then falls back to "none".
         Never raises an exception.
 
         Returns:
             "portal", "keybinder", or "none"
         """
         try:
-            xdp = _try_import_portal()
-            if xdp is not None:
-                self._xdp = xdp
+            portal_cls = _try_import_portal()
+            if portal_cls is not None:
+                self._xdp = portal_cls
                 logger.info("Using XDG Desktop Portal (GlobalShortcuts) backend")
                 return "portal"
         except Exception as e:
@@ -139,10 +146,12 @@ class HotkeyManager:
                         self._keybinder.unbind(accel)
                     except Exception as e:
                         logger.debug("Failed to unbind '%s': %s", accel, e)
-            elif self._backend == "portal" and self._portal is not None:
-                # Portal shortcuts are session-scoped; clearing reference
-                # is sufficient for cleanup
-                self._portal = None
+            elif self._backend == "portal" and self._portal_hotkeys is not None:
+                try:
+                    self._portal_hotkeys.close()
+                except Exception as e:
+                    logger.debug("Error closing portal session: %s", e)
+                self._portal_hotkeys = None
         except Exception as e:
             logger.debug("Error during unregister: %s", e)
         finally:
@@ -164,19 +173,35 @@ class HotkeyManager:
     def _register_portal(self, accel: str, callback: Callable[[], None]) -> bool:
         """Register a hotkey using XDG Desktop Portal GlobalShortcuts.
 
-        TODO: Implement full async wiring:
-          1. portal.create_global_shortcuts_session()
-          2. portal.bind_shortcuts(session, [shortcut], callback)
-          3. Connect 'shortcuts-changed' signal
-        Requires GNOME 46+ / KDE 6+ and libportal-gtk4 GIR bindings.
+        Instantiates PortalHotkeys (imported from hotkey_portal), creates a
+        portal session, and binds the "toggle" shortcut to the given accelerator.
+        Wraps everything in try/except so failures fall through cleanly.
         """
         try:
-            if self._portal is None:
-                self._portal = self._xdp.Portal()
+            from whisper_aloud.service.hotkey_portal import PortalHotkeys
 
+            portal = PortalHotkeys(app_id="org.fede.whisperaloud")
+            portal.create_session()
+
+            def _on_activated(shortcut_id: str) -> None:
+                if shortcut_id == "toggle":
+                    callback()
+
+            portal.bind_shortcuts(
+                shortcuts=[
+                    {
+                        "id": "toggle",
+                        "description": "Toggle WhisperAloud recording",
+                        "accelerators": [accel],
+                    }
+                ],
+                on_activated=_on_activated,
+            )
+
+            self._portal_hotkeys = portal
             self._callback = callback
             self._registered_accels.append(accel)
-            logger.info("Portal hotkey registered: %s (stub)", accel)
+            logger.info("Portal hotkey registered: %s", accel)
             return True
         except Exception as e:
             logger.error("Failed to register portal hotkey '%s': %s", accel, e)
