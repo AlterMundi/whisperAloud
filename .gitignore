@@ -57,6 +57,12 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# Lattice task tracking
+.lattice/
+
+# Implementation plans
+docs/plans/
+
 # User configuration
 config.json
 config.toml
