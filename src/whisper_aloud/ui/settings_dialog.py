@@ -295,6 +295,24 @@ class SettingsDialog(Gtk.Window):
         auto_paste_box.append(self.auto_paste_switch)
         page.append(auto_paste_box)
 
+        # Terminal paste mode
+        self.terminal_paste_switch = Gtk.Switch()
+        self.terminal_paste_switch.set_active(
+            self._config.clipboard.paste_shortcut == "ctrl+shift+v"
+        )
+
+        terminal_paste_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        terminal_paste_label = Gtk.Label(label="Paste into terminal (Ctrl+Shift+V):")
+        terminal_paste_label.set_halign(Gtk.Align.START)
+        terminal_paste_label.set_hexpand(True)
+        terminal_paste_label.set_tooltip_text(
+            "Use Ctrl+Shift+V instead of Ctrl+V — required for GNOME Terminal and other terminal emulators"
+        )
+
+        terminal_paste_box.append(terminal_paste_label)
+        terminal_paste_box.append(self.terminal_paste_switch)
+        page.append(terminal_paste_box)
+
         # --- OSD Notifications Section ---
         notifications_section = Gtk.Label(label="OSD Notifications")
         notifications_section.set_halign(Gtk.Align.START)
@@ -403,6 +421,7 @@ class SettingsDialog(Gtk.Window):
             "audio_device": self.audio_device_dropdown.get_selected(),
             "auto_copy": self.auto_copy_switch.get_active(),
             "auto_paste": self.auto_paste_switch.get_active(),
+            "terminal_paste": self.terminal_paste_switch.get_active(),
             "notifications_enabled": self.notifications_enabled_switch.get_active(),
             "notif_start": self.notification_recording_started_switch.get_active(),
             "notif_stop": self.notification_recording_stopped_switch.get_active(),
@@ -439,6 +458,7 @@ class SettingsDialog(Gtk.Window):
             self.audio_device_dropdown,
             self.auto_copy_switch,
             self.auto_paste_switch,
+            self.terminal_paste_switch,
             self.notifications_enabled_switch,
             self.notification_recording_started_switch,
             self.notification_recording_stopped_switch,
@@ -900,6 +920,9 @@ class SettingsDialog(Gtk.Window):
             # Update clipboard config
             self._config.clipboard.auto_copy = self.auto_copy_switch.get_active()
             self._config.clipboard.auto_paste = self.auto_paste_switch.get_active()
+            self._config.clipboard.paste_shortcut = (
+                "ctrl+shift+v" if self.terminal_paste_switch.get_active() else "ctrl+v"
+            )
             self._config.clipboard.paste_delay_ms = InputValidator.validate_integer(
                 self.paste_delay_entry.get_text(),
                 min_value=0,
