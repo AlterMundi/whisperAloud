@@ -3,6 +3,7 @@
   "name": "WhisperAloud",
   "description": "Voice dictation and transcription for GNOME",
   "shell-version": ["45", "46", "47", "48"],
+  "settings-schema": "org.gnome.shell.extensions.whisperaloud",
   "url": "https://github.com/fede2cr/whisperAloud",
   "version": 1
 }

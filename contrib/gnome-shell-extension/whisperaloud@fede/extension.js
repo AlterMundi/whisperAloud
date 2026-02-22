@@ -131,6 +131,10 @@ class WhisperAloudIndicator extends PanelMenu.Button {
     // ── Keybinding ─────────────────────────────────────────────────────────
 
     _addKeybinding() {
+        if (!this._settings) {
+            console.warn('WhisperAloud: No settings available, keybinding not registered');
+            return;
+        }
         Main.wm.addKeybinding(
             'toggle-recording',
             this._settings,
@@ -138,10 +142,14 @@ class WhisperAloudIndicator extends PanelMenu.Button {
             Shell.ActionMode.ALL,
             () => this._toggleRecording()
         );
+        this._hasKeybinding = true;
     }
 
     removeKeybinding() {
-        Main.wm.removeKeybinding('toggle-recording');
+        if (this._hasKeybinding) {
+            Main.wm.removeKeybinding('toggle-recording');
+            this._hasKeybinding = false;
+        }
     }
 
     // ── Cleanup ────────────────────────────────────────────────────────────
@@ -157,7 +165,13 @@ class WhisperAloudIndicator extends PanelMenu.Button {
 
 export default class WhisperAloudExtension extends Extension {
     enable() {
-        this._indicator = new WhisperAloudIndicator(this.getSettings());
+        let settings = null;
+        try {
+            settings = this.getSettings();
+        } catch (e) {
+            console.warn(`WhisperAloud: getSettings() failed: ${e}. Keybinding disabled.`);
+        }
+        this._indicator = new WhisperAloudIndicator(settings);
         Main.panel.addToStatusArea('whisperaloud', this._indicator);
     }
 
