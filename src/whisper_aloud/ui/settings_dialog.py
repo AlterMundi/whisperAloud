@@ -1,6 +1,7 @@
 """Settings dialog for WhisperAloud configuration."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +19,6 @@ from .error_handler import InputValidator, ValidationError
 from .settings_logic import (
     has_unsaved_changes,
     normalize_language_input,
-    should_auto_close_on_focus_loss,
     should_block_close,
 )
 
@@ -45,8 +45,9 @@ class SettingsDialog(Gtk.Window):
         super().__init__()
 
         self.set_title("Settings")
-        self.set_default_size(600, 500)
+        self.set_default_size(600, 700)
         self.set_modal(False)
+        self.set_resizable(True)
         self.set_transient_for(parent)
         self.add_css_class("wa-dialog-window")
 
@@ -61,49 +62,14 @@ class SettingsDialog(Gtk.Window):
         self._allow_close = False
         self._child_dialog_open = False
         self._dirty = False
-        self._focus_close_source_id: int = 0
         self._initial_ui_state = self._capture_ui_state()
         self._connect_dirty_tracking()
-        self._focus_controller = Gtk.EventControllerFocus()
-        self._focus_controller.connect("notify::contains-focus", self._on_focus_changed)
-        self.add_controller(self._focus_controller)
         self.connect("close-request", self._on_close_request)
 
         logger.info("Settings dialog initialized")
 
-    def _on_focus_changed(self, controller: Gtk.EventControllerFocus, _param: object) -> None:
-        """Auto-close settings when focus leaves the entire window widget tree.
-
-        Uses a short delay to ignore transient focus losses caused by GTK4
-        DropDown popups on Wayland (the popup is a separate surface that
-        briefly steals focus from the settings window).
-        """
-        # Cancel any pending auto-close when focus returns
-        if self._focus_close_source_id:
-            GLib.source_remove(self._focus_close_source_id)
-            self._focus_close_source_id = 0
-
-        if should_auto_close_on_focus_loss(
-            child_dialog_open=self._child_dialog_open,
-            contains_focus=controller.contains_focus(),
-            is_visible=self.is_visible(),
-        ):
-            self._focus_close_source_id = GLib.timeout_add(
-                200, self._deferred_focus_close
-            )
-
-    def _deferred_focus_close(self) -> bool:
-        """Close the dialog if focus hasn't returned after the grace period."""
-        self._focus_close_source_id = 0
-        if not self._focus_controller.contains_focus() and self.is_visible():
-            self.close()
-        return GLib.SOURCE_REMOVE
-
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         """Intercept close to protect unsaved changes."""
-        if self._focus_close_source_id:
-            GLib.source_remove(self._focus_close_source_id)
-            self._focus_close_source_id = 0
         if should_block_close(
             allow_close=self._allow_close,
             unsaved_changes=self._has_unsaved_changes(),
@@ -181,7 +147,11 @@ class SettingsDialog(Gtk.Window):
         self._add_history_page()
         self._add_advanced_page()
 
-        main_box.append(self.stack)
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)
+        scrolled.set_child(self.stack)
+        main_box.append(scrolled)
 
     def _setup_keyboard_shortcuts(self) -> None:
         """Enable dialog-local keyboard shortcuts for accessibility."""
@@ -208,6 +178,33 @@ class SettingsDialog(Gtk.Window):
             return True
 
         return False
+
+    def _on_register_hotkey_clicked(self, _btn: Gtk.Button) -> None:
+        """Check hotkey status and give actionable feedback."""
+        # Query daemon
+        backend = "unknown"
+        try:
+            from whisper_aloud.service.client import WhisperAloudClient
+
+            client = WhisperAloudClient()
+            status = client.get_status()
+            backend = status.get("hotkey_backend", "none")
+        except Exception:
+            self._hotkey_status_label.set_text("Daemon not running")
+            return
+
+        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+
+        if backend == "keybinder":
+            self._hotkey_status_label.set_text("Active (keybinder)")
+        elif backend == "portal" and "GNOME" not in desktop:
+            # Portal works on KDE/wlroots
+            self._hotkey_status_label.set_text("Active (XDG Portal)")
+        elif "GNOME" in desktop:
+            # On GNOME, portal silently rejects native apps — use extension
+            self._hotkey_status_label.set_text("Use GNOME extension")
+        else:
+            self._hotkey_status_label.set_text("Set system shortcut manually")
 
     def _add_general_page(self) -> None:
         """Add general settings page with common options."""
@@ -447,14 +444,27 @@ class SettingsDialog(Gtk.Window):
         accel_box.append(self.hotkey_accel_entry)
         page.append(accel_box)
 
-        # Help box (always visible — backend status is only known at daemon startup)
+        # Hotkey status row
+        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        backend_label = Gtk.Label(label="Backend status:")
+        backend_label.set_halign(Gtk.Align.START)
+        backend_label.set_hexpand(True)
+        self._hotkey_status_label = Gtk.Label(label="")
+        self._hotkey_status_label.set_halign(Gtk.Align.END)
+        self._register_hotkey_btn = Gtk.Button(label="Check Status")
+        self._register_hotkey_btn.connect("clicked", self._on_register_hotkey_clicked)
+        status_row.append(backend_label)
+        status_row.append(self._hotkey_status_label)
+        status_row.append(self._register_hotkey_btn)
+        page.append(status_row)
+
+        # Help box (fallback for when portal is not available)
         hotkey_help_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         hotkey_help_box.add_css_class("wa-help")
 
         hotkey_help_label = Gtk.Label()
         hotkey_help_label.set_markup(
-            "No automatic hotkey backend detected.\n"
-            "To trigger WhisperAloud manually, create a system keyboard shortcut\n"
+            "If registration fails, create a system keyboard shortcut\n"
             "pointing to the command:  <tt>whisper-aloud toggle</tt>"
         )
         hotkey_help_label.set_halign(Gtk.Align.START)
