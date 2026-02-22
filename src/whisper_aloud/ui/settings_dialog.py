@@ -334,6 +334,21 @@ class SettingsDialog(Gtk.Window):
         terminal_paste_box.append(self.terminal_paste_switch)
         page.append(terminal_paste_box)
 
+        # Paste to captured window toggle
+        captured_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        captured_label = Gtk.Label(label="Paste to captured window")
+        captured_label.set_hexpand(True)
+        captured_label.set_halign(Gtk.Align.START)
+        captured_label.set_tooltip_text(
+            "Paste goes to the window active when you stopped recording, "
+            "even if you switch windows during transcription."
+        )
+        self._paste_captured_switch = Gtk.Switch()
+        self._paste_captured_switch.set_active(self._config.clipboard.paste_to_captured_window)
+        captured_row.append(captured_label)
+        captured_row.append(self._paste_captured_switch)
+        page.append(captured_row)
+
         # --- OSD Notifications Section ---
         notifications_section = Gtk.Label(label="OSD Notifications")
         notifications_section.set_halign(Gtk.Align.START)
@@ -517,6 +532,7 @@ class SettingsDialog(Gtk.Window):
             "auto_copy": self.auto_copy_switch.get_active(),
             "auto_paste": self.auto_paste_switch.get_active(),
             "terminal_paste": self.terminal_paste_switch.get_active(),
+            "paste_captured": self._paste_captured_switch.get_active(),
             "notifications_enabled": self.notifications_enabled_switch.get_active(),
             "notif_start": self.notification_recording_started_switch.get_active(),
             "notif_stop": self.notification_recording_stopped_switch.get_active(),
@@ -556,6 +572,7 @@ class SettingsDialog(Gtk.Window):
             self.auto_copy_switch,
             self.auto_paste_switch,
             self.terminal_paste_switch,
+            self._paste_captured_switch,
             self.notifications_enabled_switch,
             self.notification_recording_started_switch,
             self.notification_recording_stopped_switch,
@@ -1063,6 +1080,7 @@ class SettingsDialog(Gtk.Window):
             self._config.clipboard.paste_shortcut = (
                 "ctrl+shift+v" if self.terminal_paste_switch.get_active() else "ctrl+v"
             )
+            self._config.clipboard.paste_to_captured_window = self._paste_captured_switch.get_active()
             self._config.clipboard.paste_delay_ms = InputValidator.validate_integer(
                 self.paste_delay_entry.get_text(),
                 min_value=0,
