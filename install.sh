@@ -632,6 +632,10 @@ ExecStart=$VENV_PATH/bin/whisper-aloud-daemon
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=120
+# Ensure graphical session env is available for clipboard (wl-copy, ydotool).
+# User manager has these vars (imported by GNOME at login), but D-Bus activation
+# can start the service before the import happens. ExecStartPre re-imports them.
+ExecStartPre=/bin/sh -c 'systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP 2>/dev/null; true'
 
 [Install]
 WantedBy=graphical-session.target
