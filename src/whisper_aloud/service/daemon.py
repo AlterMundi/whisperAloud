@@ -14,7 +14,7 @@ from pydbus import SessionBus
 from pydbus.generic import signal
 
 from ..audio.recorder import AudioRecorder
-from ..clipboard import ClipboardManager
+from ..clipboard import ClipboardManager, WindowManager
 from ..config import WhisperAloudConfig
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
@@ -218,6 +218,9 @@ class WhisperAloudService:
             logger.warning(f"Failed to initialize clipboard: {e}")
             self.clipboard_manager = None
 
+        self.window_manager = WindowManager()
+        self._captured_by_job: dict = {}  # job_id → WindowInfo
+
         logger.info("WhisperAloudService initialized")
 
     def _init_components(self) -> None:
@@ -334,6 +337,23 @@ class WhisperAloudService:
 
         try:
             self._stop_level_timer()
+
+            # Generate job ID for per-job window capture
+            job_id = uuid.uuid4().hex
+
+            # Capture active window for targeted paste
+            if self.config.clipboard.paste_to_captured_window:
+                try:
+                    captured = self.window_manager.get_active_window()
+                    if captured:
+                        self._captured_by_job[job_id] = captured
+                        logger.info(
+                            f"Captured window for job {job_id[:8]}: "
+                            f"{captured.title} (id={captured.window_id})"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to capture window: {e}")
+
             audio_data = self.recorder.stop()
 
             # Restore mic gain and resume media (try/finally ensures both run)
@@ -357,7 +377,7 @@ class WhisperAloudService:
 
             # Start transcription in background thread (non-blocking)
             self._transcribing = True
-            self.executor.submit(self._transcribe_and_emit, audio_data)
+            self.executor.submit(self._transcribe_and_emit, audio_data, job_id)
 
             # Return immediately - result will be emitted via signal
             return "transcribing"
@@ -639,6 +659,20 @@ class WhisperAloudService:
 
         Called from a daemon thread — marshal all GLib/D-Bus work to the main loop.
         """
+        # Capture window immediately (before marshalling to main thread)
+        job_id = uuid.uuid4().hex
+        if self.config.clipboard.paste_to_captured_window:
+            try:
+                captured = self.window_manager.get_active_window()
+                if captured:
+                    self._captured_by_job[job_id] = captured
+                    logger.info(
+                        f"Captured window for auto-stop job {job_id[:8]}: "
+                        f"{captured.title} (id={captured.window_id})"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to capture window on auto-stop: {e}")
+
         def _on_main_thread():
             logger.info("Auto-stop triggered by max recording duration")
             self._stop_level_timer()
@@ -661,7 +695,7 @@ class WhisperAloudService:
                 self.notifications.show_recording_stopped()
 
             self._transcribing = True
-            self.executor.submit(self._transcribe_and_emit, audio_data)
+            self.executor.submit(self._transcribe_and_emit, audio_data, job_id)
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(_on_main_thread)
@@ -693,7 +727,7 @@ class WhisperAloudService:
         self._ensure_model_loaded()
         return self.transcriber.transcribe_numpy(audio_data)
 
-    def _transcribe_and_emit(self, audio_data) -> None:
+    def _transcribe_and_emit(self, audio_data, job_id: str = "") -> None:
         """Transcribe audio and emit completion signal (runs in thread).
 
         All D-Bus signal emissions and indicator updates are marshalled
@@ -746,10 +780,18 @@ class WhisperAloudService:
                             self.clipboard_manager._session_type,
                             self.config.clipboard,
                         )
-                        _threading.Thread(
-                            target=simulator.simulate_paste,
-                            daemon=True,
-                        ).start()
+                        captured = self._captured_by_job.pop(job_id, None)
+
+                        def _do_paste():
+                            if captured and self.config.clipboard.paste_to_captured_window:
+                                try:
+                                    self.window_manager.activate_window(captured)
+                                    time.sleep(self.config.clipboard.paste_delay_ms / 1000.0)
+                                except Exception as e:
+                                    logger.warning(f"Failed to activate captured window: {e}")
+                            simulator.simulate_paste()
+
+                        _threading.Thread(target=_do_paste, daemon=True).start()
                         logger.info("Auto-paste triggered")
                     except Exception as e:
                         logger.warning(f"Failed to trigger auto-paste: {e}")
