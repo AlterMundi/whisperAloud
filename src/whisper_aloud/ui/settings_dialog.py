@@ -153,8 +153,9 @@ class SettingsDialog(Gtk.Window):
         stack_switcher.set_margin_bottom(12)
         main_box.append(stack_switcher)
 
-        # Add pages (simplified 2-tab layout)
+        # Add pages
         self._add_general_page()
+        self._add_history_page()
         self._add_advanced_page()
 
         main_box.append(self.stack)
@@ -489,6 +490,159 @@ class SettingsDialog(Gtk.Window):
             elif isinstance(widget, Gtk.Entry):
                 widget.connect("changed", self._mark_dirty)
 
+    def _add_history_page(self) -> None:
+        """Add History & Storage settings page."""
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)
+
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(24)
+        page.set_margin_end(24)
+        page.set_margin_top(24)
+        page.set_margin_bottom(24)
+        scrolled.set_child(page)
+
+        # --- History Behaviour ---
+        behaviour_section = Gtk.Label(label="History Behaviour")
+        behaviour_section.set_halign(Gtk.Align.START)
+        behaviour_section.add_css_class("heading")
+        behaviour_section.add_css_class("wa-section-title")
+        page.append(behaviour_section)
+
+        # Allow editing transcriptions
+        self.edit_history_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.edit_history_switch.set_active(self._config.persistence.edit_history_enabled)
+
+        edit_history_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        edit_history_label = Gtk.Label(label="Allow editing transcriptions:")
+        edit_history_label.set_halign(Gtk.Align.START)
+        edit_history_label.set_hexpand(True)
+        edit_history_box.append(edit_history_label)
+        edit_history_box.append(self.edit_history_switch)
+        page.append(edit_history_box)
+
+        # Auto-cleanup toggle
+        self.auto_cleanup_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.auto_cleanup_switch.set_active(self._config.persistence.auto_cleanup_enabled)
+
+        cleanup_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        cleanup_label = Gtk.Label(label="Auto-cleanup old entries:")
+        cleanup_label.set_halign(Gtk.Align.START)
+        cleanup_label.set_hexpand(True)
+        cleanup_box.append(cleanup_label)
+        cleanup_box.append(self.auto_cleanup_switch)
+        page.append(cleanup_box)
+
+        # Cleanup after N days
+        cleanup_days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        cleanup_days_label = Gtk.Label(label="Cleanup after (days):")
+        cleanup_days_label.set_halign(Gtk.Align.START)
+        cleanup_days_label.set_hexpand(True)
+        self.cleanup_days_entry = Gtk.Entry()
+        if self._config.persistence:
+            self.cleanup_days_entry.set_text(str(self._config.persistence.auto_cleanup_days))
+        else:
+            self.cleanup_days_entry.set_text("90")
+        cleanup_days_box.append(cleanup_days_label)
+        cleanup_days_box.append(self.cleanup_days_entry)
+        page.append(cleanup_days_box)
+
+        # Max entries
+        max_entries_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        max_entries_label = Gtk.Label(label="Maximum entries:")
+        max_entries_label.set_halign(Gtk.Align.START)
+        max_entries_label.set_hexpand(True)
+        self.max_entries_entry = Gtk.Entry()
+        if self._config.persistence:
+            self.max_entries_entry.set_text(str(self._config.persistence.max_entries))
+        else:
+            self.max_entries_entry.set_text("10000")
+        max_entries_box.append(max_entries_label)
+        max_entries_box.append(self.max_entries_entry)
+        page.append(max_entries_box)
+
+        # --- Audio Archive ---
+        audio_section = Gtk.Label(label="Audio Archive")
+        audio_section.set_halign(Gtk.Align.START)
+        audio_section.add_css_class("heading")
+        audio_section.add_css_class("wa-section-title")
+        audio_section.set_margin_top(12)
+        page.append(audio_section)
+
+        # Save audio recordings
+        self.save_audio_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.save_audio_switch.set_active(self._config.persistence.save_audio)
+
+        save_audio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        save_audio_label = Gtk.Label(label="Save audio recordings:")
+        save_audio_label.set_halign(Gtk.Align.START)
+        save_audio_label.set_hexpand(True)
+        save_audio_box.append(save_audio_label)
+        save_audio_box.append(self.save_audio_switch)
+        page.append(save_audio_box)
+
+        # Deduplicate audio
+        self.deduplicate_audio_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.deduplicate_audio_switch.set_active(self._config.persistence.deduplicate_audio)
+
+        dedupe_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        dedupe_label = Gtk.Label(label="Deduplicate audio:")
+        dedupe_label.set_halign(Gtk.Align.START)
+        dedupe_label.set_hexpand(True)
+        dedupe_box.append(dedupe_label)
+        dedupe_box.append(self.deduplicate_audio_switch)
+        page.append(dedupe_box)
+
+        # --- Storage Paths ---
+        paths_section = Gtk.Label(label="Storage Paths")
+        paths_section.set_halign(Gtk.Align.START)
+        paths_section.add_css_class("heading")
+        paths_section.add_css_class("wa-section-title")
+        paths_section.set_margin_top(12)
+        page.append(paths_section)
+
+        # Database path
+        db_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        db_path_label = Gtk.Label(label="Database path:")
+        db_path_label.set_halign(Gtk.Align.START)
+        db_path_label.set_hexpand(True)
+        self.db_path_entry = Gtk.Entry()
+        if self._config.persistence and self._config.persistence.db_path:
+            self.db_path_entry.set_text(str(self._config.persistence.db_path))
+        else:
+            self.db_path_entry.set_text(
+                str(Path.home() / ".local/share/whisper_aloud/history.db")
+            )
+        self.db_path_entry.set_hexpand(True)
+        db_path_box.append(db_path_label)
+        db_path_box.append(self.db_path_entry)
+        page.append(db_path_box)
+
+        # Audio archive path
+        audio_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        audio_path_label = Gtk.Label(label="Audio archive path:")
+        audio_path_label.set_halign(Gtk.Align.START)
+        audio_path_label.set_hexpand(True)
+        self.audio_archive_entry = Gtk.Entry()
+        if self._config.persistence and self._config.persistence.audio_archive_path:
+            self.audio_archive_entry.set_text(str(self._config.persistence.audio_archive_path))
+        else:
+            self.audio_archive_entry.set_text(
+                str(Path.home() / ".local/share/whisper_aloud/audio")
+            )
+        self.audio_archive_entry.set_hexpand(True)
+        audio_path_box.append(audio_path_label)
+        audio_path_box.append(self.audio_archive_entry)
+        page.append(audio_path_box)
+
+        self._style_setting_rows_in_page(page)
+        self.stack.add_titled(scrolled, "history", "History")
+
     def _add_advanced_page(self) -> None:
         """Add advanced settings page."""
         scrolled = Gtk.ScrolledWindow()
@@ -737,137 +891,6 @@ class SettingsDialog(Gtk.Window):
         target_gain_box.append(target_gain_label)
         target_gain_box.append(self.target_gain_entry)
         page.append(target_gain_box)
-
-        # --- History Section ---
-        history_section = Gtk.Label(label="History & Storage")
-        history_section.set_halign(Gtk.Align.START)
-        history_section.add_css_class("heading")
-        history_section.add_css_class("wa-section-title")
-        history_section.set_margin_top(12)
-        page.append(history_section)
-
-        # Save audio
-        self.save_audio_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.save_audio_switch.set_active(self._config.persistence.save_audio)
-
-        save_audio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        save_audio_label = Gtk.Label(label="Save audio recordings:")
-        save_audio_label.set_halign(Gtk.Align.START)
-        save_audio_label.set_hexpand(True)
-
-        save_audio_box.append(save_audio_label)
-        save_audio_box.append(self.save_audio_switch)
-        page.append(save_audio_box)
-
-        # Deduplicate
-        self.deduplicate_audio_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.deduplicate_audio_switch.set_active(self._config.persistence.deduplicate_audio)
-
-        dedupe_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        dedupe_label = Gtk.Label(label="Deduplicate audio:")
-        dedupe_label.set_halign(Gtk.Align.START)
-        dedupe_label.set_hexpand(True)
-
-        dedupe_box.append(dedupe_label)
-        dedupe_box.append(self.deduplicate_audio_switch)
-        page.append(dedupe_box)
-
-        # Auto-cleanup
-        self.auto_cleanup_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.auto_cleanup_switch.set_active(self._config.persistence.auto_cleanup_enabled)
-
-        cleanup_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        cleanup_label = Gtk.Label(label="Auto-cleanup old entries:")
-        cleanup_label.set_halign(Gtk.Align.START)
-        cleanup_label.set_hexpand(True)
-
-        cleanup_box.append(cleanup_label)
-        cleanup_box.append(self.auto_cleanup_switch)
-        page.append(cleanup_box)
-
-        # Edit history
-        self.edit_history_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.edit_history_switch.set_active(self._config.persistence.edit_history_enabled)
-
-        edit_history_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        edit_history_label = Gtk.Label(label="Allow editing transcriptions:")
-        edit_history_label.set_halign(Gtk.Align.START)
-        edit_history_label.set_hexpand(True)
-        edit_history_box.append(edit_history_label)
-        edit_history_box.append(self.edit_history_switch)
-        page.append(edit_history_box)
-
-        # Cleanup days
-        cleanup_days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        cleanup_days_label = Gtk.Label(label="Cleanup after (days):")
-        cleanup_days_label.set_halign(Gtk.Align.START)
-        cleanup_days_label.set_hexpand(True)
-
-        self.cleanup_days_entry = Gtk.Entry()
-        if self._config.persistence:
-            self.cleanup_days_entry.set_text(str(self._config.persistence.auto_cleanup_days))
-        else:
-            self.cleanup_days_entry.set_text("90")
-
-        cleanup_days_box.append(cleanup_days_label)
-        cleanup_days_box.append(self.cleanup_days_entry)
-        page.append(cleanup_days_box)
-
-        # Max entries
-        max_entries_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        max_entries_label = Gtk.Label(label="Maximum entries:")
-        max_entries_label.set_halign(Gtk.Align.START)
-        max_entries_label.set_hexpand(True)
-
-        self.max_entries_entry = Gtk.Entry()
-        if self._config.persistence:
-            self.max_entries_entry.set_text(str(self._config.persistence.max_entries))
-        else:
-            self.max_entries_entry.set_text("10000")
-
-        max_entries_box.append(max_entries_label)
-        max_entries_box.append(self.max_entries_entry)
-        page.append(max_entries_box)
-
-        # Database path
-        db_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        db_path_label = Gtk.Label(label="Database path:")
-        db_path_label.set_halign(Gtk.Align.START)
-        db_path_label.set_hexpand(True)
-
-        self.db_path_entry = Gtk.Entry()
-        if self._config.persistence and self._config.persistence.db_path:
-            self.db_path_entry.set_text(str(self._config.persistence.db_path))
-        else:
-            default_path = Path.home() / ".local/share/whisper_aloud/history.db"
-            self.db_path_entry.set_text(str(default_path))
-        self.db_path_entry.set_hexpand(True)
-
-        db_path_box.append(db_path_label)
-        db_path_box.append(self.db_path_entry)
-        page.append(db_path_box)
-
-        # Audio archive path
-        audio_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        audio_path_label = Gtk.Label(label="Audio archive path:")
-        audio_path_label.set_halign(Gtk.Align.START)
-        audio_path_label.set_hexpand(True)
-
-        self.audio_archive_entry = Gtk.Entry()
-        if self._config.persistence and self._config.persistence.audio_archive_path:
-            self.audio_archive_entry.set_text(str(self._config.persistence.audio_archive_path))
-        else:
-            default_path = Path.home() / ".local/share/whisper_aloud/audio"
-            self.audio_archive_entry.set_text(str(default_path))
-        self.audio_archive_entry.set_hexpand(True)
-
-        audio_path_box.append(audio_path_label)
-        audio_path_box.append(self.audio_archive_entry)
-        page.append(audio_path_box)
 
         self._style_setting_rows_in_page(page)
         self.stack.add_titled(scrolled, "advanced", "Advanced")
