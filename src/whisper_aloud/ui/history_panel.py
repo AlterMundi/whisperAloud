@@ -282,30 +282,26 @@ class HistoryPanel(Gtk.Box):
 
     def _on_delete_requested(self, item, entry_id):
         """Handle delete request from item with confirmation dialog."""
-        dialog = Gtk.MessageDialog(
-            transient_for=self.get_root(),
-            modal=True,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.NONE,
-            text="Delete Transcription?",
-        )
-        dialog.format_secondary_text(
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("Delete Transcription?")
+        dialog.set_detail(
             "This action cannot be undone. The transcription will be permanently removed."
         )
+        dialog.set_buttons(["Cancel", "Delete"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
 
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        delete_btn = dialog.add_button("Delete", Gtk.ResponseType.ACCEPT)
-        delete_btn.add_css_class("destructive-action")
+        def on_choose(d, result):
+            try:
+                idx = d.choose_finish(result)
+                if idx == 1:  # "Delete"
+                    success = self.history_manager.delete(entry_id)
+                    if success:
+                        self.refresh_recent()
+            except Exception:
+                pass
 
-        def on_response(d, response):
-            if response == Gtk.ResponseType.ACCEPT:
-                success = self.history_manager.delete(entry_id)
-                if success:
-                    self.refresh_recent()
-            d.close()
-
-        dialog.connect("response", on_response)
-        dialog.present()
+        dialog.choose(self.get_root(), None, on_choose)
 
     def _on_export_clicked(self, button):
         """Handle export button click."""
