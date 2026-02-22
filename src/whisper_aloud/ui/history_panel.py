@@ -277,7 +277,7 @@ class HistoryPanel(Gtk.Box):
                 item = HistoryItem(entry)
                 item.connect("favorite-toggled", self._on_favorite_toggled_item)
                 item.connect("delete-requested", self._on_delete_requested)
-                item.connect("selection-mode-requested", self._on_selection_mode_requested)
+                item.connect("selection-toggled", self._on_selection_toggled)
                 self.list_box.append(item)
 
         return False
@@ -287,9 +287,10 @@ class HistoryPanel(Gtk.Box):
         return group_entries_by_date(entries)
 
     def _on_row_activated(self, list_box, row):
-        """Handle row click."""
+        """Handle left-click: exit selection mode if active, then load entry as normal."""
         if isinstance(row, HistoryItem):
-            # Emit signal for main window to display
+            if self._selection_mode:
+                self._exit_selection_mode()
             self.emit("entry-selected", row.entry)
 
     def _on_favorite_toggled_item(self, item, entry_id):
@@ -331,12 +332,13 @@ class HistoryPanel(Gtk.Box):
             return True
         return False
 
-    def _on_selection_mode_requested(self, item, entry_id: int) -> None:
-        """Enter selection mode (first right-click) or exit it (second right-click)."""
+    def _on_selection_toggled(self, item: "HistoryItem", entry_id: int) -> None:
+        """Right-click: enter selection mode on first use, then toggle individual items."""
         if not self._selection_mode:
             self._enter_selection_mode(entry_id)
         else:
-            self._exit_selection_mode()
+            # Toggle just this item's checkbox
+            item.set_selected(not item.get_selected())
 
     def _enter_selection_mode(self, initial_id: int) -> None:
         """Switch all items to selection mode and pre-select the triggering item."""

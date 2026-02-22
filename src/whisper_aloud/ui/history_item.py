@@ -22,7 +22,7 @@ class HistoryItem(Gtk.ListBoxRow):
     __gsignals__ = {
         'favorite-toggled': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'delete-requested': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        'selection-mode-requested': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        'selection-toggled': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
     }
 
     def __init__(self, entry: HistoryEntry):
@@ -215,15 +215,11 @@ class HistoryItem(Gtk.ListBoxRow):
         return self._select_check.get_active()
 
     def _on_mouse_pressed(self, gesture, n_press, x, y):
-        """Handle mouse press: right-click toggles selection mode; left-click in selection mode toggles checkbox."""
+        """Handle mouse press: right-click toggles item selection; left-click always activates normally."""
         button = gesture.get_current_button()
         if button == Gdk.BUTTON_SECONDARY:
             gesture.set_state(Gtk.EventSequenceState.CLAIMED)
             if self._preview_popover:
                 self._preview_popover.popdown()
-            # Signal the panel to enter/exit selection mode
-            self.emit("selection-mode-requested", self.entry.id)
-        elif button == Gdk.BUTTON_PRIMARY and self._in_selection_mode:
-            # Toggle checkbox without activating the row
-            self._select_check.set_active(not self._select_check.get_active())
-            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            # Signal the panel to toggle selection of this item
+            self.emit("selection-toggled", self.entry.id)
