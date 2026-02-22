@@ -22,6 +22,7 @@ class HistoryItem(Gtk.ListBoxRow):
     __gsignals__ = {
         'favorite-toggled': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'delete-requested': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        'selection-mode-requested': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
     }
 
     def __init__(self, entry: HistoryEntry):
@@ -42,13 +43,24 @@ class HistoryItem(Gtk.ListBoxRow):
         box.set_margin_top(4)
         box.set_margin_bottom(4)
 
-        # Time label
+        # Time label / checkbox stack (swapped in selection mode)
+        self._time_stack = Gtk.Stack()
+        self._time_stack.set_transition_type(Gtk.StackTransitionType.NONE)
+
         time_str = entry.timestamp.strftime("%H:%M") if entry.timestamp else "--:--"
         time_label = Gtk.Label(label=time_str)
         time_label.set_width_chars(5)
         time_label.add_css_class("dim-label")
         time_label.add_css_class("wa-history-time")
-        box.append(time_label)
+
+        self._select_check = Gtk.CheckButton()
+        self._select_check.set_valign(Gtk.Align.CENTER)
+        self._select_check.set_width_request(24)
+
+        self._time_stack.add_named(time_label, "time")
+        self._time_stack.add_named(self._select_check, "select")
+        self._time_stack.set_visible_child_name("time")
+        box.append(self._time_stack)
 
         # Content box (Text + Metadata)
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -89,13 +101,13 @@ class HistoryItem(Gtk.ListBoxRow):
         box.append(fav_button)
 
         self.set_child(box)
+        self._in_selection_mode = False
         self._preview_text = format_transcription_preview(entry.text, line_width=42)
         self._preview_popover: Gtk.Popover | None = None
         self._preview_show_timeout_id: int | None = None
-        self._context_popover: Gtk.Popover | None = None
         self._setup_hover_preview()
 
-        # Context menu
+        # Context menu / selection mode gesture
         self._setup_context_menu()
 
     def _setup_hover_preview(self) -> None:
@@ -179,59 +191,39 @@ class HistoryItem(Gtk.ListBoxRow):
             self.emit("favorite-toggled", self.entry.id)
 
     def _setup_context_menu(self) -> None:
-        """Set up right-click context menu."""
-        # Create popover menu
-        Gtk.PopoverMenu()
-
-        # Create menu model
-        # Note: In GTK4, we typically use Gio.Menu, but for simplicity in this custom widget
-        # we might use a Gtk.Popover with buttons if Gio.Menu is too complex to set up here.
-        # However, Gtk.ListBoxRow doesn't easily support right-click without an EventController.
-
+        """Set up right-click gesture (used for selection mode entry/exit)."""
         controller = Gtk.GestureClick()
         controller.set_button(0)  # Listen to all buttons
         controller.connect("pressed", self._on_mouse_pressed)
         self.add_controller(controller)
 
-    def _on_mouse_pressed(self, gesture, n_press, x, y):
-        """Handle mouse press for context menu."""
-        from gi.repository import Gdk
-
-        # Check for right click (button 3)
-        button = gesture.get_current_button()
-        if button == Gdk.BUTTON_SECONDARY:
-            self._show_context_menu(x, y)
-            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
-
-    def _show_context_menu(self, x, y):
-        """Show context menu popover."""
+    def set_selection_mode(self, active: bool) -> None:
+        """Enter or exit selection mode (swap time label ↔ checkbox)."""
+        self._in_selection_mode = active
+        self._time_stack.set_visible_child_name("select" if active else "time")
+        if not active:
+            self._select_check.set_active(False)
         if self._preview_popover:
             self._preview_popover.popdown()
 
-        if self._context_popover:
-            self._context_popover.popdown()
+    def set_selected(self, selected: bool) -> None:
+        """Set checkbox state without emitting signals."""
+        self._select_check.set_active(selected)
 
-        popover = Gtk.Popover()
-        popover.set_parent(self)
-        popover.set_autohide(True)
-        popover.set_pointing_to(Gdk.Rectangle(x=int(x), y=int(y), width=1, height=1))
+    def get_selected(self) -> bool:
+        """Return current checkbox state."""
+        return self._select_check.get_active()
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
-        # Delete button
-        delete_btn = Gtk.Button(label="Delete")
-        delete_btn.add_css_class("flat")
-        delete_btn.add_css_class("wa-ghost")
-        delete_btn.set_tooltip_text("Delete this history entry")
-        delete_btn.connect("clicked", lambda b: self._on_delete_clicked(popover))
-        box.append(delete_btn)
-
-        popover.set_child(box)
-        self._context_popover = popover
-        popover.popup()
-
-    def _on_delete_clicked(self, popover):
-        """Handle delete action."""
-        popover.popdown()
-        self._context_popover = None
-        self.emit("delete-requested", self.entry.id)
+    def _on_mouse_pressed(self, gesture, n_press, x, y):
+        """Handle mouse press: right-click toggles selection mode; left-click in selection mode toggles checkbox."""
+        button = gesture.get_current_button()
+        if button == Gdk.BUTTON_SECONDARY:
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            if self._preview_popover:
+                self._preview_popover.popdown()
+            # Signal the panel to enter/exit selection mode
+            self.emit("selection-mode-requested", self.entry.id)
+        elif button == Gdk.BUTTON_PRIMARY and self._in_selection_mode:
+            # Toggle checkbox without activating the row
+            self._select_check.set_active(not self._select_check.get_active())
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)

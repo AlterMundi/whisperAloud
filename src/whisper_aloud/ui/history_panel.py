@@ -8,7 +8,7 @@ from typing import List, Protocol
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import GLib, GObject, Gtk
+from gi.repository import Gdk, GLib, GObject, Gtk
 
 from ..persistence.models import HistoryEntry
 from .history_item import HistoryItem
@@ -75,6 +75,9 @@ class HistoryPanel(Gtk.Box):
         self._current_query = ""
         self._show_favorites_only = False
 
+        # Multi-select delete mode
+        self._selection_mode = False
+
         self._build_ui()
 
         # Load initial data
@@ -103,6 +106,14 @@ class HistoryPanel(Gtk.Box):
         refresh_btn.add_css_class("wa-ghost")
         refresh_btn.connect("clicked", lambda b: self.refresh_recent())
         header_box.append(refresh_btn)
+
+        # Delete selected button (hidden until selection mode)
+        self._delete_selected_btn = Gtk.Button(label="Delete")
+        self._delete_selected_btn.add_css_class("destructive-action")
+        self._delete_selected_btn.set_tooltip_text("Delete selected entries")
+        self._delete_selected_btn.set_visible(False)
+        self._delete_selected_btn.connect("clicked", self._on_delete_selected_clicked)
+        header_box.append(self._delete_selected_btn)
 
         self.append(header_box)
 
@@ -140,6 +151,10 @@ class HistoryPanel(Gtk.Box):
         self.list_box.add_css_class("rich-list")
         self.list_box.add_css_class("wa-history-list")
         scrolled.set_child(self.list_box)
+
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_key_pressed)
+        self.list_box.add_controller(key_controller)
 
         self.append(scrolled)
 
@@ -220,6 +235,11 @@ class HistoryPanel(Gtk.Box):
         Returns:
             False to remove idle callback
         """
+        # Exit selection mode (items are being replaced)
+        if self._selection_mode:
+            self._selection_mode = False
+            self._delete_selected_btn.set_visible(False)
+
         # Clear existing
         while (child := self.list_box.get_first_child()):
             self.list_box.remove(child)
@@ -257,6 +277,7 @@ class HistoryPanel(Gtk.Box):
                 item = HistoryItem(entry)
                 item.connect("favorite-toggled", self._on_favorite_toggled_item)
                 item.connect("delete-requested", self._on_delete_requested)
+                item.connect("selection-mode-requested", self._on_selection_mode_requested)
                 self.list_box.append(item)
 
         return False
@@ -298,6 +319,78 @@ class HistoryPanel(Gtk.Box):
                     success = self.history_manager.delete(entry_id)
                     if success:
                         self.refresh_recent()
+            except Exception:
+                pass
+
+        dialog.choose(self.get_root(), None, on_choose)
+
+    def _on_key_pressed(self, controller, keyval, keycode, state) -> bool:
+        """Exit selection mode on Escape."""
+        if self._selection_mode and keyval == Gdk.KEY_Escape:
+            self._exit_selection_mode()
+            return True
+        return False
+
+    def _on_selection_mode_requested(self, item, entry_id: int) -> None:
+        """Enter selection mode (first right-click) or exit it (second right-click)."""
+        if not self._selection_mode:
+            self._enter_selection_mode(entry_id)
+        else:
+            self._exit_selection_mode()
+
+    def _enter_selection_mode(self, initial_id: int) -> None:
+        """Switch all items to selection mode and pre-select the triggering item."""
+        self._selection_mode = True
+        self._delete_selected_btn.set_visible(True)
+        child = self.list_box.get_first_child()
+        while child:
+            if isinstance(child, HistoryItem):
+                child.set_selection_mode(True)
+                child.set_selected(child.entry.id == initial_id)
+            child = child.get_next_sibling()
+
+    def _exit_selection_mode(self) -> None:
+        """Return all items to normal mode and hide the Delete button."""
+        self._selection_mode = False
+        self._delete_selected_btn.set_visible(False)
+        child = self.list_box.get_first_child()
+        while child:
+            if isinstance(child, HistoryItem):
+                child.set_selection_mode(False)
+            child = child.get_next_sibling()
+
+    def _on_delete_selected_clicked(self, button) -> None:
+        """Confirm and delete all checked entries."""
+        selected_ids = []
+        child = self.list_box.get_first_child()
+        while child:
+            if isinstance(child, HistoryItem) and child.get_selected():
+                selected_ids.append(child.entry.id)
+            child = child.get_next_sibling()
+
+        if not selected_ids:
+            return
+
+        count = len(selected_ids)
+        dialog = Gtk.AlertDialog()
+        dialog.set_message(
+            f"Delete {count} Transcription{'s' if count > 1 else ''}?"
+        )
+        dialog.set_detail(
+            "This action cannot be undone. The selected transcriptions will be permanently removed."
+        )
+        dialog.set_buttons(["Cancel", "Delete"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+
+        def on_choose(d, result):
+            try:
+                idx = d.choose_finish(result)
+                if idx == 1:
+                    for entry_id in selected_ids:
+                        self.history_manager.delete(entry_id)
+                    self._exit_selection_mode()
+                    self.refresh_recent()
             except Exception:
                 pass
 
