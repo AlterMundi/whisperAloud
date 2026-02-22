@@ -55,7 +55,7 @@ class HistoryItem(Gtk.ListBoxRow):
 
         self._select_check = Gtk.CheckButton()
         self._select_check.set_valign(Gtk.Align.CENTER)
-        self._select_check.set_width_request(24)
+        self._select_check.set_size_request(24, -1)
 
         self._time_stack.add_named(time_label, "time")
         self._time_stack.add_named(self._select_check, "select")
