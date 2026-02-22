@@ -792,8 +792,6 @@ class SettingsDialog(Gtk.Window):
         self.edit_history_switch = Gtk.Switch()
         if self._config.persistence:
             self.edit_history_switch.set_active(self._config.persistence.edit_history_enabled)
-        else:
-            self.edit_history_switch.set_active(True)
 
         edit_history_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         edit_history_label = Gtk.Label(label="Allow editing transcriptions:")
