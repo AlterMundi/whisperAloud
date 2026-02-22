@@ -227,6 +227,7 @@ class WhisperAloudService:
                 self.config.audio,
                 level_callback=self._on_level,
                 processing_config=self.config.audio_processing,
+                auto_stop_callback=self._on_recorder_auto_stop,
             )
             self.transcriber = Transcriber(self.config)
             # Model loading deferred to _ensure_model_loaded()
@@ -539,6 +540,7 @@ class WhisperAloudService:
                 new_config.audio,
                 level_callback=self._on_level,
                 processing_config=new_config.audio_processing,
+                auto_stop_callback=self._on_recorder_auto_stop,
             )
 
         # Check if hotkey config changed
@@ -615,6 +617,38 @@ class WhisperAloudService:
         self._peak_level = 0.0
         self.LevelUpdate(level)
         return True  # Keep timer running
+
+    # ─── Auto-stop handler ───────────────────────────────────────────────
+
+    def _on_recorder_auto_stop(self, audio_data) -> None:
+        """Called by AudioRecorder when max_recording_duration is reached.
+
+        Mirrors StopRecording() post-stop logic: stop timer, restore gain,
+        resume media, emit signals, and submit audio for transcription.
+        Must be safe to call from any thread (AudioRecorder spawns a daemon thread).
+        """
+        logger.info("Auto-stop triggered by max recording duration")
+        self._stop_level_timer()
+        rf = self.config.recording_flow
+        try:
+            self._gain.restore()
+        except Exception as e:
+            logger.warning(f"Gain restore on auto-stop failed: {e}")
+        try:
+            if rf.pause_media:
+                self._mpris.resume_ours(delay_ms=rf.post_resume_delay_ms)
+        except Exception as e:
+            logger.warning(f"Media resume on auto-stop failed: {e}")
+
+        self.RecordingStopped()
+        self.StatusChanged("transcribing")
+        if self.indicator:
+            self.indicator.set_state("transcribing")
+        if self.notifications:
+            self.notifications.show_recording_stopped()
+
+        self._transcribing = True
+        self.executor.submit(self._transcribe_and_emit, audio_data)
 
     # ─── Signal handling ─────────────────────────────────────────────────
 

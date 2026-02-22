@@ -44,7 +44,8 @@ class AudioRecorder:
         self,
         config: AudioConfig,
         level_callback: Optional[Callable[[AudioLevel], None]] = None,
-        processing_config: Optional[AudioProcessingConfig] = None
+        processing_config: Optional[AudioProcessingConfig] = None,
+        auto_stop_callback: Optional[Callable[["np.ndarray"], None]] = None,
     ):
         """
         Initialize recorder.
@@ -56,6 +57,7 @@ class AudioRecorder:
         """
         self.config = config
         self.level_callback = level_callback
+        self.auto_stop_callback = auto_stop_callback
 
         # State
         self._state = RecordingState.IDLE
@@ -137,7 +139,12 @@ class AudioRecorder:
     def _auto_stop(self) -> None:
         """Stop recording when max duration is reached (called from a thread, not the callback)."""
         try:
-            self.stop()
+            audio_data = self.stop()
+            if self.auto_stop_callback is not None:
+                try:
+                    self.auto_stop_callback(audio_data)
+                except Exception as e:
+                    logger.error(f"Auto-stop callback failed: {e}")
         except Exception as e:
             logger.error(f"Auto-stop failed: {e}")
             self._set_state(RecordingState.ERROR)
