@@ -52,6 +52,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._timer_active: bool = False
         self._timer_seconds: int = 0
         self._daemon_available: bool = False
+        self._current_entry_id: Optional[int] = None
+        self._edit_save_timer_id: int = 0
 
         # D-Bus client (replaces direct component access)
         from ..service.client import WhisperAloudClient
@@ -217,6 +219,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.text_view.set_margin_end(12)
         self.text_view.set_margin_top(12)
         self.text_view.set_margin_bottom(12)
+        self.text_view.get_buffer().connect("changed", self._on_text_buffer_changed)
 
         scrolled.set_child(self.text_view)
         transcription_box.append(scrolled)
@@ -664,6 +667,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # Display transcription text
         buffer = self.text_view.get_buffer()
         buffer.set_text(text)
+        history_id = int(meta.get("history_id", -1)) if isinstance(meta, dict) else -1
+        self._set_current_entry(history_id if history_id > 0 else None)
 
         # Update status with metadata
         duration = meta.get("duration", 0.0) if isinstance(meta, dict) else 0.0
@@ -938,6 +943,44 @@ class MainWindow(Gtk.ApplicationWindow):
         logger.debug("Copy button clicked")
         self._copy_to_clipboard()
 
+    def _set_current_entry(self, entry_id: Optional[int]) -> None:
+        """Track which history entry is displayed and update text_view editability."""
+        self._current_entry_id = entry_id
+        editable = (
+            entry_id is not None
+            and self.config is not None
+            and self.config.persistence.edit_history_enabled
+        )
+        self.text_view.set_editable(editable)
+        self.text_view.set_cursor_visible(editable)
+
+    def _on_text_buffer_changed(self, buffer: Gtk.TextBuffer) -> None:
+        """Debounce edits: reset 1.5s timer on every keystroke."""
+        if not self._current_entry_id or not self.client:
+            return
+        if self._edit_save_timer_id:
+            GLib.source_remove(self._edit_save_timer_id)
+            self._edit_save_timer_id = 0
+        self._edit_save_timer_id = GLib.timeout_add(1500, self._flush_edit)
+
+    def _flush_edit(self) -> bool:
+        """Save current text_view content to history entry."""
+        self._edit_save_timer_id = 0
+        if not self._current_entry_id or not self.client:
+            return GLib.SOURCE_REMOVE
+        buffer = self.text_view.get_buffer()
+        text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+        try:
+            ok = self.client.update_history_entry(self._current_entry_id, text)
+            if ok:
+                self.status_bar.set_status("Saved", timeout_ms=2000)
+            else:
+                self.status_bar.set_status("Save failed")
+        except Exception as e:
+            logger.warning(f"Auto-save failed: {e}")
+            self.status_bar.set_status("Save failed")
+        return GLib.SOURCE_REMOVE
+
     def _copy_to_clipboard(self) -> None:
         """Copy transcription text to clipboard using GTK4 clipboard API."""
         buffer = self.text_view.get_buffer()
@@ -972,6 +1015,7 @@ class MainWindow(Gtk.ApplicationWindow):
         logger.debug("Clear button clicked")
         buffer = self.text_view.get_buffer()
         buffer.set_text("")
+        self._set_current_entry(None)
         self.copy_button.set_sensitive(False)
         self.clear_button.set_sensitive(False)
 
@@ -1095,20 +1139,31 @@ class MainWindow(Gtk.ApplicationWindow):
             self.paned.set_start_child(None)
 
     def _on_history_entry_selected(self, panel, entry):
-        """Handle history entry selection."""
+        """Handle history entry selection — loads text and copies to clipboard."""
         buffer = self.text_view.get_buffer()
         buffer.set_text(entry.text)
-
-        # Update status
-        confidence_pct = int(entry.confidence * 100)
-        self.status_bar.set_status(
-            f"Loaded from history (Confidence: {confidence_pct}%, "
-            f"Duration: {entry.duration:.1f}s)"
-        )
+        self._set_current_entry(entry.id)
 
         self.set_state(AppState.READY)
         self.copy_button.set_sensitive(True)
         self.clear_button.set_sensitive(True)
+
+        # Auto-copy to clipboard on selection
+        try:
+            clipboard = self.get_clipboard()
+            clipboard.set(entry.text)
+            confidence_pct = int(entry.confidence * 100)
+            self.status_bar.set_status(
+                f"Copied to clipboard (Confidence: {confidence_pct}%, "
+                f"Duration: {entry.duration:.1f}s)"
+            )
+        except Exception as e:
+            logger.error(f"Clipboard error on history selection: {e}")
+            confidence_pct = int(entry.confidence * 100)
+            self.status_bar.set_status(
+                f"Loaded from history (Confidence: {confidence_pct}%, "
+                f"Duration: {entry.duration:.1f}s)"
+            )
 
     def _update_model_info(self) -> None:
         """Update status bar and language button with current model info."""
