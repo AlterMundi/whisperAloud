@@ -223,7 +223,16 @@ class HistoryManager:
         return success
 
     def update_text(self, entry_id: int, text: str) -> bool:
-        """Update the transcribed text of an entry."""
+        """
+        Update the transcribed text of an entry.
+
+        Args:
+            entry_id: ID of entry to update
+            text: New transcribed text
+
+        Returns:
+            True if update succeeded, False if entry not found
+        """
         success = self.db.update(entry_id, text=text)
         if success:
             logger.debug(f"Updated text for entry {entry_id}")
