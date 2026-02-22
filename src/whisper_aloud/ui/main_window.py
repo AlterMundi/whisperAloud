@@ -1013,9 +1013,9 @@ class MainWindow(Gtk.ApplicationWindow):
             button: The button that was clicked
         """
         logger.debug("Clear button clicked")
+        self._set_current_entry(None)
         buffer = self.text_view.get_buffer()
         buffer.set_text("")
-        self._set_current_entry(None)
         self.copy_button.set_sensitive(False)
         self.clear_button.set_sensitive(False)
 
@@ -1189,6 +1189,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # Stop status bar monitoring
         if hasattr(self, 'status_bar'):
             self.status_bar.cleanup()
+
+        # Cancel pending edit-save timer before disconnecting
+        if self._edit_save_timer_id:
+            GLib.source_remove(self._edit_save_timer_id)
+            self._edit_save_timer_id = 0
 
         # Disconnect D-Bus client
         if self.client:
