@@ -19,6 +19,44 @@ except (ImportError, ValueError) as e:
     logger.info(f"AppIndicator not available: {e}")
 
 
+def _is_gnome_no_appindicator() -> bool:
+    """Return True on GNOME desktops where the AppIndicator extension is absent."""
+    import os
+    import subprocess
+
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    if "gnome" not in desktop:
+        return False
+    try:
+        result = subprocess.run(
+            ["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
+            capture_output=True, text=True, timeout=3
+        )
+        exts = result.stdout.lower()
+        return "appindicatorsupport" not in exts and "ubuntu-appindicators" not in exts
+    except Exception:
+        return False
+
+
+def _show_gnome_tray_nudge() -> None:
+    """Show a one-time notification explaining how to enable the tray on GNOME."""
+    import subprocess
+
+    try:
+        subprocess.Popen([
+            "notify-send",
+            "--app-name=WhisperAloud",
+            "--icon=audio-input-microphone-symbolic",
+            "--urgency=low",
+            "WhisperAloud: tray icon unavailable",
+            "GNOME does not show tray icons by default.\n"
+            "Install the 'AppIndicator' GNOME extension to enable it.\n"
+            "The app works normally — use the hotkey or CLI.",
+        ])
+    except Exception:
+        pass  # notify-send not available — degrade silently
+
+
 class WhisperAloudIndicator:
     """System tray indicator for WhisperAloud.
 
@@ -59,6 +97,9 @@ class WhisperAloudIndicator:
 
         if not self._available:
             logger.warning("AppIndicator not available, tray icon disabled")
+            # One-time nudge when running on GNOME without AppIndicator extension
+            if _is_gnome_no_appindicator():
+                _show_gnome_tray_nudge()
             return
 
         try:
@@ -74,6 +115,9 @@ class WhisperAloudIndicator:
         except Exception as e:
             logger.warning(f"Failed to create AppIndicator: {e}")
             self._available = False
+            # One-time nudge when running on GNOME without AppIndicator extension
+            if _is_gnome_no_appindicator():
+                _show_gnome_tray_nudge()
 
     @property
     def available(self) -> bool:
