@@ -54,6 +54,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._daemon_available: bool = False
         self._current_entry_id: Optional[int] = None
         self._edit_save_timer_id: int = 0
+        self._buffer_changed_handler_id: int = 0
 
         # D-Bus client (replaces direct component access)
         from ..service.client import WhisperAloudClient
@@ -219,7 +220,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.text_view.set_margin_end(12)
         self.text_view.set_margin_top(12)
         self.text_view.set_margin_bottom(12)
-        self.text_view.get_buffer().connect("changed", self._on_text_buffer_changed)
+        self._buffer_changed_handler_id = self.text_view.get_buffer().connect(
+            "changed", self._on_text_buffer_changed
+        )
 
         scrolled.set_child(self.text_view)
         transcription_box.append(scrolled)
@@ -669,9 +672,9 @@ class MainWindow(Gtk.ApplicationWindow):
         buffer = self.text_view.get_buffer()
         history_id = int(meta.get("history_id", -1)) if isinstance(meta, dict) else -1
         self._set_current_entry(history_id if history_id > 0 else None)
-        buffer.handler_block_by_func(self._on_text_buffer_changed)
+        buffer.handler_block(self._buffer_changed_handler_id)
         buffer.set_text(text)
-        buffer.handler_unblock_by_func(self._on_text_buffer_changed)
+        buffer.handler_unblock(self._buffer_changed_handler_id)
 
         # Update status with metadata
         duration = meta.get("duration", 0.0) if isinstance(meta, dict) else 0.0
@@ -1150,9 +1153,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Set entry_id before loading text so the "changed" signal guard sees None→id,
         # then block the signal to prevent arming the debounce timer on a programmatic load.
         self._set_current_entry(entry.id)
-        buffer.handler_block_by_func(self._on_text_buffer_changed)
+        buffer.handler_block(self._buffer_changed_handler_id)
         buffer.set_text(entry.text)
-        buffer.handler_unblock_by_func(self._on_text_buffer_changed)
+        buffer.handler_unblock(self._buffer_changed_handler_id)
 
         self.set_state(AppState.READY)
         self.copy_button.set_sensitive(True)
