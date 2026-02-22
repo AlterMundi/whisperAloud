@@ -664,11 +664,14 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         logger.info(f"Transcription received: {len(text)} characters")
 
-        # Display transcription text
+        # Display transcription text — block "changed" signal while loading to
+        # avoid arming the debounce timer against the outgoing entry_id.
         buffer = self.text_view.get_buffer()
-        buffer.set_text(text)
         history_id = int(meta.get("history_id", -1)) if isinstance(meta, dict) else -1
         self._set_current_entry(history_id if history_id > 0 else None)
+        buffer.handler_block_by_func(self._on_text_buffer_changed)
+        buffer.set_text(text)
+        buffer.handler_unblock_by_func(self._on_text_buffer_changed)
 
         # Update status with metadata
         duration = meta.get("duration", 0.0) if isinstance(meta, dict) else 0.0
@@ -1122,6 +1125,9 @@ class MainWindow(Gtk.ApplicationWindow):
             # Update model info display
             self._update_model_info()
 
+            # Re-evaluate text_view editability with fresh config
+            self._set_current_entry(self._current_entry_id)
+
         except Exception as e:
             logger.error(f"Error in _on_settings_saved: {e}", exc_info=True)
             self.status_bar.set_status("Error updating settings")
@@ -1141,8 +1147,12 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_history_entry_selected(self, panel, entry):
         """Handle history entry selection — loads text and copies to clipboard."""
         buffer = self.text_view.get_buffer()
-        buffer.set_text(entry.text)
+        # Set entry_id before loading text so the "changed" signal guard sees None→id,
+        # then block the signal to prevent arming the debounce timer on a programmatic load.
         self._set_current_entry(entry.id)
+        buffer.handler_block_by_func(self._on_text_buffer_changed)
+        buffer.set_text(entry.text)
+        buffer.handler_unblock_by_func(self._on_text_buffer_changed)
 
         self.set_state(AppState.READY)
         self.copy_button.set_sensitive(True)
