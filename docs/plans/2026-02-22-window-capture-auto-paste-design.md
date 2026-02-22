@@ -4,9 +4,17 @@
 
 **Goal:** When the user stops recording, capture the active window ID so auto-paste goes to that window even if the user switches windows during transcription.
 
-**Architecture:** Multi-backend WindowManager (GNOME Extension D-Bus → xdotool → none) captures the active window at StopRecording time. The GNOME Shell extension exports its own D-Bus service for window queries. The daemon stores the captured WindowInfo and activates it before pasting. Configurable via `paste_to_captured_window` bool (default True).
+**Architecture:** Multi-backend WindowManager (GNOME Extension D-Bus → xdotool → none) captures the active window at StopRecording time. The GNOME Shell extension exports its own D-Bus service for window queries using Gio.DBusProxy (typed calls, no gdbus subprocess parsing). The daemon stores captured WindowInfo per-job and activates it before pasting. Configurable via `paste_to_captured_window` bool (default True).
 
-**Tech Stack:** Python (daemon + WindowManager), GJS (GNOME Shell extension D-Bus server), Gio.DBus (extension D-Bus export), xdotool (X11 fallback), subprocess (calling xdotool), GTK4 (settings toggle)
+**Tech Stack:** Python (daemon + WindowManager), GJS (GNOME Shell extension D-Bus server), Gio.DBus (extension D-Bus export + Python typed proxy), xdotool (X11 fallback), GTK4 (settings toggle)
+
+**Codex Review Fixes Applied:**
+1. GNOME 45+ D-Bus export: `wrapJSObject` needs `Gio.DBusInterfaceInfo` (parse XML first)
+2. Python GNOME backend uses `Gio.DBusProxy` typed calls (no gdbus subprocess + regex)
+3. Activation timestamp: `global.display.get_current_time_roundtrip()`
+4. Per-job window capture (no global `_captured_window` race)
+5. Window capture in auto-stop path too
+6. xdotool detection probes actual `getactivewindow` (not just `which`)
 
 ---
 
@@ -19,7 +27,7 @@
 
 **Step 1: Write the failing test**
 
-In `tests/test_config.py`, add a test that verifies the new field exists and round-trips:
+In `tests/test_config.py`, add:
 
 ```python
 def test_clipboard_paste_to_captured_window_default():
@@ -38,25 +46,23 @@ def test_clipboard_paste_to_captured_window_roundtrip():
 **Step 2: Run test to verify it fails**
 
 Run: `source ~/.venvs/whisper_aloud/bin/activate && python -m pytest tests/test_config.py -k "paste_to_captured_window" -v`
-Expected: FAIL — `AttributeError: 'ClipboardConfig' object has no attribute 'paste_to_captured_window'`
+Expected: FAIL — `AttributeError`
 
 **Step 3: Write minimal implementation**
 
-In `src/whisper_aloud/config.py`, add to `ClipboardConfig` (after line 130):
+In `ClipboardConfig` (after `fallback_path` field), add:
 
 ```python
 paste_to_captured_window: bool = True
 ```
 
-In `to_dict()` clipboard section (around line 246), add:
+In `to_dict()` clipboard section, add:
 
 ```python
 "paste_to_captured_window": self.clipboard.paste_to_captured_window,
 ```
 
-The `from_dict()` already handles unknown fields via `hasattr` check, so it will pick up the new field automatically.
-
-Add env var override in `_apply_env_overrides()` (after line 420):
+In `_apply_env_overrides()`, add:
 
 ```python
 self.clipboard.paste_to_captured_window = parse_bool_env(
@@ -67,9 +73,6 @@ self.clipboard.paste_to_captured_window = parse_bool_env(
 
 **Step 4: Run test to verify it passes**
 
-Run: `source ~/.venvs/whisper_aloud/bin/activate && python -m pytest tests/test_config.py -k "paste_to_captured_window" -v`
-Expected: PASS
-
 **Step 5: Commit**
 
 ```bash
@@ -79,12 +82,17 @@ git commit -m "feat(config): add paste_to_captured_window clipboard option"
 
 ---
 
-### Task 2: Create WindowManager module with xdotool backend
+### Task 2: Create WindowManager module with Gio.DBusProxy + xdotool backends
 
 **Files:**
 - Create: `src/whisper_aloud/clipboard/window_manager.py`
 - Modify: `src/whisper_aloud/clipboard/__init__.py`
 - Create: `tests/test_window_manager.py`
+
+**Codex fixes applied here:**
+- GNOME backend uses `Gio.DBusProxy.new_sync()` + typed `call_sync()` — no gdbus subprocess, no regex parsing
+- xdotool detection probes actual `getactivewindow` (not just `which`)
+- Gio import is try/except guarded (graceful when not available)
 
 **Step 1: Write the failing test**
 
@@ -105,48 +113,48 @@ class TestWindowInfo:
 
 
 class TestWindowManagerBackendDetection:
-    @patch("whisper_aloud.clipboard.window_manager.subprocess.run")
-    def test_detects_xdotool_when_available(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        wm = WindowManager()
-        # gnome-extension won't be available in test env
-        assert wm.backend in ("xdotool", "gnome-extension", "none")
-
-    def test_fallback_to_none(self):
+    def test_fallback_to_none_when_nothing_available(self):
         with patch("whisper_aloud.clipboard.window_manager.subprocess.run", side_effect=FileNotFoundError):
             with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
                 wm = WindowManager()
                 assert wm.backend == "none"
 
+    @patch("whisper_aloud.clipboard.window_manager.subprocess.run")
+    def test_xdotool_probes_getactivewindow(self, mock_run):
+        """xdotool detection runs actual getactivewindow, not just 'which'."""
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"12345\n")
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+            wm = WindowManager()
+            assert wm.backend == "xdotool"
+            # Verify it called xdotool getactivewindow, not which
+            mock_run.assert_called_once_with(
+                ["xdotool", "getactivewindow"],
+                capture_output=True, timeout=2,
+            )
+
 
 class TestXdotoolBackend:
     @patch("whisper_aloud.clipboard.window_manager.subprocess.run")
-    def test_get_active_window_xdotool(self, mock_run):
-        # First call: which xdotool (backend detection)
-        # Subsequent calls: getactivewindow, getwindowname
+    def test_get_active_window(self, mock_run):
         mock_run.side_effect = [
-            MagicMock(returncode=0),  # which xdotool
-            MagicMock(returncode=1),  # gdbus (gnome ext check fails)
             MagicMock(returncode=0, stdout=b"12345\n"),  # getactivewindow
             MagicMock(returncode=0, stdout=b"My Terminal\n"),  # getwindowname
         ]
-        with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
-            wm = WindowManager()
-            wm.backend = "xdotool"
-            info = wm.get_active_window()
-            assert info is not None
-            assert info.window_id == 12345
-            assert info.title == "My Terminal"
-            assert info.backend == "xdotool"
+        wm = WindowManager()
+        wm.backend = "xdotool"
+        info = wm.get_active_window()
+        assert info is not None
+        assert info.window_id == 12345
+        assert info.title == "My Terminal"
+        assert info.backend == "xdotool"
 
     @patch("whisper_aloud.clipboard.window_manager.subprocess.run")
-    def test_activate_window_xdotool(self, mock_run):
+    def test_activate_window(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         wm = WindowManager()
         wm.backend = "xdotool"
         info = WindowInfo(window_id=12345, title="Terminal", backend="xdotool")
-        result = wm.activate_window(info)
-        assert result is True
+        assert wm.activate_window(info) is True
 
 
 class TestNoneBackend:
@@ -164,9 +172,6 @@ class TestNoneBackend:
 
 **Step 2: Run test to verify it fails**
 
-Run: `source ~/.venvs/whisper_aloud/bin/activate && python -m pytest tests/test_window_manager.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'whisper_aloud.clipboard.window_manager'`
-
 **Step 3: Write minimal implementation**
 
 Create `src/whisper_aloud/clipboard/window_manager.py`:
@@ -180,6 +185,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Try to import Gio for typed D-Bus calls (GNOME backend)
+try:
+    from gi.repository import Gio, GLib
+    _HAS_GIO = True
+except ImportError:
+    _HAS_GIO = False
 
 
 @dataclass
@@ -197,11 +209,11 @@ class WindowManager:
     """
 
     def __init__(self) -> None:
+        self._gnome_proxy: Optional[object] = None
         self.backend = self._detect_backend()
         logger.info(f"WindowManager initialized with backend: {self.backend}")
 
     def _detect_backend(self) -> str:
-        """Detect the best available backend."""
         if self._check_gnome_extension():
             return "gnome-extension"
         if self._check_xdotool():
@@ -209,24 +221,33 @@ class WindowManager:
         return "none"
 
     def _check_gnome_extension(self) -> bool:
-        """Check if GNOME extension D-Bus service is available."""
+        """Check if GNOME extension D-Bus service is available via typed proxy."""
+        if not _HAS_GIO:
+            return False
         try:
-            result = subprocess.run(
-                ["gdbus", "call", "--session",
-                 "--dest", "org.gnome.Shell.Extensions.whisperaloud",
-                 "--object-path", "/org/fede/whisperaloud/Window",
-                 "--method", "org.fede.whisperaloud.Window.GetFocusedWindow"],
-                capture_output=True, timeout=2,
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            proxy = Gio.DBusProxy.new_sync(
+                bus, Gio.DBusProxyFlags.DO_NOT_AUTO_START, None,
+                "org.gnome.Shell.Extensions.whisperaloud",
+                "/org/fede/whisperaloud/Window",
+                "org.fede.whisperaloud.Window", None,
             )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+            res = proxy.call_sync(
+                "GetFocusedWindow", None,
+                Gio.DBusCallFlags.NONE, 2000, None,
+            )
+            if res is not None:
+                self._gnome_proxy = proxy
+                return True
+            return False
+        except Exception:
             return False
 
     def _check_xdotool(self) -> bool:
-        """Check if xdotool is available."""
+        """Probe xdotool by running actual getactivewindow (not just 'which')."""
         try:
             result = subprocess.run(
-                ["which", "xdotool"],
+                ["xdotool", "getactivewindow"],
                 capture_output=True, timeout=2,
             )
             return result.returncode == 0
@@ -234,7 +255,6 @@ class WindowManager:
             return False
 
     def get_active_window(self) -> Optional[WindowInfo]:
-        """Capture the currently focused window."""
         if self.backend == "gnome-extension":
             return self._get_active_gnome()
         elif self.backend == "xdotool":
@@ -242,83 +262,71 @@ class WindowManager:
         return None
 
     def activate_window(self, info: WindowInfo) -> bool:
-        """Activate (focus) a previously captured window."""
         if info.backend == "gnome-extension":
             return self._activate_gnome(info)
         elif info.backend == "xdotool":
             return self._activate_xdotool(info)
         return False
 
-    # ── GNOME Extension backend ─────────────────────────────────────────
+    # ── GNOME Extension backend (Gio.DBusProxy typed calls) ─────────────
+
+    def _ensure_gnome_proxy(self) -> bool:
+        if self._gnome_proxy is not None:
+            return True
+        if not _HAS_GIO:
+            return False
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            self._gnome_proxy = Gio.DBusProxy.new_sync(
+                bus, Gio.DBusProxyFlags.DO_NOT_AUTO_START, None,
+                "org.gnome.Shell.Extensions.whisperaloud",
+                "/org/fede/whisperaloud/Window",
+                "org.fede.whisperaloud.Window", None,
+            )
+            return True
+        except Exception:
+            return False
 
     def _get_active_gnome(self) -> Optional[WindowInfo]:
-        """Get active window via GNOME extension D-Bus."""
-        try:
-            result = subprocess.run(
-                ["gdbus", "call", "--session",
-                 "--dest", "org.gnome.Shell.Extensions.whisperaloud",
-                 "--object-path", "/org/fede/whisperaloud/Window",
-                 "--method", "org.fede.whisperaloud.Window.GetFocusedWindow"],
-                capture_output=True, timeout=2,
-            )
-            if result.returncode != 0:
-                return None
-            # Parse gdbus output: ({'id': <uint32 N>, 'title': <'...'>, ...},)
-            import ast
-            out = result.stdout.decode().strip()
-            # gdbus wraps in () — extract the dict portion
-            # Format: ({'id': <uint32 123>, 'title': <'Title'>},)
-            # We use a simpler approach: call with JSON output
-            return self._parse_gnome_window_output(out)
-        except Exception as e:
-            logger.warning(f"GNOME extension GetFocusedWindow failed: {e}")
+        if not self._ensure_gnome_proxy():
             return None
-
-    def _parse_gnome_window_output(self, raw: str) -> Optional[WindowInfo]:
-        """Parse gdbus call output for window info.
-
-        Expected format from gdbus call:
-        ({'id': <uint32 12345>, 'title': <'My Window'>, 'wm_class': <'MyApp'>},)
-        """
         try:
-            import re
-            id_match = re.search(r"'id':\s*<uint32\s+(\d+)>", raw)
-            title_match = re.search(r"'title':\s*<'([^']*)'", raw)
-            if not id_match:
+            res = self._gnome_proxy.call_sync(
+                "GetFocusedWindow", None,
+                Gio.DBusCallFlags.NONE, 2000, None,
+            )
+            d = res.get_child_value(0)
+            wid_v = d.lookup_value("id", None)
+            if wid_v is None:
                 return None
+            title_v = d.lookup_value("title", None)
             return WindowInfo(
-                window_id=int(id_match.group(1)),
-                title=title_match.group(1) if title_match else "",
+                window_id=int(wid_v.unpack()),
+                title=title_v.unpack() if title_v else "",
                 backend="gnome-extension",
             )
         except Exception as e:
-            logger.warning(f"Failed to parse GNOME window output: {e}")
+            logger.warning(f"GNOME GetFocusedWindow failed: {e}")
             return None
 
     def _activate_gnome(self, info: WindowInfo) -> bool:
-        """Activate window via GNOME extension D-Bus."""
-        try:
-            result = subprocess.run(
-                ["gdbus", "call", "--session",
-                 "--dest", "org.gnome.Shell.Extensions.whisperaloud",
-                 "--object-path", "/org/fede/whisperaloud/Window",
-                 "--method", "org.fede.whisperaloud.Window.ActivateWindow",
-                 str(info.window_id)],
-                capture_output=True, timeout=2,
-            )
-            if result.returncode == 0:
-                logger.info(f"Activated window {info.window_id} via GNOME extension")
-                return True
-            logger.warning(f"GNOME ActivateWindow failed: {result.stderr.decode()}")
+        if not self._ensure_gnome_proxy():
             return False
+        try:
+            v = GLib.Variant("(u)", (int(info.window_id),))
+            self._gnome_proxy.call_sync(
+                "ActivateWindow", v,
+                Gio.DBusCallFlags.NONE, 3000, None,
+            )
+            logger.info(f"Activated window {info.window_id} via GNOME extension")
+            return True
         except Exception as e:
-            logger.warning(f"GNOME extension ActivateWindow failed: {e}")
+            logger.warning(f"GNOME ActivateWindow failed: {e}")
             return False
 
     # ── xdotool backend ─────────────────────────────────────────────────
 
     def _get_active_xdotool(self) -> Optional[WindowInfo]:
-        """Get active window via xdotool."""
         try:
             result = subprocess.run(
                 ["xdotool", "getactivewindow"],
@@ -327,7 +335,6 @@ class WindowManager:
             if result.returncode != 0:
                 return None
             window_id = int(result.stdout.decode().strip())
-            # Try to get window name
             title = ""
             try:
                 name_result = subprocess.run(
@@ -344,7 +351,6 @@ class WindowManager:
             return None
 
     def _activate_xdotool(self, info: WindowInfo) -> bool:
-        """Activate window via xdotool."""
         try:
             result = subprocess.run(
                 ["xdotool", "windowactivate", "--sync", str(info.window_id)],
@@ -377,16 +383,13 @@ __all__ = [
 ]
 ```
 
-**Step 4: Run test to verify it passes**
-
-Run: `source ~/.venvs/whisper_aloud/bin/activate && python -m pytest tests/test_window_manager.py -v`
-Expected: PASS
+**Step 4: Run tests**
 
 **Step 5: Commit**
 
 ```bash
 git add src/whisper_aloud/clipboard/window_manager.py src/whisper_aloud/clipboard/__init__.py tests/test_window_manager.py
-git commit -m "feat(clipboard): add WindowManager with xdotool + gnome-extension backends"
+git commit -m "feat(clipboard): add WindowManager with Gio.DBusProxy + xdotool backends"
 ```
 
 ---
@@ -396,18 +399,22 @@ git commit -m "feat(clipboard): add WindowManager with xdotool + gnome-extension
 **Files:**
 - Modify: `contrib/gnome-shell-extension/whisperaloud@fede/extension.js`
 
-**Step 1: Plan the D-Bus interface**
+**Codex fixes applied here:**
+- Parse XML to `Gio.DBusNodeInfo` then get `.interfaces[0]` for `wrapJSObject`
+- Use `global.display.get_current_time_roundtrip()` for activation timestamp
+- Add `GLib` import
 
-The extension needs to export its own D-Bus object at a separate path (`/org/fede/whisperaloud/Window`) on a well-known name (`org.gnome.Shell.Extensions.whisperaloud`). We cannot reuse the daemon's bus name because the extension runs inside gnome-shell, not the daemon process.
+**Step 1: Implement the extension D-Bus server**
 
-However, since the extension already runs inside gnome-shell which owns `org.gnome.Shell`, a simpler approach is to use `Gio.DBusExportedObject` on the session bus under a new well-known name that the extension owns.
-
-**Step 2: Implement the extension D-Bus server**
-
-Add to `extension.js` — a new class `WindowDBusService` that exports two methods, and register it in `enable()`:
+Add `GLib` import at top of `extension.js`:
 
 ```javascript
-// ── D-Bus interface XML for window management ────────────────────────
+import GLib from 'gi://GLib';
+```
+
+Add D-Bus interface XML and `WindowDBusService` class before `WhisperAloudExtension`:
+
+```javascript
 const WINDOW_IFACE_XML = `
 <node>
   <interface name="org.fede.whisperaloud.Window">
@@ -421,14 +428,18 @@ const WINDOW_IFACE_XML = `
   </interface>
 </node>`;
 
+// GNOME 45+ ESM: wrapJSObject requires Gio.DBusInterfaceInfo, not raw XML
+const WINDOW_NODE  = Gio.DBusNodeInfo.new_for_xml(WINDOW_IFACE_XML);
+const WINDOW_IFACE = WINDOW_NODE.interfaces[0];
+
 class WindowDBusService {
     constructor() {
-        this._dbusId = null;
+        this._impl   = null;
         this._nameId = null;
     }
 
     enable() {
-        this._impl = Gio.DBusExportedObject.wrapJSObject(WINDOW_IFACE_XML, this);
+        this._impl = Gio.DBusExportedObject.wrapJSObject(WINDOW_IFACE, this);
         this._impl.export(Gio.DBus.session, '/org/fede/whisperaloud/Window');
         this._nameId = Gio.bus_own_name(
             Gio.BusType.SESSION,
@@ -451,9 +462,7 @@ class WindowDBusService {
 
     GetFocusedWindow() {
         const win = global.display.get_focus_window();
-        if (!win) {
-            return {};
-        }
+        if (!win) return {};
         return {
             'id':       GLib.Variant.new_uint32(win.get_id()),
             'title':    GLib.Variant.new_string(win.get_title() || ''),
@@ -466,7 +475,8 @@ class WindowDBusService {
         for (const actor of actors) {
             const win = actor.meta_window;
             if (win.get_id() === window_id) {
-                win.activate(global.get_current_time());
+                // Use roundtrip timestamp to avoid focus-steal prevention
+                win.activate(global.display.get_current_time_roundtrip());
                 return true;
             }
         }
@@ -475,65 +485,19 @@ class WindowDBusService {
 }
 ```
 
-In the `WhisperAloudExtension` class, add `_windowService`:
+Update `WhisperAloudExtension.enable()` and `disable()` to manage the window service.
 
-```javascript
-export default class WhisperAloudExtension extends Extension {
-    enable() {
-        let settings = null;
-        try {
-            settings = this.getSettings();
-        } catch (e) {
-            console.warn(`WhisperAloud: getSettings() failed: ${e}. Keybinding disabled.`);
-        }
-        this._indicator = new WhisperAloudIndicator(settings);
-        Main.panel.addToStatusArea('whisperaloud', this._indicator);
-
-        this._windowService = new WindowDBusService();
-        this._windowService.enable();
-    }
-
-    disable() {
-        if (this._windowService) {
-            this._windowService.disable();
-            this._windowService = null;
-        }
-        if (this._indicator) {
-            this._indicator.removeKeybinding();
-            this._indicator.destroy();
-            this._indicator = null;
-        }
-    }
-}
-```
-
-Also add the GLib import at the top of extension.js (it's not currently imported):
-
-```javascript
-import GLib from 'gi://GLib';
-```
-
-**Step 3: Test manually**
-
-After installing and reloading the extension (`gnome-extensions disable whisperaloud@fede && gnome-extensions enable whisperaloud@fede`), verify:
+**Step 2: Test manually**
 
 ```bash
+gnome-extensions disable whisperaloud@fede && gnome-extensions enable whisperaloud@fede
 gdbus call --session \
   --dest org.gnome.Shell.Extensions.whisperaloud \
   --object-path /org/fede/whisperaloud/Window \
   --method org.fede.whisperaloud.Window.GetFocusedWindow
-
-# Expected: ({'id': <uint32 NNNNN>, 'title': <'...'>, 'wm_class': <'...'>},)
-
-gdbus call --session \
-  --dest org.gnome.Shell.Extensions.whisperaloud \
-  --object-path /org/fede/whisperaloud/Window \
-  --method org.fede.whisperaloud.Window.ActivateWindow uint32:NNNNN
-
-# Expected: (true,)
 ```
 
-**Step 4: Commit**
+**Step 3: Commit**
 
 ```bash
 git add contrib/gnome-shell-extension/whisperaloud@fede/extension.js
@@ -542,117 +506,86 @@ git commit -m "feat(gnome-ext): add D-Bus GetFocusedWindow/ActivateWindow for wi
 
 ---
 
-### Task 4: Integrate WindowManager into daemon StopRecording + auto-paste
+### Task 4: Integrate WindowManager into daemon (per-job capture, both stop paths)
 
 **Files:**
-- Modify: `src/whisper_aloud/service/daemon.py:1-26` (imports)
-- Modify: `src/whisper_aloud/service/daemon.py:329-367` (StopRecording)
-- Modify: `src/whisper_aloud/service/daemon.py:725-755` (_emit_success)
+- Modify: `src/whisper_aloud/service/daemon.py`
 
-**Step 1: Write the failing test**
+**Codex fixes applied here:**
+- Per-job window capture via `_captured_by_job` dict (not single global)
+- Capture in both `StopRecording()` and auto-stop path (`_on_recorder_auto_stop` or equivalent)
+- Consume atomically before paste
+- Configurable focus-settle delay uses `paste_delay_ms`
 
-In `tests/test_daemon_window_capture.py`:
+**Step 1: Implementation**
 
-```python
-"""Tests for window capture in daemon auto-paste flow."""
-from unittest.mock import MagicMock, patch
-from whisper_aloud.clipboard.window_manager import WindowInfo
-
-
-class TestDaemonWindowCapture:
-    def test_stop_recording_captures_window_when_enabled(self):
-        """StopRecording should capture the active window when paste_to_captured_window is True."""
-        from whisper_aloud.clipboard.window_manager import WindowInfo
-        info = WindowInfo(window_id=42, title="Test", backend="xdotool")
-        # We test the logic pattern, not the full daemon (which needs D-Bus)
-        # The daemon stores _captured_window = window_manager.get_active_window()
-        assert info.window_id == 42
-
-    def test_window_info_none_when_disabled(self):
-        """When paste_to_captured_window is False, no window should be captured."""
-        # This is a config-level test - _captured_window stays None
-        captured = None  # simulating disabled
-        assert captured is None
-```
-
-**Step 2: Run test to verify it passes (these are logic sanity tests)**
-
-Run: `source ~/.venvs/whisper_aloud/bin/activate && python -m pytest tests/test_daemon_window_capture.py -v`
-
-**Step 3: Implement daemon integration**
-
-In `daemon.py` imports (line ~17), add:
+In `daemon.py` imports, add:
 
 ```python
 from ..clipboard import WindowManager
 ```
 
-In `__init__` or startup section, after clipboard_manager init, add:
+In init/startup, after clipboard_manager:
 
 ```python
 self.window_manager = WindowManager()
-self._captured_window = None
+self._captured_by_job: dict = {}  # job_id → WindowInfo
 ```
 
-In `StopRecording()` (around line 335, before `audio_data = self.recorder.stop()`), add:
+In `StopRecording()` — generate a `job_id`, capture window, pass to transcription:
 
 ```python
-# Capture active window for targeted paste
-self._captured_window = None
-if self.config.clipboard.paste_to_captured_window:
-    try:
-        self._captured_window = self.window_manager.get_active_window()
-        if self._captured_window:
-            logger.info(
-                f"Captured window for paste: {self._captured_window.title} "
-                f"(id={self._captured_window.window_id}, backend={self._captured_window.backend})"
-            )
-    except Exception as e:
-        logger.warning(f"Failed to capture window: {e}")
+def StopRecording(self) -> str:
+    # ... existing checks ...
+    job_id = uuid.uuid4().hex
+    captured = None
+    if self.config.clipboard.paste_to_captured_window:
+        try:
+            captured = self.window_manager.get_active_window()
+            if captured:
+                logger.info(f"Captured window for job {job_id[:8]}: "
+                            f"{captured.title} (id={captured.window_id})")
+        except Exception as e:
+            logger.warning(f"Failed to capture window: {e}")
+    if captured:
+        self._captured_by_job[job_id] = captured
+    # ... stop recorder, start transcription ...
+    self.executor.submit(self._transcribe_and_emit, audio_data, job_id)
+    return "transcribing"
 ```
 
-In `_emit_success()` (inside the auto-paste block, around line 748), replace the current paste thread with:
+Do the same in the auto-stop path (when max_recording_duration triggers).
+
+Update `_transcribe_and_emit` signature to accept `job_id`:
 
 ```python
-if (self.config.clipboard.auto_copy
-        and self.config.clipboard.auto_paste
-        and self.clipboard_manager
-        and result.text):
-    try:
-        from ..clipboard import PasteSimulator
-        import threading as _threading
-        simulator = PasteSimulator(
-            self.clipboard_manager._session_type,
-            self.config.clipboard,
-        )
-        captured = self._captured_window
-        self._captured_window = None  # consume it
-
-        def _do_paste():
-            if captured and self.config.clipboard.paste_to_captured_window:
-                try:
-                    self.window_manager.activate_window(captured)
-                    time.sleep(0.05)  # let focus settle
-                except Exception as e:
-                    logger.warning(f"Failed to activate captured window: {e}")
-            simulator.simulate_paste()
-
-        _threading.Thread(target=_do_paste, daemon=True).start()
-        logger.info("Auto-paste triggered")
-    except Exception as e:
-        logger.warning(f"Failed to trigger auto-paste: {e}")
+def _transcribe_and_emit(self, audio_data, job_id: str = "") -> None:
 ```
 
-**Step 4: Run full test suite**
+In `_emit_success`, consume captured window for this job:
 
-Run: `source ~/.venvs/whisper_aloud/bin/activate && python -m pytest -x -v`
-Expected: All existing tests pass
+```python
+captured = self._captured_by_job.pop(job_id, None)
 
-**Step 5: Commit**
+def _do_paste():
+    if captured and self.config.clipboard.paste_to_captured_window:
+        try:
+            self.window_manager.activate_window(captured)
+            time.sleep(self.config.clipboard.paste_delay_ms / 1000.0)
+        except Exception as e:
+            logger.warning(f"Failed to activate captured window: {e}")
+    simulator.simulate_paste()
+
+_threading.Thread(target=_do_paste, daemon=True).start()
+```
+
+**Step 2: Run full test suite**
+
+**Step 3: Commit**
 
 ```bash
-git add src/whisper_aloud/service/daemon.py tests/test_daemon_window_capture.py
-git commit -m "feat(daemon): capture active window at StopRecording for targeted paste"
+git add src/whisper_aloud/service/daemon.py
+git commit -m "feat(daemon): per-job window capture at StopRecording + auto-stop for targeted paste"
 ```
 
 ---
@@ -662,22 +595,15 @@ git commit -m "feat(daemon): capture active window at StopRecording for targeted
 **Files:**
 - Modify: `src/whisper_aloud/ui/settings_dialog.py`
 
-**Step 1: Identify insertion point**
-
-The settings dialog has a clipboard section. Find where `auto_paste` toggle is built and add the new toggle right after it.
-
-**Step 2: Add the toggle**
-
-In the clipboard settings section of `settings_dialog.py`, after the `auto_paste` switch row, add:
+**Step 1: Add toggle after auto_paste switch**
 
 ```python
-# Paste to captured window toggle
 captured_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
 captured_label = Gtk.Label(label="Paste to captured window")
 captured_label.set_hexpand(True)
 captured_label.set_halign(Gtk.Align.START)
 captured_label.set_tooltip_text(
-    "When enabled, paste goes to the window that was active when you stopped recording, "
+    "Paste goes to the window active when you stopped recording, "
     "even if you switch windows during transcription."
 )
 self._paste_captured_switch = Gtk.Switch()
@@ -687,17 +613,13 @@ captured_row.append(self._paste_captured_switch)
 clipboard_box.append(captured_row)
 ```
 
-In the save logic, add:
+**Step 2: Add to save logic**
 
 ```python
 self._config.clipboard.paste_to_captured_window = self._paste_captured_switch.get_active()
 ```
 
-**Step 3: Test manually**
-
-Launch `whisper-aloud-gui`, open Settings, verify the toggle appears in the Clipboard section and persists across save/reload.
-
-**Step 4: Commit**
+**Step 3: Commit**
 
 ```bash
 git add src/whisper_aloud/ui/settings_dialog.py
@@ -706,77 +628,19 @@ git commit -m "feat(ui): add paste-to-captured-window toggle in settings"
 
 ---
 
-### Task 6: Install updated GNOME extension and end-to-end test
+### Task 6: Install, reload extension, end-to-end test
 
-**Step 1: Install updated extension**
-
-```bash
-cd /home/fede/REPOS/whisperAloud
-bash install.sh  # or manually copy extension files
-```
-
-**Step 2: Reload GNOME extension**
-
-```bash
-gnome-extensions disable whisperaloud@fede
-gnome-extensions enable whisperaloud@fede
-```
-
-**Step 3: Verify D-Bus service**
-
-```bash
-gdbus call --session \
-  --dest org.gnome.Shell.Extensions.whisperaloud \
-  --object-path /org/fede/whisperaloud/Window \
-  --method org.fede.whisperaloud.Window.GetFocusedWindow
-```
-
-**Step 4: End-to-end test**
-
-1. Open a text editor (e.g., gedit)
-2. Press the recording hotkey
-3. Speak a sentence
-4. Switch to a different window (e.g., terminal)
-5. Press the stop hotkey
-6. Wait for transcription to complete
-7. Verify: the text editor gets focus back and the text is pasted there
-
-**Step 5: Test fallback (disable extension)**
-
-```bash
-gnome-extensions disable whisperaloud@fede
-```
-
-Repeat the test — should fall back to xdotool or current-window behavior.
-
-**Step 6: Final commit**
-
-```bash
-git add -A
-git commit -m "feat: window-capture auto-paste with GNOME extension + xdotool fallback"
-```
+1. Copy extension files + reload
+2. `gdbus call` to verify GetFocusedWindow works
+3. E2E: record in editor → switch to terminal → stop → verify paste goes to editor
+4. Test fallback with extension disabled
 
 ---
 
-### Task 7: Run full test suite and verify
-
-**Step 1: Run all tests**
+### Task 7: Full test suite + lint
 
 ```bash
-source ~/.venvs/whisper_aloud/bin/activate && python -m pytest -v
-```
-
-Expected: All tests pass (existing + new)
-
-**Step 2: Run linting**
-
-```bash
-source ~/.venvs/whisper_aloud/bin/activate && black --check src/ && ruff check src/
-```
-
-**Step 3: Fix any issues and commit**
-
-```bash
-git add -A
-git commit -m "chore: fix lint issues from window-capture feature"
+python -m pytest -v
+black --check src/
+ruff check src/
 ```
