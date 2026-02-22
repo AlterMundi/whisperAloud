@@ -60,6 +60,10 @@ class DaemonHistoryManager:
         """Toggle favorite status for one entry."""
         return self.client.toggle_history_favorite(int(entry_id))
 
+    def update_text(self, entry_id: int, text: str) -> bool:
+        """Update transcribed text for one entry via daemon."""
+        return self.client.update_history_entry(entry_id, text)
+
     def delete(self, entry_id: int) -> bool:
         """Delete one history entry."""
         return self.client.delete_history_entry(int(entry_id))

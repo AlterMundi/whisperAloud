@@ -66,6 +66,11 @@ class WhisperAloudService:
           <arg direction="in" type="i" name="entry_id"/>
           <arg direction="out" type="b" name="success"/>
         </method>
+        <method name="UpdateHistoryEntry">
+          <arg direction="in" type="i" name="entry_id"/>
+          <arg direction="in" type="s" name="text"/>
+          <arg direction="out" type="b" name="success"/>
+        </method>
         <method name="GetConfig">
           <arg direction="out" type="a{sv}" name="config"/>
         </method>
@@ -468,6 +473,15 @@ class WhisperAloudService:
             self.Error("history_delete_failed", str(e))
             return False
 
+    def UpdateHistoryEntry(self, entry_id: int, text: str) -> bool:
+        """Update the transcribed text of a history entry."""
+        try:
+            return self.history_manager.update_text(int(entry_id), str(text))
+        except Exception as e:
+            logger.error("UpdateHistoryEntry failed: %s", e)
+            self.Error("history_update_failed", str(e))
+            return False
+
     def GetConfig(self) -> dict:
         """Return current configuration flattened to GLib variants."""
         d = self.config.to_dict()
@@ -623,32 +637,34 @@ class WhisperAloudService:
     def _on_recorder_auto_stop(self, audio_data) -> None:
         """Called by AudioRecorder when max_recording_duration is reached.
 
-        Mirrors StopRecording() post-stop logic: stop timer, restore gain,
-        resume media, emit signals, and submit audio for transcription.
-        Must be safe to call from any thread (AudioRecorder spawns a daemon thread).
+        Called from a daemon thread — marshal all GLib/D-Bus work to the main loop.
         """
-        logger.info("Auto-stop triggered by max recording duration")
-        self._stop_level_timer()
-        rf = self.config.recording_flow
-        try:
-            self._gain.restore()
-        except Exception as e:
-            logger.warning(f"Gain restore on auto-stop failed: {e}")
-        try:
-            if rf.pause_media:
-                self._mpris.resume_ours(delay_ms=rf.post_resume_delay_ms)
-        except Exception as e:
-            logger.warning(f"Media resume on auto-stop failed: {e}")
+        def _on_main_thread():
+            logger.info("Auto-stop triggered by max recording duration")
+            self._stop_level_timer()
+            rf = self.config.recording_flow
+            try:
+                self._gain.restore()
+            except Exception as e:
+                logger.warning(f"Gain restore on auto-stop failed: {e}")
+            try:
+                if rf.pause_media:
+                    self._mpris.resume_ours(delay_ms=rf.post_resume_delay_ms)
+            except Exception as e:
+                logger.warning(f"Media resume on auto-stop failed: {e}")
 
-        self.RecordingStopped()
-        self.StatusChanged("transcribing")
-        if self.indicator:
-            self.indicator.set_state("transcribing")
-        if self.notifications:
-            self.notifications.show_recording_stopped()
+            self.RecordingStopped()
+            self.StatusChanged("transcribing")
+            if self.indicator:
+                self.indicator.set_state("transcribing")
+            if self.notifications:
+                self.notifications.show_recording_stopped()
 
-        self._transcribing = True
-        self.executor.submit(self._transcribe_and_emit, audio_data)
+            self._transcribing = True
+            self.executor.submit(self._transcribe_and_emit, audio_data)
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(_on_main_thread)
 
     # ─── Signal handling ─────────────────────────────────────────────────
 

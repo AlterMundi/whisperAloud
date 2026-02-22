@@ -209,6 +209,16 @@ class WhisperAloudClient:
             logger.warning(f"delete_history_entry failed: {e}")
             return False
 
+    def update_history_entry(self, entry_id: int, text: str) -> bool:
+        """Update the transcribed text of a history entry."""
+        if not self._connected or not self._proxy:
+            return False
+        try:
+            return self._proxy.UpdateHistoryEntry(entry_id, text)
+        except Exception as e:
+            logger.warning(f"update_history_entry failed: {e}")
+            return False
+
     def get_config(self) -> dict:
         """Get current configuration."""
         if not self._connected or not self._proxy:
