@@ -436,6 +436,7 @@ class SettingsDialog(Gtk.Window):
             "save_audio": self.save_audio_switch.get_active(),
             "dedupe_audio": self.deduplicate_audio_switch.get_active(),
             "auto_cleanup": self.auto_cleanup_switch.get_active(),
+            "edit_history": self.edit_history_switch.get_active(),
             "cleanup_days": self.cleanup_days_entry.get_text(),
             "max_entries": self.max_entries_entry.get_text(),
             "db_path": self.db_path_entry.get_text(),
@@ -473,6 +474,7 @@ class SettingsDialog(Gtk.Window):
             self.save_audio_switch,
             self.deduplicate_audio_switch,
             self.auto_cleanup_switch,
+            self.edit_history_switch,
             self.cleanup_days_entry,
             self.max_entries_entry,
             self.db_path_entry,
@@ -786,6 +788,21 @@ class SettingsDialog(Gtk.Window):
         cleanup_box.append(self.auto_cleanup_switch)
         page.append(cleanup_box)
 
+        # Edit history
+        self.edit_history_switch = Gtk.Switch()
+        if self._config.persistence:
+            self.edit_history_switch.set_active(self._config.persistence.edit_history_enabled)
+        else:
+            self.edit_history_switch.set_active(True)
+
+        edit_history_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        edit_history_label = Gtk.Label(label="Allow editing transcriptions:")
+        edit_history_label.set_halign(Gtk.Align.START)
+        edit_history_label.set_hexpand(True)
+        edit_history_box.append(edit_history_label)
+        edit_history_box.append(self.edit_history_switch)
+        page.append(edit_history_box)
+
         # Cleanup days
         cleanup_days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         cleanup_days_label = Gtk.Label(label="Cleanup after (days):")
@@ -953,6 +970,7 @@ class SettingsDialog(Gtk.Window):
             self._config.persistence.save_audio = self.save_audio_switch.get_active()
             self._config.persistence.deduplicate_audio = self.deduplicate_audio_switch.get_active()
             self._config.persistence.auto_cleanup_enabled = self.auto_cleanup_switch.get_active()
+            self._config.persistence.edit_history_enabled = self.edit_history_switch.get_active()
             self._config.persistence.auto_cleanup_days = InputValidator.validate_integer(
                 self.cleanup_days_entry.get_text(),
                 min_value=1,

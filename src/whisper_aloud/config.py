@@ -151,6 +151,7 @@ class PersistenceConfig:
     auto_cleanup_enabled: bool = True
     auto_cleanup_days: int = 90
     max_entries: int = 10000
+    edit_history_enabled: bool = True
 
     def __post_init__(self):
         """Set default paths if not provided."""
@@ -260,6 +261,7 @@ class WhisperAloudConfig:
                 "auto_cleanup_enabled": self.persistence.auto_cleanup_enabled,
                 "auto_cleanup_days": self.persistence.auto_cleanup_days,
                 "max_entries": self.persistence.max_entries,
+                "edit_history_enabled": self.persistence.edit_history_enabled,
             },
             "audio_processing": {
                 "noise_gate_enabled": self.audio_processing.noise_gate_enabled,
@@ -441,6 +443,9 @@ class WhisperAloudConfig:
         self.persistence.auto_cleanup_enabled = parse_bool_env('WHISPER_ALOUD_AUTO_CLEANUP', self.persistence.auto_cleanup_enabled)
         self.persistence.auto_cleanup_days = parse_int_env('WHISPER_ALOUD_CLEANUP_DAYS', self.persistence.auto_cleanup_days)
         self.persistence.max_entries = parse_int_env('WHISPER_ALOUD_MAX_ENTRIES', self.persistence.max_entries)
+        self.persistence.edit_history_enabled = parse_bool_env(
+            'WHISPER_ALOUD_EDIT_HISTORY', self.persistence.edit_history_enabled
+        )
 
         # Recording flow
         self.recording_flow.pause_media = parse_bool_env(
