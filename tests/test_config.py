@@ -221,10 +221,10 @@ def test_config_immutability():
 
 
 def test_clipboard_config_default_paste_shortcut():
-    """paste_shortcut defaults to ctrl+v."""
+    """paste_shortcut defaults to ctrl+shift+v."""
     from whisper_aloud.config import ClipboardConfig
     cfg = ClipboardConfig()
-    assert cfg.paste_shortcut == "ctrl+v"
+    assert cfg.paste_shortcut == "ctrl+shift+v"
 
 
 def test_clipboard_config_paste_shortcut_roundtrip():

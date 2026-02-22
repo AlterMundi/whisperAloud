@@ -124,7 +124,7 @@ class ClipboardConfig:
     auto_copy: bool = True
     auto_paste: bool = True
     paste_delay_ms: int = 100
-    paste_shortcut: str = "ctrl+v"   # "ctrl+v" or "ctrl+shift+v"
+    paste_shortcut: str = "ctrl+shift+v"   # "ctrl+v" or "ctrl+shift+v"
     timeout_seconds: float = 5.0
     fallback_to_file: bool = True
     fallback_path: str = "/tmp/whisper_aloud_clipboard.txt"
