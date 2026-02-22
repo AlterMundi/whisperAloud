@@ -535,6 +535,78 @@ install_cli_shims() {
     print_success "CLI shims installed"
 }
 
+# Install XDG autostart entry
+install_autostart() {
+    print_msg "Installing XDG autostart entry..."
+
+    local autostart_dir="$HOME/.config/autostart"
+    mkdir -p "$autostart_dir"
+
+    # Use the venv path so it works without PATH setup
+    cat > "$autostart_dir/whisper-aloud-autostart.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=WhisperAloud Daemon
+GenericName=Voice Transcription Daemon
+Comment=Start WhisperAloud background service at login
+Exec=sh -lc 'systemctl --user -q is-active whisper-aloud.service 2>/dev/null || $VENV_PATH/bin/whisper-aloud --daemon'
+Icon=audio-input-microphone-symbolic
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+NoDisplay=true
+StartupNotify=false
+EOF
+
+    print_success "XDG autostart entry installed"
+}
+
+# Install GNOME Shell extension
+install_gnome_extension() {
+    # Only install on GNOME desktops
+    local current_desktop="${XDG_CURRENT_DESKTOP:-}"
+    if [[ "$current_desktop" != *"GNOME"* ]]; then
+        print_msg "Not a GNOME desktop ($current_desktop), skipping GNOME extension"
+        return 0
+    fi
+
+    local ext_src="contrib/gnome-shell-extension/whisperaloud@fede"
+    if [ ! -d "$ext_src" ]; then
+        print_warning "GNOME extension source not found, skipping"
+        return 0
+    fi
+
+    print_msg "Installing GNOME Shell extension..."
+
+    local ext_dir="$HOME/.local/share/gnome-shell/extensions/whisperaloud@fede"
+    mkdir -p "$ext_dir"
+
+    cp -r "$ext_src/"* "$ext_dir/"
+
+    # Compile GSettings schema if present
+    if [ -d "$ext_dir/schemas" ]; then
+        if command -v glib-compile-schemas &>/dev/null; then
+            glib-compile-schemas "$ext_dir/schemas/"
+            print_success "GSettings schema compiled"
+        else
+            print_warning "glib-compile-schemas not found; schema not compiled"
+        fi
+    fi
+
+    # Enable the extension if gnome-extensions CLI is available
+    if command -v gnome-extensions &>/dev/null; then
+        if gnome-extensions enable whisperaloud@fede 2>/dev/null; then
+            print_success "GNOME extension installed and enabled"
+            print_warning "You may need to restart GNOME Shell (log out / log in) to see the panel icon"
+        else
+            print_success "GNOME extension installed"
+            print_warning "Enable it manually: gnome-extensions enable whisperaloud@fede"
+        fi
+    else
+        print_success "GNOME extension installed"
+        print_warning "Enable via GNOME Extensions app or: gnome-extensions enable whisperaloud@fede"
+    fi
+}
+
 # Install user systemd service and D-Bus activation
 install_user_service() {
     print_msg "Installing user systemd service..."
@@ -644,6 +716,23 @@ uninstall() {
         systemctl --user daemon-reload 2>/dev/null || true
     fi
 
+    # Remove autostart entry
+    local autostart_file="$HOME/.config/autostart/whisper-aloud-autostart.desktop"
+    if [ -f "$autostart_file" ]; then
+        rm "$autostart_file"
+        print_success "Removed XDG autostart entry"
+    fi
+
+    # Remove GNOME Shell extension
+    local ext_dir="$HOME/.local/share/gnome-shell/extensions/whisperaloud@fede"
+    if [ -d "$ext_dir" ]; then
+        if command -v gnome-extensions &>/dev/null; then
+            gnome-extensions disable whisperaloud@fede 2>/dev/null || true
+        fi
+        rm -rf "$ext_dir"
+        print_success "Removed GNOME Shell extension"
+    fi
+
     # Note about config and cache
     print_warning "Config and cache directories not removed:"
     echo "  - ~/.config/whisper_aloud/"
@@ -676,7 +765,8 @@ print_instructions() {
     echo -e "     ${BLUE}whisper-aloud-gui${NC}"
     echo ""
     if [ "$SKIP_USER_SERVICE" = false ]; then
-        echo "  3. Manage daemon via user service:"
+        echo "  3. Daemon starts automatically at login (XDG autostart)"
+        echo "     Manage via systemd:"
         echo -e "     ${BLUE}systemctl --user start whisper-aloud${NC}"
         echo -e "     ${BLUE}systemctl --user status whisper-aloud${NC}"
     else
@@ -684,6 +774,13 @@ print_instructions() {
         echo -e "     ${BLUE}whisper-aloud-daemon${NC}"
     fi
     echo ""
+
+    if [ -d "$HOME/.local/share/gnome-shell/extensions/whisperaloud@fede" ]; then
+        echo "  4. GNOME Shell extension installed"
+        echo "     Panel icon + hotkey available after next login"
+        echo ""
+    fi
+
     echo "  Or use the application menu (WhisperAloud)"
     echo ""
     echo "Add this to your ~/.bashrc for convenience:"
@@ -709,6 +806,8 @@ print_dry_run_plan() {
     echo "  - Install system deps: $([ "$SKIP_SYSTEM_DEPS" = false ] && echo "yes" || echo "no (--skip-system)")"
     echo "  - CUDA mode: $([ "$INSTALL_CUDA" = true ] && echo "force-install" || ([ "$CUDA_AUTO_DETECT" = true ] && echo "auto-detect" || echo "disabled"))"
     echo "  - Install user service: $([ "$SKIP_USER_SERVICE" = false ] && echo "yes" || echo "no (--skip-user-service)")"
+    echo "  - Install autostart: $([ "$SKIP_USER_SERVICE" = false ] && echo "yes" || echo "no (--skip-user-service)")"
+    echo "  - Install GNOME extension: $([[ "${XDG_CURRENT_DESKTOP:-}" == *"GNOME"* ]] && echo "yes" || echo "no (not GNOME)")"
     echo "  - Install desktop file: yes"
     echo ""
     echo "Command availability after install:"
@@ -837,10 +936,12 @@ main() {
         install_cli_shims
         if [ "$SKIP_USER_SERVICE" = false ]; then
             install_user_service
+            install_autostart
         else
-            print_warning "Skipping user service installation (--skip-user-service)"
+            print_warning "Skipping user service and autostart (--skip-user-service)"
         fi
         install_desktop_file
+        install_gnome_extension
         print_instructions
     else
         print_error "Installation verification failed"

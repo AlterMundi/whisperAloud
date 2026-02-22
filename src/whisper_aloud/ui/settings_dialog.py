@@ -101,6 +101,9 @@ class SettingsDialog(Gtk.Window):
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         """Intercept close to protect unsaved changes."""
+        if self._focus_close_source_id:
+            GLib.source_remove(self._focus_close_source_id)
+            self._focus_close_source_id = 0
         if should_block_close(
             allow_close=self._allow_close,
             unsaved_changes=self._has_unsaved_changes(),

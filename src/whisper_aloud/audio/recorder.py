@@ -166,7 +166,7 @@ class AudioRecorder:
 
         try:
             # Validate device
-            device_id = device_id or self.config.device_id
+            device_id = device_id if device_id is not None else self.config.device_id
             self._device = DeviceManager.validate_device(
                 device_id,
                 self.config.sample_rate,
