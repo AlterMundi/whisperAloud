@@ -21,7 +21,7 @@ def test_default_config():
     assert config.model.device == "auto"
     assert config.model.compute_type == "int8"
     assert config.model.download_root is None
-    assert config.transcription.language == "es"
+    assert config.transcription.language == "auto"
     assert config.transcription.beam_size == 5
     assert config.transcription.vad_filter is True
     assert config.transcription.task == "transcribe"

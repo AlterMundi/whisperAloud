@@ -90,7 +90,7 @@ MODEL_RELOAD_FIELDS: Set[str] = {"name", "device", "compute_type"}
 @dataclass
 class TranscriptionConfig:
     """Configuration for transcription settings."""
-    language: str = "es"
+    language: str = "auto"
     beam_size: int = 5
     vad_filter: bool = True
     task: str = "transcribe"
