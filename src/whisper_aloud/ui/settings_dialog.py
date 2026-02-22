@@ -391,6 +391,67 @@ class SettingsDialog(Gtk.Window):
         page.append(error_box)
 
         self._set_notification_type_switches_sensitive(self._config.notifications.enabled)
+
+        # --- Global Shortcut Section ---
+        hotkey_section = Gtk.Label(label="Global Shortcut")
+        hotkey_section.set_halign(Gtk.Align.START)
+        hotkey_section.add_css_class("heading")
+        hotkey_section.add_css_class("wa-section-title")
+        hotkey_section.set_margin_top(12)
+        page.append(hotkey_section)
+
+        # Status row: configured accel + backend hint
+        configured_accel = self._config.hotkey.toggle_recording or ""
+        status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        status_label = Gtk.Label(label="Global shortcut:")
+        status_label.set_halign(Gtk.Align.START)
+        status_label.set_hexpand(True)
+        status_value_label = Gtk.Label(label=configured_accel)
+        status_value_label.set_halign(Gtk.Align.END)
+        status_box.append(status_label)
+        status_box.append(status_value_label)
+        page.append(status_box)
+
+        # Accel entry row
+        accel_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        accel_label = Gtk.Label(label="Shortcut key:")
+        accel_label.set_halign(Gtk.Align.START)
+        accel_label.set_hexpand(True)
+        self.hotkey_accel_entry = Gtk.Entry()
+        self.hotkey_accel_entry.set_text(configured_accel)
+        self.hotkey_accel_entry.set_placeholder_text("<Super><Alt>r")
+        accel_box.append(accel_label)
+        accel_box.append(self.hotkey_accel_entry)
+        page.append(accel_box)
+
+        # Help box (always visible — backend status is only known at daemon startup)
+        hotkey_help_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        hotkey_help_box.add_css_class("wa-help")
+
+        hotkey_help_label = Gtk.Label()
+        hotkey_help_label.set_markup(
+            "No automatic hotkey backend detected.\n"
+            "To trigger WhisperAloud manually, create a system keyboard shortcut\n"
+            "pointing to the command:  <tt>whisper-aloud toggle</tt>"
+        )
+        hotkey_help_label.set_halign(Gtk.Align.START)
+        hotkey_help_label.set_wrap(True)
+        hotkey_help_label.set_xalign(0.0)
+
+        copy_cmd_button = Gtk.Button(label="Copy command")
+        copy_cmd_button.set_halign(Gtk.Align.START)
+
+        def _on_copy_command_clicked(_btn: Gtk.Button) -> None:
+            display = Gdk.Display.get_default()
+            if display is not None:
+                display.get_clipboard().set("whisper-aloud toggle")
+
+        copy_cmd_button.connect("clicked", _on_copy_command_clicked)
+
+        hotkey_help_box.append(hotkey_help_label)
+        hotkey_help_box.append(copy_cmd_button)
+        page.append(hotkey_help_box)
+
         self._style_setting_rows_in_page(page)
 
         self.stack.add_titled(page, "general", "General")
@@ -442,6 +503,7 @@ class SettingsDialog(Gtk.Window):
             "max_entries": self.max_entries_entry.get_text(),
             "db_path": self.db_path_entry.get_text(),
             "audio_archive_path": self.audio_archive_entry.get_text(),
+            "hotkey_accel": self.hotkey_accel_entry.get_text(),
         }
 
     def _has_unsaved_changes(self) -> bool:
@@ -480,6 +542,7 @@ class SettingsDialog(Gtk.Window):
             self.max_entries_entry,
             self.db_path_entry,
             self.audio_archive_entry,
+            self.hotkey_accel_entry,
         ]
 
         for widget in tracked_widgets:
@@ -982,6 +1045,9 @@ class SettingsDialog(Gtk.Window):
                 self.notification_transcription_completed_switch.get_active()
             )
             self._config.notifications.error = self.notification_error_switch.get_active()
+
+            logger.debug("Updating hotkey config")
+            self._config.hotkey.toggle_recording = self.hotkey_accel_entry.get_text().strip()
 
             logger.debug("Updating persistence config")
             # Update persistence config
