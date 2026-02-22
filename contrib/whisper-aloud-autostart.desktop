@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WhisperAloud Daemon
+GenericName=Voice Transcription Daemon
+Comment=Start WhisperAloud background service at login
+Exec=sh -lc 'systemctl --user -q is-active whisper-aloud.service 2>/dev/null || whisper-aloud --daemon'
+Icon=audio-input-microphone-symbolic
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+NoDisplay=true
+StartupNotify=false
