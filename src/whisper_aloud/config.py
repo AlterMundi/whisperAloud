@@ -128,6 +128,7 @@ class ClipboardConfig:
     timeout_seconds: float = 5.0
     fallback_to_file: bool = True
     fallback_path: str = "/tmp/whisper_aloud_clipboard.txt"
+    paste_to_captured_window: bool = True
 
 
 @dataclass
@@ -244,6 +245,7 @@ class WhisperAloudConfig:
                 "timeout_seconds": self.clipboard.timeout_seconds,
                 "fallback_to_file": self.clipboard.fallback_to_file,
                 "fallback_path": self.clipboard.fallback_path,
+                "paste_to_captured_window": self.clipboard.paste_to_captured_window,
             },
             "notifications": {
                 "enabled": self.notifications.enabled,
@@ -418,6 +420,10 @@ class WhisperAloudConfig:
         self.clipboard.timeout_seconds = parse_float_env('WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS', self.clipboard.timeout_seconds)
         self.clipboard.fallback_to_file = parse_bool_env('WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE', self.clipboard.fallback_to_file)
         self.clipboard.fallback_path = os.getenv('WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH', self.clipboard.fallback_path)
+        self.clipboard.paste_to_captured_window = parse_bool_env(
+            'WHISPER_ALOUD_CLIPBOARD_PASTE_TO_CAPTURED_WINDOW',
+            self.clipboard.paste_to_captured_window
+        )
 
         # Notifications
         self.notifications.enabled = parse_bool_env('WHISPER_ALOUD_NOTIFICATIONS_ENABLED', self.notifications.enabled)

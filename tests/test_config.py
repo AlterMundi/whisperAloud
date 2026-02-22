@@ -236,3 +236,17 @@ def test_clipboard_config_paste_shortcut_roundtrip():
     assert data["clipboard"]["paste_shortcut"] == "ctrl+shift+v"
     restored = WhisperAloudConfig.from_dict(data)
     assert restored.clipboard.paste_shortcut == "ctrl+shift+v"
+
+
+def test_clipboard_paste_to_captured_window_default():
+    """paste_to_captured_window defaults to True."""
+    config = WhisperAloudConfig()
+    assert config.clipboard.paste_to_captured_window is True
+
+
+def test_clipboard_paste_to_captured_window_roundtrip():
+    """paste_to_captured_window survives to_dict/from_dict."""
+    config = WhisperAloudConfig()
+    config.clipboard.paste_to_captured_window = False
+    restored = WhisperAloudConfig.from_dict(config.to_dict())
+    assert restored.clipboard.paste_to_captured_window is False
