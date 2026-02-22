@@ -186,6 +186,12 @@ label.wa-preview-label {
   font-size: 0.9em;
   line-height: 1.6;
 }
+
+/* Wider grab area for the history/content pane divider */
+paned > separator {
+  min-width: 8px;
+  min-height: 8px;
+}
 """
 
 
