@@ -27,11 +27,8 @@ const LABELS = {
     error:        'Error',
 };
 
+const WhisperAloudIndicator = GObject.registerClass(
 class WhisperAloudIndicator extends PanelMenu.Button {
-    static [GObject.registerClassSymbol()]() {
-        return { GTypeName: 'WhisperAloudIndicator' };
-    }
-
     _init(settings) {
         super._init(0.0, 'WhisperAloud');
         this._settings = settings;
@@ -156,7 +153,7 @@ class WhisperAloudIndicator extends PanelMenu.Button {
         }
         super.destroy();
     }
-}
+});
 
 export default class WhisperAloudExtension extends Extension {
     enable() {

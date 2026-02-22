@@ -2,7 +2,7 @@
   "uuid": "whisperaloud@fede",
   "name": "WhisperAloud",
   "description": "Voice dictation and transcription for GNOME",
-  "shell-version": ["48"],
+  "shell-version": ["45", "46", "47", "48"],
   "url": "https://github.com/fede2cr/whisperAloud",
   "version": 1
 }

@@ -634,7 +634,7 @@ RestartSec=3
 TimeoutStartSec=120
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
 
     cat > "$dbus_file" << EOF
