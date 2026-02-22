@@ -61,6 +61,7 @@ class SettingsDialog(Gtk.Window):
         self._allow_close = False
         self._child_dialog_open = False
         self._dirty = False
+        self._focus_close_source_id: int = 0
         self._initial_ui_state = self._capture_ui_state()
         self._connect_dirty_tracking()
         self._focus_controller = Gtk.EventControllerFocus()
@@ -71,13 +72,32 @@ class SettingsDialog(Gtk.Window):
         logger.info("Settings dialog initialized")
 
     def _on_focus_changed(self, controller: Gtk.EventControllerFocus, _param: object) -> None:
-        """Auto-close settings when focus leaves the entire window widget tree."""
+        """Auto-close settings when focus leaves the entire window widget tree.
+
+        Uses a short delay to ignore transient focus losses caused by GTK4
+        DropDown popups on Wayland (the popup is a separate surface that
+        briefly steals focus from the settings window).
+        """
+        # Cancel any pending auto-close when focus returns
+        if self._focus_close_source_id:
+            GLib.source_remove(self._focus_close_source_id)
+            self._focus_close_source_id = 0
+
         if should_auto_close_on_focus_loss(
             child_dialog_open=self._child_dialog_open,
-            contains_focus=controller.get_contains_focus(),
+            contains_focus=controller.contains_focus(),
             is_visible=self.is_visible(),
         ):
-            GLib.idle_add(self.close)
+            self._focus_close_source_id = GLib.timeout_add(
+                200, self._deferred_focus_close
+            )
+
+    def _deferred_focus_close(self) -> bool:
+        """Close the dialog if focus hasn't returned after the grace period."""
+        self._focus_close_source_id = 0
+        if not self._focus_controller.contains_focus() and self.is_visible():
+            self.close()
+        return GLib.SOURCE_REMOVE
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         """Intercept close to protect unsaved changes."""
@@ -98,8 +118,8 @@ class SettingsDialog(Gtk.Window):
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
             text="Discard unsaved changes?",
+            secondary_text="You have unsaved changes in Settings.",
         )
-        dialog.format_secondary_text("You have unsaved changes in Settings.")
         dialog.add_button("Keep Editing", Gtk.ResponseType.CANCEL)
         dialog.add_button("Discard", Gtk.ResponseType.OK)
 
@@ -990,7 +1010,13 @@ class SettingsDialog(Gtk.Window):
             selected_device_idx = self.audio_device_dropdown.get_selected()
             # Check if a valid device is selected (index != -1)
             if selected_device_idx != -1 and selected_device_idx < len(self._devices):
-                self._config.audio.device_id = self._devices[selected_device_idx].id
+                selected_device = self._devices[selected_device_idx]
+                # Store None for the default device so the daemon always uses
+                # the current system default (robust across hardware changes)
+                if selected_device.is_default:
+                    self._config.audio.device_id = None
+                else:
+                    self._config.audio.device_id = selected_device.id
 
             # Update channels based on selected device
             if self._config.audio.device_id is not None:

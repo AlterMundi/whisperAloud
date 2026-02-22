@@ -56,8 +56,8 @@ class ErrorDialog:
             message_type=message_type_map[severity],
             buttons=Gtk.ButtonsType.NONE,
             text=title,
+            secondary_text=message,
         )
-        dialog.format_secondary_text(message)
 
         # Add details if provided
         if details:
