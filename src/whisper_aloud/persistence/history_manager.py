@@ -222,6 +222,13 @@ class HistoryManager:
             logger.debug(f"Updated notes for entry {entry_id}")
         return success
 
+    def update_text(self, entry_id: int, text: str) -> bool:
+        """Update the transcribed text of an entry."""
+        success = self.db.update(entry_id, text=text)
+        if success:
+            logger.debug(f"Updated text for entry {entry_id}")
+        return success
+
     def add_tag(self, entry_id: int, tag: str) -> bool:
         """
         Add tag to entry.
