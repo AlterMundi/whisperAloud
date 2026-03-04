@@ -478,7 +478,14 @@ install_desktop_file() {
     print_msg "Installing desktop file..."
 
     local desktop_dir="$HOME/.local/share/applications"
+    local legacy_desktop="$desktop_dir/com.whisperaloud.App.desktop"
     mkdir -p "$desktop_dir"
+
+    # Remove legacy launcher to avoid duplicate menu entries.
+    if [ -f "$legacy_desktop" ]; then
+        rm -f "$legacy_desktop"
+        print_success "Removed legacy launcher: com.whisperaloud.App.desktop"
+    fi
 
     # Create desktop file with correct path
     cat > "$desktop_dir/org.fede.whisperaloud.desktop" << EOF

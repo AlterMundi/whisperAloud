@@ -26,13 +26,59 @@ class TestSessionDetection:
     @patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}, clear=False)
     def test_detects_unknown(self):
         """Test unknown session detection."""
-        session_type = ClipboardManager.detect_session_type()
+        with patch.dict(
+            os.environ,
+            {
+                "DISPLAY": "",
+                "WAYLAND_DISPLAY": "",
+                "XDG_SESSION_TYPE": "",
+                "XDG_RUNTIME_DIR": "",
+            },
+            clear=False,
+        ):
+            session_type = ClipboardManager.detect_session_type()
         assert session_type == "unknown"
 
     @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":1", "DISPLAY": ":0"}, clear=False)
     def test_wayland_takes_precedence(self):
         """Test that Wayland is detected even if DISPLAY is also set."""
         session_type = ClipboardManager.detect_session_type()
+        assert session_type == "wayland"
+
+    @patch.dict(
+        os.environ,
+        {"DISPLAY": "", "WAYLAND_DISPLAY": "", "XDG_SESSION_TYPE": "wayland"},
+        clear=False,
+    )
+    def test_detects_wayland_from_xdg_session_type(self):
+        """Detect Wayland from XDG_SESSION_TYPE when WAYLAND_DISPLAY is missing."""
+        session_type = ClipboardManager.detect_session_type()
+        assert session_type == "wayland"
+
+    @patch.dict(
+        os.environ,
+        {"DISPLAY": "", "WAYLAND_DISPLAY": "", "XDG_SESSION_TYPE": "x11"},
+        clear=False,
+    )
+    def test_detects_x11_from_xdg_session_type(self):
+        """Detect X11 from XDG_SESSION_TYPE when DISPLAY is missing."""
+        session_type = ClipboardManager.detect_session_type()
+        assert session_type == "x11"
+
+    def test_detects_wayland_from_runtime_socket(self, tmp_path):
+        """Detect Wayland from runtime socket when env vars are absent."""
+        (tmp_path / "wayland-1").touch()
+        with patch.dict(
+            os.environ,
+            {
+                "DISPLAY": "",
+                "WAYLAND_DISPLAY": "",
+                "XDG_SESSION_TYPE": "",
+                "XDG_RUNTIME_DIR": str(tmp_path),
+            },
+            clear=False,
+        ):
+            session_type = ClipboardManager.detect_session_type()
         assert session_type == "wayland"
 
 

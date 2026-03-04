@@ -33,12 +33,29 @@ class ClipboardManager:
         Returns:
             'wayland', 'x11', or 'unknown'
         """
-        if os.getenv('WAYLAND_DISPLAY'):
+        wayland_display = (os.getenv('WAYLAND_DISPLAY') or "").strip()
+        x11_display = (os.getenv('DISPLAY') or "").strip()
+
+        if wayland_display:
             return 'wayland'
-        elif os.getenv('DISPLAY'):
+        if x11_display:
             return 'x11'
-        else:
-            return 'unknown'
+
+        # Fallback for user services where DISPLAY/WAYLAND_DISPLAY is missing
+        # but the desktop session type is still exported.
+        session_type = (os.getenv('XDG_SESSION_TYPE') or "").strip().lower()
+        if session_type in {'wayland', 'x11'}:
+            return session_type
+
+        runtime_dir = (os.getenv('XDG_RUNTIME_DIR') or "").strip()
+        if runtime_dir:
+            try:
+                if any(Path(runtime_dir).glob("wayland-*")):
+                    return 'wayland'
+            except Exception:
+                pass
+
+        return 'unknown'
 
     def copy(self, text: str) -> bool:
         """
