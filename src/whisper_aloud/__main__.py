@@ -470,6 +470,10 @@ examples:
         choices=["auto", "cpu", "cuda"],
         help="compute device (default: auto)",
     )
+    p_transcribe.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="show detailed output",
+    )
 
     # ── Config ────────────────────────────────────────────────────────────
     p_config = sub.add_parser(
@@ -511,10 +515,10 @@ COMMAND_MAP = {
 }
 
 
-def main() -> int:
+def main(argv=None) -> int:
     """Main CLI entry point."""
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Handle --daemon flag (backward compat, systemd ExecStart)
     if args.daemon:
@@ -547,6 +551,11 @@ def daemon_main() -> int:
     class _Args:
         daemon = True
     return handle_daemon_command(_Args())
+
+
+def transcribe_main() -> int:
+    """Entry point for legacy transcribe-only command."""
+    return main(["transcribe", *sys.argv[1:]])
 
 
 if __name__ == "__main__":
