@@ -29,3 +29,8 @@ def test_transcribe_numpy_uses_recognizer():
 def test_transcribe_without_load_raises():
     with pytest.raises(RuntimeError):
         ParakeetEngine().transcribe_numpy(np.zeros(10, dtype=np.float32), 16000)
+
+
+def test_load_missing_model_files_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        ParakeetEngine().load(str(tmp_path), device="cpu", compute_type="int8")

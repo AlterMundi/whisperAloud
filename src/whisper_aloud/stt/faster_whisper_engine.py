@@ -18,7 +18,8 @@ class FasterWhisperEngine(STTEngine):
 
         self._model = WhisperModel(model, device=device, compute_type=compute_type)
 
-    def transcribe_numpy(self, samples, sample_rate, language=None) -> Transcript:
+    def transcribe_numpy(self, samples: np.ndarray, sample_rate: int,
+                         language: str | None = None) -> Transcript:
         if self._model is None:
             raise RuntimeError("FasterWhisperEngine.load() must be called before transcribe")
         if sample_rate != 16000:

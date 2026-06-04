@@ -23,9 +23,15 @@ class ParakeetEngine(STTEngine):
     def load(self, model: str, device: str, compute_type: str) -> None:
         import sherpa_onnx
 
-        enc = glob.glob(os.path.join(model, "encoder*.onnx"))[0]
-        dec = glob.glob(os.path.join(model, "decoder*.onnx"))[0]
-        joi = glob.glob(os.path.join(model, "joiner*.onnx"))[0]
+        def _one(pattern):
+            matches = glob.glob(os.path.join(model, pattern))
+            if not matches:
+                raise FileNotFoundError(f"{pattern} not found in model dir: {model}")
+            return matches[0]
+
+        enc = _one("encoder*.onnx")
+        dec = _one("decoder*.onnx")
+        joi = _one("joiner*.onnx")
         tokens = os.path.join(model, "tokens.txt")
         self._rec = sherpa_onnx.OfflineRecognizer.from_transducer(
             encoder=enc,
@@ -38,9 +44,16 @@ class ParakeetEngine(STTEngine):
         )
         self._model_dir = model
 
-    def transcribe_numpy(self, samples, sample_rate, language=None) -> Transcript:
+    def transcribe_numpy(self, samples: np.ndarray, sample_rate: int,
+                         language: str | None = None) -> Transcript:
         if self._rec is None:
             raise RuntimeError("ParakeetEngine.load() must be called before transcribe")
+        if sample_rate != 16000:
+            import scipy.signal as ss
+
+            n = int(len(samples) * 16000 / sample_rate)
+            samples = ss.resample(samples, n).astype(np.float32)
+            sample_rate = 16000
         stream = self._rec.create_stream()
         stream.accept_waveform(sample_rate, np.asarray(samples, dtype=np.float32))
         self._rec.decode_stream(stream)
