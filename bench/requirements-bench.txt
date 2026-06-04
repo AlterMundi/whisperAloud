@@ -1,0 +1,6 @@
+jiwer
+datasets
+sherpa-onnx
+psutil
+soundfile
+scipy
