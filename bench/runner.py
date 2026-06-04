@@ -14,7 +14,6 @@ import statistics
 import subprocess
 import time
 
-import numpy as np
 import psutil
 import soundfile as sf
 
@@ -63,6 +62,8 @@ def _git_sha() -> str:
 
 
 def _dirsize_mb(path) -> float | None:
+    if os.path.isfile(path):
+        return round(os.path.getsize(path) / 1e6, 1)
     if not os.path.isdir(path):
         return None
     total = sum(
@@ -77,6 +78,8 @@ def run_combo(engine, model, lang, device, reps, hw, git_sha):
     manifest = os.path.join(MANIFEST_ROOT, f"{lang}.jsonl")
     audio_dir = os.path.join(AUDIO_ROOT, lang)
     clips = load_manifest(manifest)
+    if not clips:
+        raise FileNotFoundError(f"manifest empty or missing: {manifest}")
     engine.load(model, device, "int8")
 
     rep_times = []
@@ -130,6 +133,9 @@ def main():
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--hw-id", default=None)
     args = ap.parse_args()
+
+    if args.reps < 1:
+        ap.error("--reps must be >= 1")
 
     hw = probe(hw_id=args.hw_id)
     git_sha = _git_sha()

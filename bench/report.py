@@ -21,7 +21,7 @@ def generate_matrix(rows: list) -> str:
     lines = [_HEADER, _CAVEAT, "| " + " | ".join(_COLS) + " |",
              "|" + "|".join(["---"] * len(_COLS)) + "|"]
     # sort for stable output: lang, then WER ascending
-    for r in sorted(rows, key=lambda r: (r["lang"], r["metrics"].get("wer", 1.0))):
+    for r in sorted(rows, key=lambda r: (r["lang"], r["metrics"].get("wer") or 1.0)):
         m = r["metrics"]
         wer_pct = f"{m['wer'] * 100:.1f}" if m.get("wer") is not None else "—"
         cells = [

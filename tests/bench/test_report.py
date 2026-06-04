@@ -27,3 +27,10 @@ def test_generate_matrix_empty():
     md = generate_matrix([])
     assert "# STT Benchmark Matrix" in md
     assert "No results" in md
+
+
+def test_generate_matrix_handles_none_wer():
+    row = _row("es", "x", "m", "cpu", "box", 0.0, 0.1)
+    row["metrics"]["wer"] = None
+    md = generate_matrix([row])  # must not raise
+    assert "# STT Benchmark Matrix" in md
