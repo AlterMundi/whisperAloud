@@ -1,0 +1,7 @@
+# Downloaded models (regenerate via the documented download command)
+sherpa-onnx-*/
+*.tar.bz2
+# Eval audio (regenerate via `python -m bench.datasets.fleurs`)
+datasets/audio/
+# Legacy prototype audio dir (pre-WHISP-41)
+audio_es/
