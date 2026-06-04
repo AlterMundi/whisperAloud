@@ -7,6 +7,9 @@ HOST="${1:?usage: run_remote.sh <ssh-host> [remote-venv]}"
 RVENV="${2:-~/.venvs/whisper_aloud_bench}"
 RDIR="~/whisperaloud-bench"
 
+echo ">> creating remote dirs on $HOST"
+ssh "$HOST" "mkdir -p $RDIR/bench $RDIR/src"
+
 echo ">> syncing bench code + manifests to $HOST (no audio/models)"
 rsync -az --delete \
   --exclude 'datasets/audio' --exclude 'sherpa-onnx-*' --exclude 'results' \
