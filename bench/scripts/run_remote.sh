@@ -27,6 +27,8 @@ ssh "$HOST" bash -lc "'
   # If this index install fails or mismatches CUDA, the runner VRAM guard skips parakeet:cuda.
   pip install -q sherpa-onnx -f https://k2-fsa.github.io/sherpa/onnx/cuda.html || true
   nvidia-smi --query-gpu=name --format=csv,noheader || { echo \"NO NVIDIA GPU on $HOST\"; exit 3; }
+  # Reset the remote ledger so a rerun never accumulates stale rows from a prior failed run.
+  mkdir -p bench/results && : > bench/results/ledger.jsonl
   export PYTHONPATH=$RDIR/src
   python -m bench.datasets.fleurs --lang es,en --n 40
   test -d bench/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 || (

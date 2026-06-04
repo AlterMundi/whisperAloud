@@ -36,6 +36,14 @@ python -m bench.report   # regenerates MATRIX.md
 - **AMD ROCm / Coral TPU:** schema-ready, not yet measured. Add an adapter under
   `bench/engines/experimental/` and a `device` value.
 
+## Known gaps (iteration 1)
+- **Parakeet on CUDA not yet measured.** The default `pip install sherpa-onnx` wheel is
+  CPU-only, so a `--device cuda` Parakeet run silently falls back to CPU. The runner's
+  VRAM integrity guard detects this (a cuda run that allocated no GPU memory) and **skips
+  the row rather than mislabeling CPU numbers as GPU**. Measuring Parakeet on GPU needs a
+  GPU-enabled sherpa-onnx build; tracked for a follow-up / WHISP-38.
+- **whisper.cpp (Vulkan / Intel iGPU)** not yet measured — needs a local Vulkan build.
+
 ## Layout
 - `src/whisper_aloud/stt/` — shared `STTEngine` interface + production engines
   (faster-whisper, Parakeet), consumed by both this benchmark and (later) the daemon.
