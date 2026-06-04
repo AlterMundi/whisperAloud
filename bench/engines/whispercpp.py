@@ -32,6 +32,11 @@ class WhisperCppEngine(STTEngine):
                          language: str | None = None) -> Transcript:
         if self._model is None:
             raise RuntimeError("WhisperCppEngine.load() must be called before transcribe")
+        if sample_rate != 16000:
+            import scipy.signal as ss
+            n = int(len(samples) * 16000 / sample_rate)
+            samples = ss.resample(samples, n).astype(np.float32)
+            sample_rate = 16000
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
             wav_path = tf.name
         try:

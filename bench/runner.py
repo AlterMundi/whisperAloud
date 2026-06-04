@@ -74,13 +74,38 @@ def _dirsize_mb(path) -> float | None:
     return round(total / 1e6, 1)
 
 
+def _proc_vram_mb() -> float | None:
+    """Sum CUDA memory (MiB) used by THIS process via nvidia-smi compute-apps.
+
+    Returns None if nvidia-smi is unavailable or this PID has no compute apps.
+    """
+    import os as _os
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return None
+    pid = _os.getpid()
+    total = 0.0
+    found = False
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) == pid:
+            total += float(parts[1]); found = True
+    return round(total, 1) if found else None
+
+
 def run_combo(engine, model, lang, device, reps, hw, git_sha):
     manifest = os.path.join(MANIFEST_ROOT, f"{lang}.jsonl")
     audio_dir = os.path.join(AUDIO_ROOT, lang)
     clips = load_manifest(manifest)
     if not clips:
         raise FileNotFoundError(f"manifest empty or missing: {manifest}")
+    t_load = time.time()
     engine.load(model, device, "int8")
+    load_s = round(time.time() - t_load, 2)
 
     rep_times = []
     wers, total_audio = [], 0.0
@@ -97,13 +122,15 @@ def run_combo(engine, model, lang, device, reps, hw, git_sha):
                 total_audio += c["duration_s"]
         rep_times.append(t_rep)
     rss_peak = psutil.Process().memory_info().rss / 1e6
+    peak_vram = _proc_vram_mb() if device == "cuda" else None
 
     metrics = {
         "wer": round(sum(wers) / len(wers), 4),
         "rtf": median_rtf([rt / total_audio for rt in rep_times]),
+        "load_s": load_s,
         "peak_rss_mb": round(rss_peak, 1),
         "rss_delta_mb": round(rss_peak - rss0, 1),
-        "peak_vram_mb": None,
+        "peak_vram_mb": peak_vram,
         "model_size_mb": _dirsize_mb(model),
     }
     engine.unload()

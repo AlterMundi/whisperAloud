@@ -17,4 +17,6 @@ def resolve(spec: str):
     name, _, model = spec.partition(":")
     if name not in ENGINE_REGISTRY:
         raise KeyError(f"unknown engine '{name}'. Known: {sorted(ENGINE_REGISTRY)}")
+    if not model:
+        raise ValueError(f"engine spec '{spec}' is missing a model, expected 'engine:model'")
     return ENGINE_REGISTRY[name](), model

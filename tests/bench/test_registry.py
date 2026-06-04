@@ -17,3 +17,8 @@ def test_resolve_parses_engine_and_model():
 def test_resolve_unknown_raises():
     with pytest.raises(KeyError):
         resolve("nope:x")
+
+
+def test_resolve_missing_model_raises():
+    with pytest.raises(ValueError):
+        resolve("faster-whisper")
