@@ -23,7 +23,9 @@ ssh "$HOST" bash -lc "'
   python3 -m venv $RVENV 2>/dev/null || true
   source $RVENV/bin/activate
   pip install -q -r bench/requirements-bench.txt
-  pip install -q ctranslate2  # CUDA build expected on a GPU host
+  # GPU-enabled sherpa-onnx (default pip wheel is CPU-only -> Parakeet would fall back to CPU).
+  # If this index install fails or mismatches CUDA, the runner VRAM guard skips parakeet:cuda.
+  pip install -q sherpa-onnx -f https://k2-fsa.github.io/sherpa/onnx/cuda.html || true
   nvidia-smi --query-gpu=name --format=csv,noheader || { echo \"NO NVIDIA GPU on $HOST\"; exit 3; }
   export PYTHONPATH=$RDIR/src
   python -m bench.datasets.fleurs --lang es,en --n 40

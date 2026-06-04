@@ -124,6 +124,15 @@ def run_combo(engine, model, lang, device, reps, hw, git_sha):
     rss_peak = psutil.Process().memory_info().rss / 1e6
     peak_vram = _proc_vram_mb() if device == "cuda" else None
 
+    # Integrity guard (spec §12): a cuda run that allocated no GPU memory actually
+    # fell back to CPU (e.g. a CPU-only sherpa-onnx wheel). Refuse to record it as cuda.
+    if device == "cuda" and not peak_vram:
+        engine.unload()
+        raise RuntimeError(
+            f"{engine.name} requested cuda but used no GPU memory — CPU fallback "
+            f"(install a GPU build of the engine). Refusing to mislabel as cuda."
+        )
+
     metrics = {
         "wer": round(sum(wers) / len(wers), 4),
         "rtf": median_rtf([rt / total_audio for rt in rep_times]),
@@ -178,7 +187,7 @@ def main():
             )
             try:
                 row = run_combo(engine, model, lang, device, args.reps, hw, git_sha)
-            except FileNotFoundError as e:
+            except (FileNotFoundError, RuntimeError) as e:
                 print(f"SKIP {spec} {lang}: {e}")
                 continue
             append_row(LEDGER, row)

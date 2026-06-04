@@ -1,3 +1,4 @@
+faster-whisper
 jiwer
 datasets
 sherpa-onnx
