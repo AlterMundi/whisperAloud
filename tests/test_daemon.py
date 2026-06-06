@@ -94,7 +94,7 @@ def _make_daemon(indicator_fails=False, hotkey_fails=False):
          patch.dict("os.environ", {"DISPLAY": ":0"}, clear=False), \
          patch.object(daemon_module, "SessionBus"), \
          patch.object(daemon_module, "AudioRecorder"), \
-         patch.object(daemon_module, "Transcriber"), \
+         patch.object(daemon_module, "create_engine"), \
          patch.object(daemon_module, "NotificationManager"), \
          patch.object(daemon_module, "HistoryManager"), \
          patch.object(daemon_module, "ClipboardManager"), \
@@ -622,7 +622,7 @@ class TestRecorderInitialization:
             patch.dict("os.environ", {"DISPLAY": ":0"}, clear=False),
             patch.object(daemon_module, "SessionBus"),
             patch.object(daemon_module, "AudioRecorder") as mock_ar,
-            patch.object(daemon_module, "Transcriber"),
+            patch.object(daemon_module, "create_engine"),
             patch.object(daemon_module, "NotificationManager"),
             patch.object(daemon_module, "HistoryManager"),
             patch.object(daemon_module, "ClipboardManager"),
