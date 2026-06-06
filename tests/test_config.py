@@ -298,3 +298,17 @@ def test_engine_change_requires_reload():
     changes = detect_config_changes(old, new)
     assert "engine" in changes.changed_fields["model"]
     assert changes.requires_model_reload is True
+
+
+def test_valid_engine_passes_validation():
+    """The default engine validates cleanly."""
+    config = WhisperAloudConfig()
+    config.validate()  # must not raise
+
+
+def test_invalid_engine_rejected():
+    """validate() rejects an unknown engine."""
+    config = WhisperAloudConfig()
+    config.model.engine = "nope-engine"
+    with pytest.raises(ConfigurationError, match="Invalid engine"):
+        config.validate()

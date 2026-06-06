@@ -493,6 +493,13 @@ class WhisperAloudConfig:
 
     def validate(self) -> None:
         """Validate configuration values."""
+        # Validate engine (only faster-whisper in production today; WHISP-36 adds parakeet)
+        valid_engines = ["faster-whisper"]
+        if self.model.engine not in valid_engines:
+            raise ConfigurationError(
+                f"Invalid engine '{self.model.engine}'. Valid: {', '.join(valid_engines)}"
+            )
+
         # Validate model name (faster-whisper supported models)
         valid_models = [
             "tiny", "base", "small", "medium",
