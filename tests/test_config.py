@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from whisper_aloud.config import WhisperAloudConfig
+from whisper_aloud.config import MODEL_RELOAD_FIELDS, WhisperAloudConfig
 from whisper_aloud.exceptions import ConfigurationError
 
 
@@ -250,3 +250,14 @@ def test_clipboard_paste_to_captured_window_roundtrip():
     config.clipboard.paste_to_captured_window = False
     restored = WhisperAloudConfig.from_dict(config.to_dict())
     assert restored.clipboard.paste_to_captured_window is False
+
+
+def test_model_engine_defaults_to_faster_whisper():
+    """ModelConfig.engine defaults to 'faster-whisper'."""
+    config = WhisperAloudConfig()
+    assert config.model.engine == "faster-whisper"
+
+
+def test_engine_is_a_reload_field():
+    """Changing the engine must trigger a model reload."""
+    assert "engine" in MODEL_RELOAD_FIELDS

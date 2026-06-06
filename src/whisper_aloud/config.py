@@ -77,6 +77,7 @@ def parse_float_env(env_var: str, default: float) -> float:
 @dataclass
 class ModelConfig:
     """Configuration for the Whisper model."""
+    engine: str = "faster-whisper"
     name: str = "base"
     device: str = "auto"
     compute_type: str = "int8"
@@ -84,7 +85,7 @@ class ModelConfig:
 
 
 # Fields that trigger model reload when changed (class-level constant)
-MODEL_RELOAD_FIELDS: Set[str] = {"name", "device", "compute_type"}
+MODEL_RELOAD_FIELDS: Set[str] = {"engine", "name", "device", "compute_type"}
 
 
 @dataclass
