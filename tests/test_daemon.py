@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from whisper_aloud.config import WhisperAloudConfig
+
 # ── Bootstrap: patch pydbus and GLib before daemon module loads ──────────
 # pydbus signal() is a descriptor that prevents instance-level assignment.
 # We replace it with a simple factory so tests can inspect signal calls.
@@ -644,3 +646,26 @@ class TestRecorderInitialization:
             _, kwargs = mock_ar.call_args
             assert "processing_config" in kwargs, "processing_config not passed to AudioRecorder"
             assert kwargs["processing_config"] == config.audio_processing
+
+
+def test_engine_change_triggers_model_reload():
+    """Changing model.engine alone (same name/device) reloads the engine via create_engine."""
+    daemon = _make_daemon()
+    daemon.config = WhisperAloudConfig()  # engine=faster-whisper, name=base
+    new = WhisperAloudConfig()
+    new.model.engine = "parakeet"
+    # Only engine differs (name/device are identical fresh defaults) — isolates the engine-reload path.
+    with patch.object(daemon._daemon_module, "create_engine") as mock_ce:
+        daemon._apply_config_changes(new)
+    mock_ce.assert_called_once_with(new)
+    mock_ce.return_value.load_model.assert_called_once()
+
+
+def test_no_model_change_does_not_reload():
+    """An identical model config does not trigger a reload."""
+    daemon = _make_daemon()
+    daemon.config = WhisperAloudConfig()
+    new = WhisperAloudConfig()  # identical model fields
+    with patch.object(daemon._daemon_module, "create_engine") as mock_ce:
+        daemon._apply_config_changes(new)
+    mock_ce.assert_not_called()

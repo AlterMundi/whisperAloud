@@ -15,7 +15,7 @@ from pydbus.generic import signal
 
 from ..audio.recorder import AudioRecorder
 from ..clipboard import ClipboardManager, WindowManager
-from ..config import WhisperAloudConfig
+from ..config import WhisperAloudConfig, detect_config_changes
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
 from ..stt.engine import SpeechEngine, create_engine
@@ -558,9 +558,8 @@ class WhisperAloudService:
 
     def _apply_config_changes(self, new_config: 'WhisperAloudConfig') -> None:
         """Re-initialize components whose config has changed."""
-        # Check if model config changed
-        if (new_config.model.name != self.config.model.name or
-                new_config.model.device != self.config.model.device):
+        # Reload when any model-reload field changed (engine/name/device/compute_type).
+        if detect_config_changes(self.config, new_config).requires_model_reload:
             logger.info("Model config changed, reloading...")
             self.transcriber = create_engine(new_config)
             self.transcriber.load_model()
