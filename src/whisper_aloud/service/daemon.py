@@ -18,7 +18,7 @@ from ..clipboard import ClipboardManager, WindowManager
 from ..config import WhisperAloudConfig
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
-from ..transcriber import Transcriber
+from ..stt.engine import SpeechEngine, create_engine
 from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
 from .media_control import GainController, MprisController
@@ -122,7 +122,7 @@ class WhisperAloudService:
 
         # Core components
         self.recorder: Optional[AudioRecorder] = None
-        self.transcriber: Optional[Transcriber] = None
+        self.transcriber: Optional[SpeechEngine] = None
 
         # Threading
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="whisper-aloud")
@@ -237,7 +237,7 @@ class WhisperAloudService:
                 processing_config=self.config.audio_processing,
                 auto_stop_callback=self._on_recorder_auto_stop,
             )
-            self.transcriber = Transcriber(self.config)
+            self.transcriber = create_engine(self.config)
             # Model loading deferred to _ensure_model_loaded()
             self._model_loaded = False
 
@@ -562,7 +562,7 @@ class WhisperAloudService:
         if (new_config.model.name != self.config.model.name or
                 new_config.model.device != self.config.model.device):
             logger.info("Model config changed, reloading...")
-            self.transcriber = Transcriber(new_config)
+            self.transcriber = create_engine(new_config)
             self.transcriber.load_model()
             self._model_loaded = True
 

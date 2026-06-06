@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from whisper_aloud.config import WhisperAloudConfig
+from whisper_aloud.config import MODEL_RELOAD_FIELDS, WhisperAloudConfig
 from whisper_aloud.exceptions import ConfigurationError
 
 
@@ -250,3 +250,65 @@ def test_clipboard_paste_to_captured_window_roundtrip():
     config.clipboard.paste_to_captured_window = False
     restored = WhisperAloudConfig.from_dict(config.to_dict())
     assert restored.clipboard.paste_to_captured_window is False
+
+
+def test_model_engine_defaults_to_faster_whisper():
+    """ModelConfig.engine defaults to 'faster-whisper'."""
+    config = WhisperAloudConfig()
+    assert config.model.engine == "faster-whisper"
+
+
+def test_engine_is_a_reload_field():
+    """Changing the engine must trigger a model reload."""
+    assert "engine" in MODEL_RELOAD_FIELDS
+
+
+def test_engine_serialization_roundtrip():
+    """engine survives a to_dict / from_dict roundtrip."""
+    config = WhisperAloudConfig()
+    config.model.engine = "parakeet"
+    data = config.to_dict()
+    assert data["model"]["engine"] == "parakeet"
+    restored = WhisperAloudConfig.from_dict(data)
+    assert restored.model.engine == "parakeet"
+
+
+def test_engine_env_override():
+    """WHISPER_ALOUD_MODEL_ENGINE is applied by _apply_env_overrides.
+
+    Uses a sentinel value (not the default) to prove the wiring, and calls
+    _apply_env_overrides directly so it bypasses validate() — faster-whisper is
+    currently the only value that would survive WhisperAloudConfig.load().
+    """
+    os.environ['WHISPER_ALOUD_MODEL_ENGINE'] = 'sentinel-engine'
+    try:
+        config = WhisperAloudConfig()
+        config._apply_env_overrides()
+        assert config.model.engine == "sentinel-engine"
+    finally:
+        os.environ.pop('WHISPER_ALOUD_MODEL_ENGINE', None)
+
+
+def test_engine_change_requires_reload():
+    """detect_config_changes flags an engine change as reload-requiring."""
+    from whisper_aloud.config import detect_config_changes
+    old = WhisperAloudConfig()
+    new = WhisperAloudConfig()
+    new.model.engine = "some-other-engine"
+    changes = detect_config_changes(old, new)
+    assert "engine" in changes.changed_fields["model"]
+    assert changes.requires_model_reload is True
+
+
+def test_valid_engine_passes_validation():
+    """The default engine validates cleanly."""
+    config = WhisperAloudConfig()
+    config.validate()  # must not raise
+
+
+def test_invalid_engine_rejected():
+    """validate() rejects an unknown engine."""
+    config = WhisperAloudConfig()
+    config.model.engine = "nope-engine"
+    with pytest.raises(ConfigurationError, match="Invalid engine"):
+        config.validate()

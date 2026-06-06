@@ -77,6 +77,7 @@ def parse_float_env(env_var: str, default: float) -> float:
 @dataclass
 class ModelConfig:
     """Configuration for the Whisper model."""
+    engine: str = "faster-whisper"
     name: str = "base"
     device: str = "auto"
     compute_type: str = "int8"
@@ -84,7 +85,7 @@ class ModelConfig:
 
 
 # Fields that trigger model reload when changed (class-level constant)
-MODEL_RELOAD_FIELDS: Set[str] = {"name", "device", "compute_type"}
+MODEL_RELOAD_FIELDS: Set[str] = {"engine", "name", "device", "compute_type"}
 
 
 @dataclass
@@ -215,6 +216,7 @@ class WhisperAloudConfig:
         """Convert config to dictionary for serialization."""
         return {
             "model": {
+                "engine": self.model.engine,
                 "name": self.model.name,
                 "device": self.model.device,
                 "compute_type": self.model.compute_type,
@@ -386,6 +388,7 @@ class WhisperAloudConfig:
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides to config."""
         # Model
+        self.model.engine = os.getenv('WHISPER_ALOUD_MODEL_ENGINE', self.model.engine)
         self.model.name = os.getenv('WHISPER_ALOUD_MODEL_NAME', self.model.name)
         self.model.device = os.getenv('WHISPER_ALOUD_MODEL_DEVICE', self.model.device)
         self.model.compute_type = os.getenv('WHISPER_ALOUD_MODEL_COMPUTE_TYPE', self.model.compute_type)
@@ -490,6 +493,13 @@ class WhisperAloudConfig:
 
     def validate(self) -> None:
         """Validate configuration values."""
+        # Validate engine (only faster-whisper in production today; WHISP-36 adds parakeet)
+        valid_engines = ["faster-whisper"]
+        if self.model.engine not in valid_engines:
+            raise ConfigurationError(
+                f"Invalid engine '{self.model.engine}'. Valid: {', '.join(valid_engines)}"
+            )
+
         # Validate model name (faster-whisper supported models)
         valid_models = [
             "tiny", "base", "small", "medium",
@@ -600,6 +610,8 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
 
     # Check model changes
     model_changes = set()
+    if old.model.engine != new.model.engine:
+        model_changes.add("engine")
     if old.model.name != new.model.name:
         model_changes.add("name")
     if old.model.device != new.model.device:
