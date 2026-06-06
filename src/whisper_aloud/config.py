@@ -216,6 +216,7 @@ class WhisperAloudConfig:
         """Convert config to dictionary for serialization."""
         return {
             "model": {
+                "engine": self.model.engine,
                 "name": self.model.name,
                 "device": self.model.device,
                 "compute_type": self.model.compute_type,
@@ -387,6 +388,7 @@ class WhisperAloudConfig:
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides to config."""
         # Model
+        self.model.engine = os.getenv('WHISPER_ALOUD_MODEL_ENGINE', self.model.engine)
         self.model.name = os.getenv('WHISPER_ALOUD_MODEL_NAME', self.model.name)
         self.model.device = os.getenv('WHISPER_ALOUD_MODEL_DEVICE', self.model.device)
         self.model.compute_type = os.getenv('WHISPER_ALOUD_MODEL_COMPUTE_TYPE', self.model.compute_type)
@@ -601,6 +603,8 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
 
     # Check model changes
     model_changes = set()
+    if old.model.engine != new.model.engine:
+        model_changes.add("engine")
     if old.model.name != new.model.name:
         model_changes.add("name")
     if old.model.device != new.model.device:
