@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from .exceptions import ConfigurationError
 from .utils.validation_helpers import sanitize_language_code
@@ -86,6 +86,16 @@ class ModelConfig:
 
 # Fields that trigger model reload when changed (class-level constant)
 MODEL_RELOAD_FIELDS: Set[str] = {"engine", "name", "device", "compute_type"}
+
+# Valid model names per engine (used by validate() and engine/download code).
+ENGINE_MODELS: Dict[str, List[str]] = {
+    "faster-whisper": [
+        "tiny", "base", "small", "medium",
+        "large-v1", "large-v2", "large-v3", "large",
+        "large-v3-turbo", "turbo",
+    ],
+    "parakeet": ["parakeet-tdt-0.6b-v3"],
+}
 
 
 @dataclass
@@ -493,21 +503,20 @@ class WhisperAloudConfig:
 
     def validate(self) -> None:
         """Validate configuration values."""
-        # Validate engine (only faster-whisper in production today; WHISP-36 adds parakeet)
-        valid_engines = ["faster-whisper"]
+        # Validate engine
+        valid_engines = list(ENGINE_MODELS.keys())
         if self.model.engine not in valid_engines:
             raise ConfigurationError(
                 f"Invalid engine '{self.model.engine}'. Valid: {', '.join(valid_engines)}"
             )
 
-        # Validate model name (faster-whisper supported models)
-        valid_models = [
-            "tiny", "base", "small", "medium",
-            "large-v1", "large-v2", "large-v3", "large",  # large is alias for large-v3
-            "large-v3-turbo", "turbo",  # turbo variants
-        ]
+        # Validate model name for the selected engine
+        valid_models = ENGINE_MODELS[self.model.engine]
         if self.model.name not in valid_models:
-            raise ConfigurationError(f"Invalid model name '{self.model.name}'. Valid: {', '.join(valid_models)}")
+            raise ConfigurationError(
+                f"Invalid model name '{self.model.name}' for engine '{self.model.engine}'. "
+                f"Valid: {', '.join(valid_models)}"
+            )
 
         # Validate device
         valid_devices = ["auto", "cpu", "cuda"]
