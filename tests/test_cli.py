@@ -266,3 +266,26 @@ def test_daemon_flag(mock_handle):
         exit_code = main()
         assert exit_code == 0
         mock_handle.assert_called_once()
+
+
+# ─── download-model command ───────────────────────────────────────────────────
+
+
+def test_download_model_success(monkeypatch, capsys):
+    """download-model calls ensure_model and reports the resolved path."""
+    import whisper_aloud.stt.model_download as md
+    monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")
+    rc = main(["download-model", "parakeet-tdt-0.6b-v3"])
+    assert rc == 0
+    assert "/cache/parakeet-tdt-0.6b-v3" in capsys.readouterr().out
+
+
+def test_download_model_unknown(monkeypatch, capsys):
+    """An unknown model name exits non-zero with an error."""
+    import whisper_aloud.stt.model_download as md
+    def _raise(name):
+        raise ValueError("Unknown model 'nope'. Known: parakeet-tdt-0.6b-v3")
+    monkeypatch.setattr(md, "ensure_model", _raise)
+    rc = main(["download-model", "nope"])
+    assert rc == 1
+    assert "Unknown model" in capsys.readouterr().err

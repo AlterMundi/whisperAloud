@@ -393,6 +393,19 @@ def cmd_history_search(args) -> int:
     return cmd_history(args)
 
 
+def cmd_download_model(args) -> int:
+    """Download a speech model bundle to the local cache (no daemon required)."""
+    from .stt.model_download import ensure_model
+    try:
+        path = ensure_model(args.name)
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:  # network / extract failures
+        return _error(f"download failed: {e}")
+    print(f"Model ready: {path}")
+    return 0
+
+
 def handle_daemon_command(args) -> int:
     """Start the daemon service."""
     try:
@@ -422,6 +435,7 @@ examples:
   %(prog)s transcribe audio.wav     Transcribe a file
   %(prog)s config show              Show configuration
   %(prog)s history                  Recent transcriptions
+  %(prog)s download-model parakeet-tdt-0.6b-v3
   %(prog)s --daemon                 Start the daemon
 """,
     )
@@ -449,6 +463,14 @@ examples:
     sub.add_parser("status", help="show daemon status")
     sub.add_parser("reload", help="reload configuration")
     sub.add_parser("quit", help="stop the daemon")
+
+    # ── Model download ────────────────────────────────────────────────────
+    p_download = sub.add_parser(
+        "download-model",
+        help="download a speech model to the cache",
+        description="Download a named speech model to the local cache. No daemon required.",
+    )
+    p_download.add_argument("name", help="model name, e.g. parakeet-tdt-0.6b-v3")
 
     # ── Transcribe ────────────────────────────────────────────────────────
     p_transcribe = sub.add_parser(
@@ -512,6 +534,7 @@ COMMAND_MAP = {
     "transcribe": cmd_transcribe,
     "config": cmd_config,
     "history": cmd_history,
+    "download-model": cmd_download_model,
 }
 
 
