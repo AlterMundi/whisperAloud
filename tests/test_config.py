@@ -312,3 +312,29 @@ def test_invalid_engine_rejected():
     config.model.engine = "nope-engine"
     with pytest.raises(ConfigurationError, match="Invalid engine"):
         config.validate()
+
+
+def test_parakeet_model_validates():
+    """engine=parakeet with its canonical model passes validation."""
+    config = WhisperAloudConfig()
+    config.model.engine = "parakeet"
+    config.model.name = "parakeet-tdt-0.6b-v3"
+    config.validate()  # must not raise
+
+
+def test_parakeet_rejects_whisper_model():
+    """engine=parakeet with a whisper model name is rejected, naming the engine."""
+    config = WhisperAloudConfig()
+    config.model.engine = "parakeet"
+    config.model.name = "base"
+    with pytest.raises(ConfigurationError, match="for engine 'parakeet'"):
+        config.validate()
+
+
+def test_faster_whisper_rejects_parakeet_model():
+    """engine=faster-whisper with a parakeet model name is rejected."""
+    config = WhisperAloudConfig()
+    config.model.engine = "faster-whisper"
+    config.model.name = "parakeet-tdt-0.6b-v3"
+    with pytest.raises(ConfigurationError, match="for engine 'faster-whisper'"):
+        config.validate()

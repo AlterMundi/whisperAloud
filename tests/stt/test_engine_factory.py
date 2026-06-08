@@ -29,3 +29,14 @@ def test_create_engine_rejects_unknown_engine():
     config.model.engine = "totally-unknown"
     with pytest.raises(ConfigurationError, match="Unknown STT engine"):
         create_engine(config)
+
+
+def test_create_engine_returns_parakeet_for_parakeet():
+    """The factory builds a ParakeetSpeechEngine for engine=parakeet (no sherpa needed)."""
+    from whisper_aloud.stt.parakeet_speech_engine import ParakeetSpeechEngine
+    config = WhisperAloudConfig()
+    config.model.engine = "parakeet"
+    config.model.name = "parakeet-tdt-0.6b-v3"
+    engine = create_engine(config)
+    assert isinstance(engine, ParakeetSpeechEngine)
+    assert isinstance(engine, SpeechEngine)

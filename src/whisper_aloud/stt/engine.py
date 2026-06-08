@@ -53,6 +53,10 @@ def create_engine(config: "WhisperAloudConfig") -> "SpeechEngine":
         from ..transcriber import Transcriber
 
         return Transcriber(config)
+    if engine == "parakeet":
+        from .parakeet_speech_engine import ParakeetSpeechEngine
+
+        return ParakeetSpeechEngine(config)
 
     from ..exceptions import ConfigurationError
 
