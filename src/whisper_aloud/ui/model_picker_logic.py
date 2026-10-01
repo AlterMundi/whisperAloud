@@ -2,9 +2,11 @@
 testable without a display, per this codebase's *_logic.py convention."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
-from ..stt import catalog
+from ..stt import catalog, model_download
 from ..stt.catalog import ModelEntry
 
 _STANDARD_LICENSES = frozenset({"MIT", "Apache-2.0", "CC-BY-4.0", "BSD-3-Clause"})
@@ -84,3 +86,56 @@ def save_selection(engine: str, name: str) -> tuple[str, str]:
     if entry is None:
         raise ValueError(f"Unknown (engine={engine!r}, name={name!r}) — not in the catalog")
     return entry.engine, entry.name
+
+
+@dataclass(frozen=True)
+class DownloadState:
+    downloaded: bool
+    detection: str  # "sherpa-onnx-cache" | "hf-cache-heuristic" | "unknown"
+
+
+def _hf_hub_cache_root() -> Path:
+    """Best-effort resolution of huggingface_hub's cache root, matching the precedence
+    huggingface_hub itself uses (HF_HOME/HUGGINGFACE_HUB_CACHE, else ~/.cache/huggingface/hub).
+    Prefers reading huggingface_hub.constants.HF_HUB_CACHE directly over reimplementing
+    that precedence, since huggingface_hub is already a transitive dependency (via
+    faster-whisper) when faster-whisper is installed."""
+    try:
+        from huggingface_hub import constants
+
+        return Path(constants.HF_HUB_CACHE)
+    except Exception:
+        home = os.environ.get("HF_HOME")
+        if home:
+            return Path(home) / "hub"
+        return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def download_state_for(entry: ModelEntry) -> DownloadState:
+    """Whether `entry`'s weights are already on disk, and how we know.
+
+    - engine == "parakeet": delegates to model_download.is_present(entry.name) (the
+      same tokens.txt/encoder*.onnx presence check model_download.ensure_model uses).
+    - engine == "faster-whisper": a *heuristic* over the Hugging Face hub cache — looks
+      for a `models--Systran--faster-whisper-<canonical-name>` directory containing at
+      least one snapshot with a `model.bin` file. This is best-effort: a nonstandard
+      HF_HUB_CACHE layout or a custom `model.download_root` can produce a false
+      "not downloaded" notice even though the model loads fine — documented limitation,
+      not a correctness bug (worst case is an unnecessary notice, not a functional break).
+    - Unknown engine (e.g. a future catalog entry this module doesn't know how to check):
+      detection = "unknown", downloaded = False (conservative: show the notice rather
+      than hide it).
+    """
+    if entry.engine == "parakeet":
+        return DownloadState(
+            downloaded=model_download.is_present(entry.name),
+            detection="sherpa-onnx-cache",
+        )
+    if entry.engine == "faster-whisper":
+        repo_dir = _hf_hub_cache_root() / f"models--Systran--faster-whisper-{entry.name}"
+        snapshots = repo_dir / "snapshots"
+        downloaded = snapshots.is_dir() and any(
+            (snap / "model.bin").exists() for snap in snapshots.glob("*")
+        )
+        return DownloadState(downloaded=bool(downloaded), detection="hf-cache-heuristic")
+    return DownloadState(downloaded=False, detection="unknown")

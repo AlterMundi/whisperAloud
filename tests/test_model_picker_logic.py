@@ -138,3 +138,68 @@ def test_save_selection_resolves_alias():
 def test_save_selection_unknown_raises():
     with pytest.raises(ValueError):
         mpl.save_selection("nope", "x")
+
+
+def test_download_state_parakeet_present(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    from whisper_aloud.stt import model_download as md
+    d = md.model_dir("parakeet-tdt-0.6b-v3")
+    d.mkdir(parents=True)
+    (d / "tokens.txt").write_text("x")
+    (d / "encoder.onnx").write_bytes(b"\x00")
+    entry = catalog.get("parakeet", "parakeet-tdt-0.6b-v3")
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is True
+    assert state.detection == "sherpa-onnx-cache"
+
+
+def test_download_state_parakeet_absent(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    entry = catalog.get("parakeet", "parakeet-tdt-0.6b-v3")
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is False
+    assert state.detection == "sherpa-onnx-cache"
+
+
+def test_download_state_faster_whisper_present(monkeypatch, tmp_path):
+    hf_hub = tmp_path / "hub"
+    snapshot = hf_hub / "models--Systran--faster-whisper-base" / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.bin").write_bytes(b"\x00")
+    monkeypatch.setattr(mpl, "_hf_hub_cache_root", lambda: hf_hub)
+    entry = catalog.get("faster-whisper", "base")
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is True
+    assert state.detection == "hf-cache-heuristic"
+
+
+def test_download_state_faster_whisper_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(mpl, "_hf_hub_cache_root", lambda: tmp_path / "hub")
+    entry = catalog.get("faster-whisper", "base")
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is False
+
+
+def test_download_state_resolves_alias_to_canonical_hf_repo_name(monkeypatch, tmp_path):
+    """'turbo' is an alias for large-v3-turbo — the HF cache dir name uses the
+    canonical name, not the alias, so lookup must resolve it first."""
+    hf_hub = tmp_path / "hub"
+    snapshot = (
+        hf_hub / "models--Systran--faster-whisper-large-v3-turbo" / "snapshots" / "abc"
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.bin").write_bytes(b"\x00")
+    monkeypatch.setattr(mpl, "_hf_hub_cache_root", lambda: hf_hub)
+    entry = catalog.get("faster-whisper", "turbo")  # resolved via alias
+    assert entry.name == "large-v3-turbo"
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is True
+
+
+def test_download_state_unknown_engine_is_conservatively_not_downloaded():
+    """A catalog entry for an engine this module doesn't know how to check (e.g. a
+    future streaming engine) reports downloaded=False rather than guessing."""
+    entry = _entry(engine="nemotron-streaming", name="nemotron-streaming-0.6b")
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is False
+    assert state.detection == "unknown"
