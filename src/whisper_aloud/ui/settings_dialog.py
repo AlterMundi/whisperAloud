@@ -16,6 +16,7 @@ from ..config import (
     PersistenceConfig,
     WhisperAloudConfig,
 )
+from ..stt import catalog
 from .error_handler import InputValidator, ValidationError
 from .model_picker_logic import (
     badges_for,
@@ -259,6 +260,50 @@ class SettingsDialog(Gtk.Window):
         page.append(self._license_notice)
 
         self.model_row.connect("notify::selected", self._on_model_row_changed)
+
+        # Advanced override: Engine, Device, Compute type (WHISP-42)
+        self.advanced_row = Adw.ExpanderRow()
+        self.advanced_row.set_title("Advanced")
+        self.advanced_row.set_expanded(False)
+
+        self._engine_keys = catalog.engines()
+        self.engine_row = Adw.ComboRow()
+        self.engine_row.set_title("Engine")
+        self.engine_row.set_model(
+            Gtk.StringList.new([catalog.ENGINES[k] for k in self._engine_keys])
+        )
+        if self._config.model.engine in self._engine_keys:
+            self.engine_row.set_selected(self._engine_keys.index(self._config.model.engine))
+        self.advanced_row.add_row(self.engine_row)
+
+        self.device_row = Adw.ComboRow()
+        self.device_row.set_title("Device")
+        self.device_row.set_model(Gtk.StringList.new(["CPU", "CUDA (GPU)"]))
+        self.device_row.set_selected(1 if self._config.model.device == "cuda" else 0)
+        self.advanced_row.add_row(self.device_row)
+
+        self.compute_type_row = Adw.ComboRow()
+        self.compute_type_row.set_title("Compute type")
+        compute_types = ["int8", "float16", "float32"]  # mirrors config.validate()'s allowlist
+        self.compute_type_row.set_model(Gtk.StringList.new(compute_types))
+        self.compute_type_row.set_selected(
+            compute_types.index(self._config.model.compute_type)
+            if self._config.model.compute_type in compute_types
+            else 0
+        )
+        self.advanced_row.add_row(self.compute_type_row)
+
+        self._model_list_box.append(self.advanced_row)
+
+        self.engine_row.connect("notify::selected", self._on_engine_row_changed)
+        # Set initial compute-type sensitivity for whatever engine is configured, without
+        # triggering a spurious model-row repopulation (the row is already correctly
+        # populated from _refresh_model_row() above).
+        self._suppress_model_sync = True
+        try:
+            self._on_engine_row_changed(self.engine_row, None)
+        finally:
+            self._suppress_model_sync = False
 
         # Language (hidden - managed by main window dropdown now)
         self.language_entry = Gtk.Entry()
@@ -613,6 +658,22 @@ class SettingsDialog(Gtk.Window):
             finally:
                 self._suppress_model_sync = False
 
+    def _on_engine_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
+        """Handle an Advanced→Engine row change: repopulate/re-sync the Model row and
+        update the Compute type row's sensitivity (sherpa-onnx/Parakeet ignores it)."""
+        engine = self._engine_keys[row.get_selected()]
+        self.compute_type_row.set_sensitive(engine != "parakeet")
+        self.compute_type_row.set_tooltip_text(
+            "Not used by this engine" if engine == "parakeet" else None
+        )
+        if self._suppress_model_sync:
+            return
+        self._suppress_model_sync = True
+        try:
+            self._refresh_model_row(preferred_engine=engine)
+        finally:
+            self._suppress_model_sync = False
+
     def _style_setting_rows_in_page(self, page: Gtk.Box) -> None:
         """Apply a shared style class to horizontal setting rows."""
         child = page.get_first_child()
@@ -878,33 +939,13 @@ class SettingsDialog(Gtk.Window):
         page.set_margin_bottom(24)
         scrolled.set_child(page)
 
-        # --- Performance Section ---
-        perf_section = Gtk.Label(label="Performance")
-        perf_section.set_halign(Gtk.Align.START)
-        perf_section.add_css_class("heading")
-        perf_section.add_css_class("wa-section-title")
-        page.append(perf_section)
-
-        # Compute device
-        device_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        device_label = Gtk.Label(label="Compute device:")
-        device_label.set_halign(Gtk.Align.START)
-        device_label.set_hexpand(True)
-
-        self.compute_device_dropdown = Gtk.DropDown.new_from_strings(["CPU", "CUDA (GPU)"])
-        if self._config.model.device == "cuda":
-            self.compute_device_dropdown.set_selected(1)
-
-        device_box.append(device_label)
-        device_box.append(self.compute_device_dropdown)
-        page.append(device_box)
-
         # --- Audio Processing Section ---
+        # (Compute device moved to Settings → General → Model → Advanced, WHISP-42 —
+        # it's now grouped with Engine/Compute type as a single manual-override block.)
         audio_section = Gtk.Label(label="Audio Processing")
         audio_section.set_halign(Gtk.Align.START)
         audio_section.add_css_class("heading")
         audio_section.add_css_class("wa-section-title")
-        audio_section.set_margin_top(12)
         page.append(audio_section)
 
         # Sample rate
