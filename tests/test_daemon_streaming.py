@@ -207,6 +207,30 @@ class TestStreamingStopRecording:
         daemon._mock_glib.source_remove.assert_called()
         assert daemon._partial_timer_id is None
 
+    def test_dropped_chunks_read_before_recorder_stop(self, daemon):
+        """AudioRecorder.dropped_chunks resets once its chunk session is torn
+        down (which stop() does internally), so it must be read before stop()
+        is called, not after."""
+        _install_streaming_engine(daemon)
+        daemon.recorder.is_recording = False
+        daemon.recorder.dropped_chunks = 3
+        daemon.history_manager.add_transcription.return_value = 1
+
+        def _stop():
+            # Simulate AudioRecorder.stop() resetting the counter once its
+            # session is torn down.
+            daemon.recorder.dropped_chunks = 0
+            return np.zeros(16000, dtype=np.float32)
+
+        daemon.ToggleRecording()
+        daemon.recorder.is_recording = True
+        daemon.recorder.stop = MagicMock(side_effect=_stop)
+
+        daemon.StopRecording()
+
+        _text, meta = daemon.TranscriptionReady.call_args[0]
+        assert meta["dropped_chunks"] == 3
+
     def test_non_streaming_session_id_in_meta_too(self, daemon):
         """Additive change: even the plain batch path now includes session_id
         in TranscriptionReady's meta, for client-side correlation."""

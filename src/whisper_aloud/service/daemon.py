@@ -552,6 +552,10 @@ class WhisperAloudService:
                 except Exception as e:
                     logger.warning(f"Failed to capture window: {e}")
 
+            # WHISP-65/57: AudioRecorder.dropped_chunks resets once its chunk
+            # session is torn down, which stop() does internally -- it must be
+            # read *before* stop(), not after, to report anything meaningful.
+            dropped_chunks = self.recorder.dropped_chunks
             audio_data = self.recorder.stop()
 
             # Restore mic gain and resume media (try/finally ensures both run)
@@ -583,10 +587,14 @@ class WhisperAloudService:
             recording_session_id = self._current_session_id or ""
             if self._streaming_session:
                 self.executor.submit(
-                    self._finalize_streaming_and_emit, audio_data, job_id, recording_session_id
+                    self._finalize_streaming_and_emit,
+                    audio_data, job_id, recording_session_id, dropped_chunks,
                 )
             else:
-                self.executor.submit(self._transcribe_and_emit, audio_data, job_id, recording_session_id)
+                self.executor.submit(
+                    self._transcribe_and_emit,
+                    audio_data, job_id, recording_session_id, dropped_chunks,
+                )
 
             # Return immediately - result will be emitted via signal
             return "transcribing"
@@ -951,13 +959,21 @@ class WhisperAloudService:
 
             self._transcribing = True
             recording_session_id = self._current_session_id or ""
+            # Unlike StopRecording, AudioRecorder.stop() has already run (inside
+            # AudioRecorder._auto_stop(), before this callback fires), so
+            # recorder.dropped_chunks has already reset to 0 by the time we could
+            # read it -- a known gap, not fixable from here without changing
+            # AudioRecorder's auto-stop callback contract (WHISP-65).
+            dropped_chunks = 0
             if self._streaming_session:
                 self.executor.submit(
-                    self._finalize_streaming_and_emit, audio_data, job_id, recording_session_id
+                    self._finalize_streaming_and_emit,
+                    audio_data, job_id, recording_session_id, dropped_chunks,
                 )
             else:
                 self.executor.submit(
-                    self._transcribe_and_emit, audio_data, job_id, recording_session_id
+                    self._transcribe_and_emit,
+                    audio_data, job_id, recording_session_id, dropped_chunks,
                 )
             return GLib.SOURCE_REMOVE
 
@@ -992,7 +1008,11 @@ class WhisperAloudService:
         return self.transcriber.transcribe_numpy(audio_data)
 
     def _transcribe_and_emit(
-        self, audio_data, job_id: str = "", recording_session_id: str = ""
+        self,
+        audio_data,
+        job_id: str = "",
+        recording_session_id: str = "",
+        dropped_chunks: int = 0,
     ) -> None:
         """Batch (non-streaming) path: transcribe audio and emit completion
         signal (runs in thread)."""
@@ -1001,10 +1021,16 @@ class WhisperAloudService:
         except Exception as e:
             self._emit_transcription_error(e)
             return
-        self._emit_transcription_success(result, audio_data, job_id, recording_session_id)
+        self._emit_transcription_success(
+            result, audio_data, job_id, recording_session_id, dropped_chunks
+        )
 
     def _finalize_streaming_and_emit(
-        self, audio_data, job_id: str = "", recording_session_id: str = ""
+        self,
+        audio_data,
+        job_id: str = "",
+        recording_session_id: str = "",
+        dropped_chunks: int = 0,
     ) -> None:
         """Streaming path: `engine.finalize()` then the same post-processing as
         the batch path (runs in thread, submitted to the executor only after
@@ -1020,7 +1046,9 @@ class WhisperAloudService:
         except Exception as e:
             self._emit_transcription_error(e)
             return
-        self._emit_transcription_success(result, audio_data, job_id, recording_session_id)
+        self._emit_transcription_success(
+            result, audio_data, job_id, recording_session_id, dropped_chunks
+        )
 
     def _emit_transcription_error(self, exc: Exception) -> None:
         """Shared failure path for both the batch and streaming transcription
@@ -1042,14 +1070,20 @@ class WhisperAloudService:
         GLib.idle_add(_emit_error)
 
     def _emit_transcription_success(
-        self, result, audio_data, job_id: str, recording_session_id: str
+        self,
+        result,
+        audio_data,
+        job_id: str,
+        recording_session_id: str,
+        dropped_chunks: int = 0,
     ) -> None:
         """Shared success path for both the batch and streaming transcription
         routes: save history, emit TranscriptionReady (with `session_id` in
-        meta -- WHISP-57, for client-side correlation with PartialTranscript),
-        then clipboard copy/paste and notifications. All D-Bus signal
-        emissions and indicator updates are marshalled to the GLib main loop
-        via idle_add for thread safety."""
+        meta -- WHISP-57, for client-side correlation with PartialTranscript --
+        and `dropped_chunks`, the chunk-hook queue's drop count for this
+        session, 0 when no hook was registered), then clipboard copy/paste and
+        notifications. All D-Bus signal emissions and indicator updates are
+        marshalled to the GLib main loop via idle_add for thread safety."""
         try:
             entry_id = self.history_manager.add_transcription(
                 result=result,
@@ -1068,6 +1102,7 @@ class WhisperAloudService:
             "confidence": GLib.Variant("d", result.confidence),
             "history_id": GLib.Variant("i", entry_id),
             "session_id": GLib.Variant("s", recording_session_id or ""),
+            "dropped_chunks": GLib.Variant("u", max(0, int(dropped_chunks))),
         }
 
         def _emit_success():

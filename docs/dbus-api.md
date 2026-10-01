@@ -649,11 +649,15 @@ Additive (minor) change, WHISP-57:
   streaming engine (`StreamingSpeechEngine.is_streaming == True`); a
   non-streaming engine's behavior is unchanged. See the signal's own
   section above for the full contract.
-- New key `"session_id"` in `TranscriptionReady`'s `meta` dict (an
-  implementation-defined, forward-compatible dict per the versioning
-  policy below) — a fresh `uuid4().hex` per recording, present for every
-  engine (streaming or not), matching `PartialTranscript`'s `session_id`
-  for the same recording.
+- New keys `"session_id"` and `"dropped_chunks"` in `TranscriptionReady`'s
+  `meta` dict (an implementation-defined, forward-compatible dict per the
+  versioning policy below). `session_id` is a fresh `uuid4().hex` per
+  recording, present for every engine (streaming or not), matching
+  `PartialTranscript`'s `session_id` for the same recording. `dropped_chunks`
+  is the number of per-chunk streaming-hook samples dropped because its
+  queue was full (`AudioRecorder.dropped_chunks`, WHISP-65); 0 when no
+  streaming hook was registered for the recording (i.e. a non-streaming
+  engine, or a streaming engine whose chunk queue never filled up).
 
 ### 1.0.0 — 2026-10-01
 
