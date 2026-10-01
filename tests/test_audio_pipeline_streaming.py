@@ -30,6 +30,7 @@ from whisper_aloud.audio.audio_processor import (
     Denoiser,
     NoiseGate,
     PeakLimiter,
+    StreamingResampler,
 )
 from whisper_aloud.config import AudioProcessingConfig
 
@@ -189,58 +190,20 @@ class TestChunkInvariance:
         chunked = run_chunked(make_stage, call, audio, chunk_ms)
         assert max_abs_diff(one_shot, chunked) < 0.03
 
-    @pytest.mark.parametrize(
-        "chunk_ms",
-        [
-            pytest.param(
-                80,
-                marks=pytest.mark.xfail(
-                    reason="AGC window_ms=300 > chunk; RMS falls into the n<=window_samples "
-                    "branch (audio_processor.py AGC.process ~lines 182-183) and is recomputed "
-                    "from scratch every chunk with zero memory of prior audio. Observed max "
-                    "abs diff vs one-shot ~0.86 on this signal.",
-                    strict=True,
-                ),
-            ),
-            pytest.param(
-                160,
-                marks=pytest.mark.xfail(
-                    reason="Same cause as the 80ms case (chunk < window_ms=300). Observed max "
-                    "abs diff vs one-shot ~0.83.",
-                    strict=True,
-                ),
-            ),
-            pytest.param(
-                560,
-                marks=pytest.mark.xfail(
-                    reason="chunk > window_ms=300 so part of each chunk uses a real sliding "
-                    "window, but the first ~300ms of every chunk still ignores the previous "
-                    "chunk's tail, and the 10ms-block attack/release smoothing compounds the "
-                    "error at the boundary. Observed max abs diff vs one-shot ~1.15 (worse than "
-                    "80/160ms here -- boundary alignment with the loud-tone transient matters "
-                    "more than raw chunk/window ratio).",
-                    strict=True,
-                ),
-            ),
-            pytest.param(
-                1120,
-                marks=pytest.mark.xfail(
-                    reason="Best case tested (chunk >> window_ms): still not invariant, "
-                    "observed max abs diff vs one-shot ~0.045 (vs <1e-6 tolerance asserted "
-                    "here) because the RMS window still resets at the top of every chunk.",
-                    strict=True,
-                ),
-            ),
-        ],
-    )
-    def test_agc_is_not_chunk_invariant(self, chunk_ms):
-        """Documents that AGC chunk-invariance does NOT hold at any tested
-        chunk size, including 1120ms. Root cause: AGC.process() rebuilds its
-        RMS estimate from the cumsum of only the samples it was just given
-        (audio_processor.py ~lines 178-188) instead of carrying a rolling
-        history buffer across calls, so the "desired_gain" target the
-        attack/release smoother chases is wrong for roughly the first
-        window_ms of every chunk after the first.
+    @pytest.mark.parametrize("chunk_ms", CHUNK_SIZES_MS)
+    def test_agc_is_chunk_invariant(self, chunk_ms):
+        """WHISP-65 fix: AGC now carries a rolling history of raw samples
+        across process() calls (``AGC._history``, seeded with up to
+        ``window_samples - 1`` trailing samples from the previous call) so
+        the windowed RMS it computes at the start of a chunk matches what a
+        one-shot call would have seen at that same position. Reconstructing
+        the exact windowed RMS this way makes chunked and one-shot output
+        match to floating-point precision (observed max abs diff is exactly
+        0.0 on this signal at every tested chunk size) rather than the
+        ~0.045-0.86 divergence from before the fix (see git history /
+        WHISP-34 findings for the previous xfail numbers). Tolerance is set
+        at 1e-6 — tighter than the signal's own float32 precision — rather
+        than 0.0 to allow for summation-order floating point noise.
         """
         audio = make_signal()
         make_stage = lambda: AGC(target_db=-18.0)
@@ -249,31 +212,30 @@ class TestChunkInvariance:
         chunked = run_chunked(make_stage, call, audio, chunk_ms)
         assert max_abs_diff(one_shot, chunked) < 1e-6
 
-    @pytest.mark.parametrize(
-        "chunk_ms",
-        [
-            pytest.param(80, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
-            pytest.param(160, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
-            pytest.param(560, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
-            pytest.param(1120, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
-        ],
-    )
-    def test_full_pipeline_is_not_chunk_invariant(self, chunk_ms):
-        """End-to-end AudioPipeline (gate -> AGC -> limiter, denoiser off since
-        the optional noisereduce dependency is not installed here) inherits
-        AGC's non-invariance: observed max abs diff ranges ~0.045 (1120ms) to
-        ~0.54 (560ms) against a <1e-6 tolerance. This is the configuration
-        that would actually feed a streaming ASR engine if the pipeline were
-        called per-chunk instead of once at stop() as it is today.
+    @pytest.mark.parametrize("chunk_ms", CHUNK_SIZES_MS)
+    def test_full_streaming_pipeline_is_chunk_invariant(self, chunk_ms):
+        """End-to-end streaming AudioPipeline (gate -> AGC -> limiter, no
+        denoiser) is now chunk-invariant within a tolerance dominated
+        entirely by NoiseGate's own boundary-dependent approximation (see
+        ``test_noise_gate_is_approximately_chunk_invariant``, bounded at
+        0.03 for the gate alone) — now that AGC is exact (previous test),
+        the gate's small hysteresis-boundary error is the only remaining
+        source of divergence, amplified by subsequent AGC gain and the
+        limiter's tanh saturation to an observed max abs diff of ~0.056 at
+        80/160ms chunk sizes on this signal (0.0 at 560/1120ms, where no
+        gate transition lands near a chunk boundary). Uses the new
+        ``AudioPipeline(..., streaming=True)`` / ``process_chunk()`` entry
+        point (WHISP-65), which is what a streaming ASR caller would use
+        instead of ``process()``.
         """
         audio = make_signal()
         config = AudioProcessingConfig(
-            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False, limiter_enabled=True
+            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=True, limiter_enabled=True
         )
-        call = lambda stage, chunk: stage.process(chunk, SR)
-        one_shot = run_one_shot(lambda: AudioPipeline(config), call, audio)
-        chunked = run_chunked(lambda: AudioPipeline(config), call, audio, chunk_ms)
-        assert max_abs_diff(one_shot, chunked) < 1e-6
+        call = lambda stage, chunk: stage.process_chunk(chunk, SR)
+        one_shot = run_one_shot(lambda: AudioPipeline(config, streaming=True), call, audio)
+        chunked = run_chunked(lambda: AudioPipeline(config, streaming=True), call, audio, chunk_ms)
+        assert max_abs_diff(one_shot, chunked) < 0.1
 
     def test_denoiser_not_chunk_invariant_xfail(self):
         """noisereduce.reduce_noise(y=audio, sr=sr, stationary=True) (Denoiser.process,
@@ -309,3 +271,159 @@ class TestChunkInvariance:
         one_shot = run_one_shot(lambda: Denoiser(strength=0.5), call, audio)
         chunked = run_chunked(lambda: Denoiser(strength=0.5), call, audio, 80)
         np.testing.assert_array_equal(one_shot, chunked)
+
+
+# ---------------------------------------------------------------------------
+# 3. Explicit streaming mode (WHISP-65)
+# ---------------------------------------------------------------------------
+
+class TestExplicitStreamingMode:
+    """AudioPipeline(..., streaming=True) / process_chunk() give callers an
+    explicit, documented streaming entry point distinct from the one-shot
+    process() path used by AudioRecorder.stop() today.
+    """
+
+    def test_streaming_pipeline_never_builds_denoiser(self):
+        """streaming=True must skip the Denoiser even if config enables it --
+        Denoiser is structurally a whole-buffer operation (see module
+        docstring / WHISP-34 findings) and must never be reachable per-chunk.
+        """
+        config = AudioProcessingConfig(denoising_enabled=True)
+        pipeline = AudioPipeline(config, streaming=True)
+        assert pipeline._denoiser is None
+
+    def test_non_streaming_pipeline_keeps_denoiser_when_enabled(self):
+        """Default (streaming=False) one-shot behaviour is unchanged."""
+        config = AudioProcessingConfig(denoising_enabled=True)
+        pipeline = AudioPipeline(config)
+        assert pipeline.streaming is False
+        assert pipeline._denoiser is not None
+
+    def test_process_chunk_requires_streaming_mode(self):
+        """Calling process_chunk() on a non-streaming pipeline is a usage
+        error -- it must fail loudly rather than silently behave like
+        process().
+        """
+        config = AudioProcessingConfig()
+        pipeline = AudioPipeline(config, streaming=False)
+        chunk = np.zeros(1600, dtype=np.float32)
+        with pytest.raises(ValueError, match="streaming=True"):
+            pipeline.process_chunk(chunk, SR)
+
+    def test_process_chunk_matches_process_in_streaming_mode(self):
+        """process_chunk() is a thin wrapper: on a streaming pipeline it must
+        behave exactly like process() (same stages, same output).
+        """
+        config = AudioProcessingConfig(
+            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False, limiter_enabled=True
+        )
+        audio = make_signal()
+        out_via_process = AudioPipeline(config, streaming=True).process(audio.copy(), SR)
+        out_via_chunk = AudioPipeline(config, streaming=True).process_chunk(audio.copy(), SR)
+        np.testing.assert_array_equal(out_via_process, out_via_chunk)
+
+    def test_one_shot_process_output_unchanged_by_agc_history_fix(self):
+        """Regression guard: the AGC rolling-history fix must not change the
+        output of a single one-shot process() call (the path
+        AudioRecorder.stop() uses today) relative to the pre-fix algorithm.
+        A fresh AGC/AudioPipeline instance has empty history on its first
+        call, so the windowed RMS computation is mathematically identical to
+        the old "recompute cumsum over just this call's audio" behaviour.
+        This pins that down with a fixed signal and a fixed expected output
+        checksum-style comparison against an independently reimplemented
+        "old" one-shot AGC.
+        """
+
+        def old_agc_process(audio, sample_rate, target_db=-18.0):
+            target_linear = 10 ** (target_db / 20.0)
+            max_gain = 10 ** (20.0 / 20.0)
+            min_gain = 10 ** (-10.0 / 20.0)
+            attack_ms, release_ms, window_ms = 10.0, 100.0, 300.0
+            n = len(audio)
+            window_samples = max(1, int(window_ms * sample_rate / 1000.0))
+            sq = audio.astype(np.float64) ** 2
+            cumsum = np.cumsum(sq)
+            rms_arr = np.empty(n, dtype=np.float64)
+            if n <= window_samples:
+                rms_arr[:] = np.sqrt(cumsum / np.arange(1, n + 1))
+            else:
+                rms_arr[:window_samples] = np.sqrt(cumsum[:window_samples] / np.arange(1, window_samples + 1))
+                rms_arr[window_samples:] = np.sqrt(
+                    (cumsum[window_samples:] - cumsum[:-window_samples]) / window_samples
+                )
+            desired_gain = np.where(
+                rms_arr > 1e-8,
+                np.clip(target_linear / np.maximum(rms_arr, 1e-8), min_gain, max_gain),
+                1.0,
+            )
+            block_size = max(1, int(sample_rate * 0.010))
+            tau_attack = max(1.0, attack_ms * sample_rate / 1000.0)
+            tau_release = max(1.0, release_ms * sample_rate / 1000.0)
+            block_attack_coeff = np.exp(-block_size / tau_attack)
+            block_release_coeff = np.exp(-block_size / tau_release)
+            gain_arr = np.empty(n, dtype=np.float64)
+            gain = 1.0
+            for start in range(0, n, block_size):
+                end = min(start + block_size, n)
+                block_target = float(desired_gain[start:end].mean())
+                coeff = block_attack_coeff if block_target < gain else block_release_coeff
+                gain = coeff * gain + (1 - coeff) * block_target
+                gain_arr[start:end] = gain
+            return (audio * gain_arr).astype(np.float32)
+
+        audio = make_signal()
+        old_output = old_agc_process(audio, SR)
+        new_output = AGC(target_db=-18.0).process(audio.copy(), SR)
+        np.testing.assert_allclose(old_output, new_output, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 4. Streaming resampler continuity (WHISP-65)
+# ---------------------------------------------------------------------------
+
+class TestStreamingResamplerContinuity:
+    """StreamingResampler must converge to one-shot resample_poly output when
+    fed the same signal in chunks, unlike AudioProcessor.resample() (FFT-based,
+    non-causal -- see TestNoLookahead.test_resample_has_lookahead_xfail).
+    """
+
+    SR_IN = 48000
+    SR_OUT = 16000
+
+    def _make_tone(self, duration_s: float = 2.24, seed: int = 7) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        n = int(duration_s * self.SR_IN)
+        t = np.arange(n) / self.SR_IN
+        sig = 0.3 * np.sin(2 * np.pi * 220 * t) + 0.05 * rng.normal(size=n)
+        return sig.astype(np.float32)
+
+    @pytest.mark.parametrize("chunk_ms", CHUNK_SIZES_MS)
+    def test_chunked_resampling_matches_one_shot(self, chunk_ms):
+        from scipy import signal as scipy_signal
+
+        audio = self._make_tone()
+        one_shot = scipy_signal.resample_poly(audio, self.SR_OUT, self.SR_IN).astype(np.float32)
+
+        chunk_samples = int(self.SR_IN * chunk_ms / 1000)
+        resampler = StreamingResampler(self.SR_IN, self.SR_OUT)
+        pieces = [
+            resampler.process(audio[start:start + chunk_samples])
+            for start in range(0, len(audio), chunk_samples)
+        ]
+        chunked = np.concatenate(pieces)
+
+        assert len(chunked) == len(one_shot)
+        # FIR-overlap approximation, not bit-exact: bounded well under the
+        # signal's own amplitude (observed max abs diff ~0.013-0.029 on this
+        # signal across the tested chunk sizes).
+        assert max_abs_diff(one_shot, chunked) < 0.05
+
+    def test_passthrough_when_rate_already_16k(self):
+        """No resampling work (identity) is expected to be skipped by callers
+        when orig_rate == target_rate; StreamingResampler itself still works
+        correctly (up=down=1 is a no-op resample_poly call).
+        """
+        resampler = StreamingResampler(16000, 16000)
+        chunk = self._make_tone(duration_s=0.1).astype(np.float32)
+        out = resampler.process(chunk)
+        np.testing.assert_allclose(out, chunk, atol=1e-5)

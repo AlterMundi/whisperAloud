@@ -1,6 +1,7 @@
 """Audio processing utilities."""
 
 import logging
+from math import gcd
 from typing import Tuple
 
 import numpy as np
@@ -46,6 +47,12 @@ class NoiseGate:
         self._envelope = 0.0
         self._gate_open = False
         self._hold_remaining = 0  # samples left in hold period
+
+    def reset(self) -> None:
+        """Clear envelope/open/hold state, as if freshly constructed."""
+        self._envelope = 0.0
+        self._gate_open = False
+        self._hold_remaining = 0
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply noise gate to audio chunk.
@@ -159,6 +166,19 @@ class AGC:
         self.release_ms = release_ms
         self.window_ms = window_ms
         self._current_gain = 1.0
+        # Rolling history of raw samples from the tail of the previous process()
+        # call, used to seed the RMS window so chunked processing matches
+        # one-shot processing (see WHISP-65 / WHISP-34 finding: AGC used to
+        # recompute its RMS window from scratch on every call, with no memory
+        # of prior audio, which made chunked output diverge sharply from
+        # one-shot output). Starts empty, so the very first call (or a
+        # single one-shot call) behaves exactly as before.
+        self._history = np.empty(0, dtype=np.float64)
+
+    def reset(self) -> None:
+        """Clear gain and RMS history, as if freshly constructed."""
+        self._current_gain = 1.0
+        self._history = np.empty(0, dtype=np.float64)
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply AGC to audio chunk.
@@ -166,6 +186,12 @@ class AGC:
         Uses a sliding RMS window to estimate signal level, then smoothly
         adjusts gain toward the target level. Attack (gain decrease) is faster
         than release (gain increase) to prevent clipping on transients.
+
+        The RMS window is seeded with up to ``window_samples - 1`` trailing
+        samples from the previous call (``self._history``), so splitting a
+        signal into chunks and calling ``process()`` repeatedly reproduces the
+        same per-sample RMS values as a single one-shot call over the whole
+        signal — this is what makes the pipeline streaming-safe (WHISP-65).
         """
         if audio.size == 0:
             return audio
@@ -175,17 +201,30 @@ class AGC:
         attack_coeff = np.exp(-1.0 / max(1.0, self.attack_ms * sample_rate / 1000.0))
         release_coeff = np.exp(-1.0 / max(1.0, self.release_ms * sample_rate / 1000.0))
 
-        # Precompute per-sample RMS using cumulative sum (O(n))
-        sq = audio.astype(np.float64) ** 2
+        # Prepend rolling history so the windowed RMS at the start of this
+        # chunk sees the same trailing samples a one-shot call would have.
+        history = self._history
+        h = len(history)
+        combined = np.concatenate([history, audio.astype(np.float64)])
+        m = len(combined)
+
+        # Precompute per-sample RMS over (history + chunk) using cumulative sum (O(m))
+        sq = combined ** 2
         cumsum = np.cumsum(sq)
-        rms_arr = np.empty(n, dtype=np.float64)
-        if n <= window_samples:
-            rms_arr[:] = np.sqrt(cumsum / np.arange(1, n + 1))
+        rms_full = np.empty(m, dtype=np.float64)
+        if m <= window_samples:
+            rms_full[:] = np.sqrt(cumsum / np.arange(1, m + 1))
         else:
-            rms_arr[:window_samples] = np.sqrt(cumsum[:window_samples] / np.arange(1, window_samples + 1))
-            rms_arr[window_samples:] = np.sqrt(
+            rms_full[:window_samples] = np.sqrt(cumsum[:window_samples] / np.arange(1, window_samples + 1))
+            rms_full[window_samples:] = np.sqrt(
                 (cumsum[window_samples:] - cumsum[:-window_samples]) / window_samples
             )
+        # Only the portion covering this call's own samples is relevant below.
+        rms_arr = rms_full[h:]
+
+        # Keep up to window_samples-1 trailing raw samples for the next call.
+        keep = min(max(window_samples - 1, 0), m)
+        self._history = combined[m - keep:] if keep > 0 else np.empty(0, dtype=np.float64)
 
         # Compute desired gain per sample (vectorized)
         desired_gain = np.where(
@@ -498,17 +537,37 @@ class AudioPipeline:
 
     Args:
         config: AudioProcessingConfig controlling which stages are active.
+        streaming: When True, the pipeline is in streaming mode: the
+            whole-buffer ``Denoiser`` (noisereduce) is never instantiated,
+            regardless of ``config.denoising_enabled``. Per WHISP-34's
+            findings, ``Denoiser`` estimates its noise profile from — and
+            spectrally gates — the *entire* array passed to a single call,
+            with no state kept between calls, so it is structurally
+            incompatible with per-chunk processing (it would need a
+            genuinely streaming/causal noise suppressor instead, which is
+            out of scope here). ``NoiseGate``, ``AGC``, and ``PeakLimiter``
+            are all causal/stateful and safe to call per-chunk, so they are
+            unaffected by this flag. Defaults to False, which preserves
+            today's one-shot behaviour used by ``AudioRecorder.stop()``
+            unchanged.
     """
 
-    def __init__(self, config: AudioProcessingConfig):
+    def __init__(self, config: AudioProcessingConfig, streaming: bool = False):
         self.config = config
+        self.streaming = streaming
         self._gate = NoiseGate(threshold_db=config.noise_gate_threshold_db) if config.noise_gate_enabled else None
         self._agc = AGC(target_db=config.agc_target_db, max_gain_db=config.agc_max_gain_db) if config.agc_enabled else None
         self._limiter = PeakLimiter(ceiling_db=config.limiter_ceiling_db) if config.limiter_enabled else None
-        self._denoiser = Denoiser(strength=config.denoising_strength) if config.denoising_enabled else None
+        self._denoiser = (
+            None if streaming else (Denoiser(strength=config.denoising_strength) if config.denoising_enabled else None)
+        )
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Process audio through the pipeline."""
+        """Process audio through the pipeline (gate -> AGC -> denoise -> limiter).
+
+        This is the one-shot entry point used by ``AudioRecorder.stop()`` on
+        the full recorded buffer; its behaviour is unchanged by WHISP-65.
+        """
         result = audio
         if self._gate:
             result = self._gate.process(result, sample_rate)
@@ -519,3 +578,96 @@ class AudioPipeline:
         if self._limiter:
             result = self._limiter.process(result)
         return result.astype(np.float32)
+
+    def process_chunk(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Process one streaming chunk (gate -> AGC -> limiter, no denoiser).
+
+        Requires the pipeline to have been constructed with ``streaming=True``
+        — this is a thin, explicit wrapper around ``process()`` (which already
+        skips the denoiser stage when ``self._denoiser`` is None) that exists
+        to make the streaming contract obvious at call sites and to fail
+        loudly if a caller forgets to opt into streaming mode.
+        """
+        if not self.streaming:
+            raise ValueError(
+                "process_chunk() requires AudioPipeline(..., streaming=True); "
+                "use process() for one-shot (non-streaming) processing."
+            )
+        return self.process(audio, sample_rate)
+
+    def reset(self) -> None:
+        """Clear all stateful history (gate envelope/hold, AGC gain/RMS
+        history) so this pipeline behaves like a freshly constructed one on
+        the next process()/process_chunk() call.
+
+        This exists because AudioRecorder keeps a single AudioPipeline
+        instance (``self._pipeline``) alive across many recording sessions
+        (the daemon reuses one AudioRecorder for its whole lifetime) --
+        without resetting it between recordings, AGC's rolling RMS history
+        and NoiseGate's envelope/hold state from recording N would leak into
+        recording N+1's one-shot process() call (WHISP-65 audit finding).
+        PeakLimiter and Denoiser are stateless, so there is nothing to reset
+        for them.
+        """
+        if self._gate is not None:
+            self._gate.reset()
+        if self._agc is not None:
+            self._agc.reset()
+
+
+class StreamingResampler:
+    """Causal, chunk-wise resampler for streaming audio.
+
+    ``AudioProcessor.resample()`` uses ``scipy.signal.resample``, which is
+    FFT-based over the *entire* input array — every output sample depends on
+    every input sample, including ones that haven't been recorded yet in a
+    streaming context (WHISP-34 finding: ``test_resample_has_lookahead_xfail``).
+    That makes it unsuitable for per-chunk use.
+
+    This class wraps ``scipy.signal.resample_poly`` (a local, FIR/polyphase
+    operation) and carries a short rolling history of raw input samples
+    across calls, so that splitting a signal into chunks and resampling each
+    one in sequence converges to the same result as resampling the whole
+    signal at once — see ``tests/test_audio_pipeline_streaming.py``'s
+    resampling-continuity test.
+    """
+
+    def __init__(self, orig_rate: int, target_rate: int):
+        if orig_rate <= 0 or target_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        g = gcd(orig_rate, target_rate)
+        self.orig_rate = orig_rate
+        self.target_rate = target_rate
+        self.up = target_rate // g
+        self.down = orig_rate // g
+        self._history = np.empty(0, dtype=np.float32)
+        # scipy's default Kaiser FIR kernel for resample_poly spans roughly
+        # 2 * 10 * max(up, down) + 1 taps; keeping that many trailing raw
+        # samples as history is enough for the filter to "see" the same
+        # context a one-shot call would have at the start of each chunk.
+        self._history_len = 10 * max(self.up, self.down)
+
+    def reset(self) -> None:
+        """Clear carried-over history (start a fresh streaming session)."""
+        self._history = np.empty(0, dtype=np.float32)
+
+    def process(self, chunk: np.ndarray) -> np.ndarray:
+        """Resample one chunk, continuing from the previous call's history."""
+        if chunk.size == 0:
+            return chunk.astype(np.float32)
+
+        history = self._history
+        h = len(history)
+        combined = np.concatenate([history, chunk.astype(np.float32)])
+
+        resampled_combined = signal.resample_poly(combined, self.up, self.down)
+
+        # Samples of resampled_combined attributable to the history prefix,
+        # using the same length scaling resample_poly itself applies.
+        h_out = int(round(h * self.up / self.down))
+        out = resampled_combined[h_out:]
+
+        keep = min(self._history_len, len(combined))
+        self._history = combined[len(combined) - keep:] if keep > 0 else np.empty(0, dtype=np.float32)
+
+        return out.astype(np.float32)
