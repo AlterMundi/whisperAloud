@@ -12,6 +12,7 @@ from gi.repository import GLib, Gtk
 
 from ..config import WhisperAloudConfig
 from ..service.history_client import DaemonHistoryManager
+from .daemon_connect_logic import ConnectPhase, decide_after_attempt
 from .error_handler import (
     handle_model_load_error,
 )
@@ -53,6 +54,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self._timer_active: bool = False
         self._timer_seconds: int = 0
         self._daemon_available: bool = False
+        # 1-indexed count of D-Bus activation attempts made since the last
+        # success or manual retry click; drives daemon_connect_logic's
+        # auto-retry-with-backoff decision (WHISP-60).
+        self._connect_attempt: int = 0
+        self._retry_timeout_id: int = 0
         self._current_entry_id: Optional[int] = None
         self._edit_save_timer_id: int = 0
         self._buffer_changed_handler_id: int = 0
@@ -343,9 +349,14 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         Connect to daemon asynchronously.
 
-        Returns:
+        Each call is one D-Bus activation attempt (see service/client.py's
+        WhisperAloudClient -- it never spawns a daemon subprocess itself; the
+        first D-Bus call is what makes dbus-daemon auto-start the service if
+        an activation file is installed). Returns:
             False to remove this idle callback
         """
+        self._connect_attempt += 1
+        attempt = self._connect_attempt
         self._show_loading_dialog()
 
         def _connect_in_thread():
@@ -356,12 +367,38 @@ class MainWindow(Gtk.ApplicationWindow):
                 if client.is_connected:
                     GLib.idle_add(self._on_daemon_connected, client)
                 else:
-                    GLib.idle_add(self._on_daemon_unavailable)
+                    GLib.idle_add(self._on_connect_attempt_failed, attempt)
             except Exception as e:
                 logger.error(f"Failed to connect to daemon: {e}", exc_info=True)
                 GLib.idle_add(self._on_load_error, str(e))
 
         threading.Thread(target=_connect_in_thread, daemon=True).start()
+        return False
+
+    def _on_connect_attempt_failed(self, attempt: int) -> bool:
+        """
+        Called on the main thread after a failed D-Bus activation attempt.
+
+        Delegates to the pure decide_after_attempt() policy (WHISP-60): either
+        schedule another automatic attempt with backoff, or give up and show
+        the "daemon unavailable" state with a manual retry button.
+
+        Returns:
+            False to remove this idle callback
+        """
+        decision = decide_after_attempt(connected=False, attempt=attempt)
+
+        if decision.phase is ConnectPhase.WAITING_RETRY:
+            self._hide_loading_dialog()
+            self.status_bar.set_status(
+                f"Daemon not available, retrying in {decision.retry_delay_seconds:.0f}s..."
+            )
+            self._retry_timeout_id = GLib.timeout_add(
+                int(decision.retry_delay_seconds * 1000), self._init_components_async
+            )
+        else:
+            self._on_daemon_unavailable()
+
         return False
 
     def _on_daemon_connected(self, client) -> bool:
@@ -548,10 +585,16 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         Retry connecting to the daemon.
 
+        A manual click starts a fresh auto-retry burst (see
+        daemon_connect_logic.decide_after_attempt): the attempt counter resets
+        to 0 so the user gets the full automatic-backoff budget again, not an
+        immediate re-exhaustion back to the unavailable dialog.
+
         Args:
             dialog: The unavailable dialog to close on success
         """
         dialog.close()
+        self._connect_attempt = 0
         GLib.idle_add(self._init_components_async)
 
     def _show_loading_dialog(self) -> None:
@@ -1286,6 +1329,11 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._edit_save_timer_id:
             GLib.source_remove(self._edit_save_timer_id)
             self._edit_save_timer_id = 0
+
+        # Cancel a pending auto-retry-with-backoff timeout (WHISP-60), if any
+        if self._retry_timeout_id:
+            GLib.source_remove(self._retry_timeout_id)
+            self._retry_timeout_id = 0
 
         # Disconnect D-Bus client
         if self.client:
