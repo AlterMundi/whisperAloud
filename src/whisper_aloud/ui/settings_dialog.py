@@ -305,6 +305,14 @@ class SettingsDialog(Gtk.Window):
         finally:
             self._suppress_model_sync = False
 
+        # "View full catalog…" — reachable even when the language/device filter above
+        # hides a model the user still wants to pick manually (WHISP-42 §1.6).
+        catalog_row = Adw.ActionRow()
+        catalog_row.set_title("View full catalog…")
+        catalog_row.set_activatable(True)
+        catalog_row.connect("activated", self._on_view_catalog_clicked)
+        self._model_list_box.append(catalog_row)
+
         # Language (hidden - managed by main window dropdown now)
         self.language_entry = Gtk.Entry()
         self.language_entry.set_text(self._config.transcription.language or "")
@@ -584,12 +592,21 @@ class SettingsDialog(Gtk.Window):
         entry to select (used when a catalog-view row is explicitly chosen), bypassing
         the default_index() recommendation fallback since the user already made an
         explicit choice.
+
+        When both `preferred_engine` and `preferred_name` are given (an explicit
+        catalog-view pick), the language/device filter is bypassed entirely for that
+        engine's entries — the whole point of the full-catalog view (spec §1.6) is to
+        let the user cross a language filter that would otherwise hide the entry they
+        just chose (e.g. picking Parakeet from the catalog while language="ja").
         """
-        entries = selectable_entries(
-            self._config.transcription.language, self._config.model.device
-        )
-        if preferred_engine is not None:
-            entries = [e for e in entries if e.engine == preferred_engine] or entries
+        if preferred_engine is not None and preferred_name is not None:
+            entries = catalog.models_for(preferred_engine)
+        else:
+            entries = selectable_entries(
+                self._config.transcription.language, self._config.model.device
+            )
+            if preferred_engine is not None:
+                entries = [e for e in entries if e.engine == preferred_engine] or entries
 
         self._model_entries = entries
         labels = [f"{e.label} · {_fmt_size(e.size_mb)} · {e.tier}" for e in entries]
@@ -673,6 +690,51 @@ class SettingsDialog(Gtk.Window):
             self._refresh_model_row(preferred_engine=engine)
         finally:
             self._suppress_model_sync = False
+
+    def _on_view_catalog_clicked(self, _row: "Adw.ActionRow") -> None:
+        """Open a read-only window listing every catalog.entries() row, unfiltered by
+        language/device — the only way to cross the Model row's language filter."""
+        window = Gtk.Window(transient_for=self, modal=True)
+        window.set_title("Model Catalog")
+        window.set_default_size(560, 480)
+
+        scrolled = Gtk.ScrolledWindow(vexpand=True)
+        list_box = Gtk.ListBox()
+        list_box.add_css_class("boxed-list")
+        for entry in catalog.entries():
+            row = Adw.ActionRow()
+            row.set_title(entry.label)
+            langs = "multilingual" if entry.languages is None else f"{len(entry.languages)} languages"
+            size = _fmt_size(entry.size_mb)
+            state = download_state_for(entry)
+            downloaded = "downloaded" if state.downloaded else "not downloaded"
+            row.set_subtitle(f"{entry.engine} · {size} · {langs} · {entry.license} · {downloaded}")
+            row.set_activatable(True)
+            row.connect("activated", self._on_catalog_entry_chosen, entry, window)
+            list_box.append(row)
+        scrolled.set_child(list_box)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(Gtk.HeaderBar())
+        box.append(scrolled)
+        window.set_child(box)
+        window.present()
+
+    def _on_catalog_entry_chosen(
+        self, _row: "Adw.ActionRow", entry: "catalog.ModelEntry", window: Gtk.Window
+    ) -> None:
+        """Honor an explicit catalog-view pick: select that exact entry (bypassing the
+        default_index() recommendation fallback) and sync Advanced→Engine to match."""
+        window.close()
+        self._suppress_model_sync = True
+        try:
+            self._refresh_model_row(preferred_engine=entry.engine, preferred_name=entry.name)
+            if entry.engine in self._engine_keys:
+                self.engine_row.set_selected(self._engine_keys.index(entry.engine))
+        finally:
+            self._suppress_model_sync = False
+        self._update_notices()
+        self._mark_dirty()
 
     def _style_setting_rows_in_page(self, page: Gtk.Box) -> None:
         """Apply a shared style class to horizontal setting rows."""
