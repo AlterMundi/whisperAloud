@@ -929,6 +929,163 @@ class TestHistoryManagerExport:
         assert "Transcription number 2" in content
         assert "[" in content  # Timestamp markers
 
+    def test_export_markdown_includes_notes(self, manager_with_data, tmp_path):
+        """An entry with notes gets a '**Notes:**' block in the markdown export."""
+        entries = manager_with_data.get_recent()
+        favorited = next(e for e in entries if e.favorite)
+        manager_with_data.update_notes(favorited.id, "Remember to double-check this one")
+
+        output_file = tmp_path / "export_with_notes.md"
+        manager_with_data.export_markdown(manager_with_data.get_recent(), output_file)
+
+        content = output_file.read_text()
+        assert "**Notes:**" in content
+        assert "Remember to double-check this one" in content
+
+
+class TestHistoryManagerWithAudioArchive:
+    """WHISP-45: add_transcription/delete/cleanup_old paths that touch a real AudioArchive.
+
+    AudioArchive is lightweight (FLAC file I/O under tmp_path, no network/process
+    boundary), so it is exercised for real here rather than mocked — these tests are
+    about HistoryManager's archiving/dedup/rollback decisions, not AudioArchive itself
+    (already covered by TestAudioArchive below).
+    """
+
+    @pytest.fixture
+    def manager(self, temp_db_path, temp_audio_archive):
+        from whisper_aloud.config import PersistenceConfig
+        from whisper_aloud.persistence import HistoryManager
+
+        config = PersistenceConfig(
+            db_path=temp_db_path,
+            save_audio=True,
+            audio_archive_path=temp_audio_archive,
+        )
+        return HistoryManager(config)
+
+    @pytest.fixture
+    def sample_transcription_result(self):
+        from whisper_aloud.transcriber import TranscriptionResult
+
+        return TranscriptionResult(
+            text="Archived transcription",
+            language="en",
+            confidence=0.9,
+            duration=1.0,
+            processing_time=0.2,
+            segments=[],
+        )
+
+    @pytest.fixture
+    def sample_audio(self):
+        return np.sin(np.linspace(0, 10, 16000)).astype(np.float32)
+
+    def test_add_transcription_archives_audio(self, manager, sample_transcription_result, sample_audio):
+        entry_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+
+        entry = manager.get_by_id(entry_id)
+        assert entry.audio_file_path is not None
+        assert Path(entry.audio_file_path).exists()
+        assert entry.audio_hash is not None
+
+    def test_add_transcription_dedupes_identical_audio(self, manager, sample_transcription_result, sample_audio):
+        """With deduplicate_audio=True (the default), identical audio reuses one entry."""
+        first_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+        second_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+
+        assert first_id == second_id
+        assert len(manager.get_recent()) == 1
+
+    def test_add_transcription_without_dedup_creates_separate_entries(
+        self, temp_db_path, temp_audio_archive, sample_transcription_result, sample_audio
+    ):
+        from whisper_aloud.config import PersistenceConfig
+        from whisper_aloud.persistence import HistoryManager
+
+        config = PersistenceConfig(
+            db_path=temp_db_path,
+            save_audio=True,
+            audio_archive_path=temp_audio_archive,
+            deduplicate_audio=False,
+        )
+        manager = HistoryManager(config)
+
+        first_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+        second_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+
+        assert first_id != second_id
+        assert len(manager.get_recent()) == 2
+
+    def test_add_transcription_rolls_back_audio_on_db_failure(
+        self, manager, sample_transcription_result, sample_audio, monkeypatch
+    ):
+        """If the DB insert fails after audio was archived, the orphaned file is deleted."""
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(manager.db, "insert_or_get_by_hash", _boom)
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            manager.add_transcription(sample_transcription_result, audio=sample_audio)
+
+        # The archived file must have been rolled back (no entries reference it).
+        archived_files = list(Path(manager.audio_archive.archive_path).rglob("*.flac"))
+        assert archived_files == []
+
+    def test_delete_removes_unreferenced_audio_file(self, manager, sample_transcription_result, sample_audio):
+        entry_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+        entry = manager.get_by_id(entry_id)
+        audio_path = Path(entry.audio_file_path)
+        assert audio_path.exists()
+
+        result = manager.delete(entry_id)
+
+        assert result is True
+        assert not audio_path.exists()
+
+    def test_delete_keeps_audio_file_still_referenced_by_another_entry(
+        self, temp_db_path, temp_audio_archive, sample_transcription_result, sample_audio
+    ):
+        """Deleting one entry must not remove audio another (deduped) entry still points to."""
+        from whisper_aloud.config import PersistenceConfig
+        from whisper_aloud.persistence import HistoryManager
+
+        config = PersistenceConfig(
+            db_path=temp_db_path,
+            save_audio=True,
+            audio_archive_path=temp_audio_archive,
+            deduplicate_audio=False,
+        )
+        manager = HistoryManager(config)
+
+        first_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+        # A second, distinct entry that happens to reference the same audio file by
+        # reusing the hash manually (simulates two dedup-eligible rows sharing a file).
+        first_entry = manager.get_by_id(first_id)
+        second_entry = HistoryEntry.from_transcription_result(
+            sample_transcription_result,
+            audio_path=first_entry.audio_file_path,
+            audio_hash=first_entry.audio_hash,
+        )
+        second_id = manager.db.insert(second_entry)
+
+        manager.delete(first_id)
+
+        assert Path(first_entry.audio_file_path).exists()
+        assert manager.get_by_id(second_id) is not None
+
+    def test_cleanup_old_with_audio_cleanup_removes_orphans(self, manager, sample_transcription_result, sample_audio):
+        entry_id = manager.add_transcription(sample_transcription_result, audio=sample_audio)
+        audio_path = Path(manager.get_by_id(entry_id).audio_file_path)
+        manager.db.delete(entry_id)  # orphan the audio file without going through delete()
+        assert audio_path.exists()
+
+        manager.cleanup_old(days=0, cleanup_audio=True)
+
+        assert not audio_path.exists()
+
 
 class TestAudioArchive:
     """Test audio archive functionality."""
