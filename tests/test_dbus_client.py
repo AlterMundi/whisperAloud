@@ -204,6 +204,34 @@ class TestWhisperAloudClient:
         mock_proxy.Quit.assert_called_once()
         assert result is True
 
+    def test_get_api_version_reads_property(self):
+        """get_api_version should read the ApiVersion property (not call it)."""
+        _, client, _, mock_proxy = self._make_client()
+        mock_proxy.ApiVersion = "1.0.0"
+        result = client.get_api_version()
+        assert result == "1.0.0"
+
+    def test_get_api_version_returns_empty_when_disconnected(self):
+        """get_api_version should return "" when not connected."""
+        _, client, _, _ = self._make_client(daemon_available=False)
+        assert client.get_api_version() == ""
+
+    def test_get_api_version_handles_property_read_exception(self):
+        """get_api_version should catch exceptions and return ""."""
+
+        class _RaisingProxy:
+            @property
+            def ApiVersion(self):
+                raise Exception("no such property")
+
+        client_module = _import_client_module()
+        with patch.object(client_module, "SessionBus") as mock_bus_cls:
+            mock_bus = MagicMock()
+            mock_bus_cls.return_value = mock_bus
+            mock_bus.get.return_value = _RaisingProxy()
+            client = client_module.WhisperAloudClient()
+            assert client.get_api_version() == ""
+
     # ─── Error handling tests ────────────────────────────────────────────
 
     def test_method_returns_false_when_disconnected(self):
