@@ -18,6 +18,11 @@ _real_cache = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
 os.environ.setdefault("HF_HOME", os.path.join(_real_cache, "huggingface"))
 _test_home = tempfile.mkdtemp(prefix="whisper-aloud-tests-")
 atexit.register(shutil.rmtree, _test_home, ignore_errors=True)
+# Remember the original address so tests/_private_bus.py can decide (without
+# connecting) whether it is a throwaway dbus-run-session bus.
+os.environ.setdefault(
+    "WHISPER_ALOUD_TEST_ORIGINAL_DBUS_ADDRESS", os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+)
 os.environ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/nonexistent/whisper-aloud-tests-bus"
 for _var in ("WAYLAND_DISPLAY", "DISPLAY"):
     os.environ.pop(_var, None)
