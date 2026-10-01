@@ -174,24 +174,13 @@ def test_cli_transcribe_unexpected_exception_verbose_prints_traceback(mock_trans
             assert "Traceback" in capsys.readouterr().err
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: both the top-level parser and the `transcribe` subparser define "
-        "--verbose/-v (default=False). When -v is given *before* the subcommand "
-        "(`whisper-aloud -v transcribe file.wav`), the subparser's own default "
-        "silently overwrites args.verbose back to False, so verbose output (model "
-        "load message, metadata block, traceback-on-error) is lost even though the "
-        "user asked for it. `-v` placed after the subcommand works correctly. "
-        "See src/whisper_aloud/__main__.py build_parser(): the top-level --verbose "
-        "(~line 476) and `p_transcribe`'s own --verbose (~line 531) collide."
-    ),
-)
-def test_global_verbose_flag_before_subcommand_is_lost():
+def test_verbose_flag_works_before_or_after_subcommand():
     from whisper_aloud.__main__ import build_parser
 
     args = build_parser().parse_args(["-v", "transcribe", "test.wav"])
     assert args.verbose is True
+    assert build_parser().parse_args(["transcribe", "-v", "test.wav"]).verbose is True
+    assert build_parser().parse_args(["transcribe", "test.wav"]).verbose is False
 
 
 # ─── Daemon commands ──────────────────────────────────────────────────────────

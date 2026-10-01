@@ -555,7 +555,7 @@ examples:
         help="compute device (default: auto)",
     )
     p_transcribe.add_argument(
-        "--verbose", "-v", action="store_true",
+        "--verbose", "-v", action="store_true", default=argparse.SUPPRESS,
         help="show detailed output",
     )
 
