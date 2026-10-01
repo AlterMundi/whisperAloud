@@ -31,8 +31,39 @@ for _var, _sub in (
     ("XDG_DATA_HOME", "data"),
     ("XDG_CACHE_HOME", "cache"),
     ("XDG_STATE_HOME", "state"),
+    ("XDG_RUNTIME_DIR", "runtime"),
 ):
     os.environ[_var] = os.path.join(_test_home, _sub)
+# A real runtime dir holds the wayland-0, pipewire-0 and bus sockets; clipboard
+# tools fall back to wayland-0 even without WAYLAND_DISPLAY.
+os.makedirs(os.environ["XDG_RUNTIME_DIR"], mode=0o700)
+for _var in ("PULSE_SERVER", "XAUTHORITY", "AT_SPI_BUS_ADDRESS"):
+    os.environ.pop(_var, None)
+os.environ["NO_AT_BRIDGE"] = "1"
+
+# Last line of defence: no test may launch a tool that acts on the user's
+# desktop (clipboard, input injection, volume, notifications, sounds). Tests
+# that exercise these code paths mock subprocess themselves, above this layer.
+import subprocess  # noqa: E402
+
+_DESKTOP_TOOLS = frozenset({
+    "wl-copy", "wl-paste", "xclip", "xsel", "xdotool", "ydotool", "wtype",
+    "wpctl", "pactl", "notify-send", "paplay", "canberra-gtk-play",
+})
+_real_popen_init = subprocess.Popen.__init__
+
+
+def _guarded_popen_init(self, args, *a, **kw):
+    argv0 = args if isinstance(args, (str, bytes)) else (args[0] if args else "")
+    if isinstance(argv0, bytes):
+        argv0 = argv0.decode(errors="replace")
+    name = os.path.basename(str(argv0).split()[0]) if str(argv0).strip() else ""
+    if name in _DESKTOP_TOOLS:
+        raise RuntimeError(f"test tried to run desktop tool {name!r}; mock it instead")
+    _real_popen_init(self, args, *a, **kw)
+
+
+subprocess.Popen.__init__ = _guarded_popen_init
 
 # Keep the worktree's src ahead of any other whisper_aloud installation
 # so that editable-install path resets don't affect test results.

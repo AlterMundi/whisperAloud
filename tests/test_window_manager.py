@@ -74,12 +74,12 @@ class TestXdotoolBackend:
 
 class TestNoneBackend:
     def test_get_active_window_returns_none(self):
-        wm = WindowManager()
-        wm.backend = "none"
+        with patch.object(WindowManager, "_detect_backend", return_value="none"):
+            wm = WindowManager()
         assert wm.get_active_window() is None
 
     def test_activate_window_returns_false(self):
-        wm = WindowManager()
-        wm.backend = "none"
+        with patch.object(WindowManager, "_detect_backend", return_value="none"):
+            wm = WindowManager()
         info = WindowInfo(window_id=1, title="x", backend="none")
         assert wm.activate_window(info) is False
