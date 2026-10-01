@@ -1,6 +1,7 @@
 """Audio recording with state management."""
 
 import logging
+import os
 import queue
 import threading
 import time
@@ -70,6 +71,58 @@ class _ChunkSession:
         self._last_drop_warning = 0.0
 
 
+class _FakeInputStream:
+    """Drop-in stand-in for sd.InputStream that feeds a pre-loaded WAV's
+    samples to the recorder's real audio callback on a background thread,
+    chunked at the configured blocksize, padding with silence past EOF
+    instead of looping -- a test that wants to exercise
+    max_recording_duration auto-stop against a short fixture file can still
+    reach that duration deterministically (looping would make "how much
+    silence was processed" depend on timing). Only `.start()`/`.stop()`/
+    `.close()` are needed since that's all AudioRecorder calls on
+    self._stream today."""
+
+    def __init__(self, samples: np.ndarray, blocksize: int, callback, sample_rate: int = 16000):
+        self._samples = samples
+        self._blocksize = blocksize
+        self._callback = callback
+        self._sample_rate = sample_rate
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        pos = 0
+        n = len(self._samples)
+        period = self._blocksize / float(self._sample_rate)
+        while not self._stop_event.is_set():
+            if pos + self._blocksize <= n:
+                chunk = self._samples[pos : pos + self._blocksize]
+                pos += self._blocksize
+            elif pos < n:
+                chunk = np.concatenate(
+                    [
+                        self._samples[pos:],
+                        np.zeros(self._blocksize - (n - pos), dtype=np.float32),
+                    ]
+                )
+                pos = n
+            else:
+                chunk = np.zeros(self._blocksize, dtype=np.float32)
+            self._callback(chunk.reshape(-1, 1), self._blocksize, None, None)
+            time.sleep(period)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+
 class RecordingState(Enum):
     """Recording state machine."""
     IDLE = "idle"
@@ -123,6 +176,15 @@ class AudioRecorder:
         self.level_callback = level_callback
         self.auto_stop_callback = auto_stop_callback
         self.on_processed_chunk = on_processed_chunk
+
+        # WHISP-46 e2e harness: only honored under WHISPER_ALOUD_TEST_MODE=1
+        # (defense in depth -- this env var alone must never activate fake
+        # audio in a normal install).
+        self._fake_wav_path = (
+            os.environ.get("WHISPER_ALOUD_FAKE_AUDIO_WAV")
+            if os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1"
+            else None
+        )
 
         # State
         self._state = RecordingState.IDLE
@@ -355,6 +417,10 @@ class AudioRecorder:
             logger.warning("Already recording, ignoring start request")
             return
 
+        if self._fake_wav_path:
+            self._start_fake(device_id)
+            return
+
         try:
             # Validate device
             device_id = device_id if device_id is not None else self.config.device_id
@@ -398,6 +464,31 @@ class AudioRecorder:
         except Exception as e:
             self._set_state(RecordingState.ERROR)
             raise AudioRecordingError(f"Failed to start recording: {e}") from e
+
+    def _start_fake(self, device_id: Optional[int]) -> None:
+        """Fake-audio path (WHISP-46 e2e harness): skips DeviceManager.validate_device
+        entirely -- no real PortAudio device needs to exist, so this is safe to run
+        in a CI container with no audio hardware at all -- and feeds a pre-loaded
+        WAV fixture to the real self._audio_callback via _FakeInputStream."""
+        import soundfile as sf
+
+        self._frames = []
+        self._level_meter.reset()
+        self._start_time = time.time()
+        self._pipeline.reset()
+        self._start_chunk_worker()
+
+        data, file_rate = sf.read(self._fake_wav_path, dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = AudioProcessor.stereo_to_mono(data)
+        if file_rate != self.config.sample_rate:
+            data = AudioProcessor.resample(data, file_rate, self.config.sample_rate)
+
+        blocksize = int(self.config.chunk_duration * self.config.sample_rate)
+        self._stream = _FakeInputStream(data, blocksize, self._audio_callback, self.config.sample_rate)
+        self._stream.start()
+        self._set_state(RecordingState.RECORDING)
+        logger.info(f"Fake recording started from {self._fake_wav_path}")
 
     def stop(self) -> np.ndarray:
         """
