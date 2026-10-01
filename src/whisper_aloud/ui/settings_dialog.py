@@ -803,8 +803,13 @@ class SettingsDialog(Gtk.Window):
 
     def _capture_ui_state(self) -> dict:
         """Capture current form state for unsaved-change detection."""
+        engine_idx = self.engine_row.get_selected()
         return {
-            "model_engine": self._engine_keys[self.engine_row.get_selected()],
+            "model_engine": (
+                self._engine_keys[engine_idx]
+                if 0 <= engine_idx < len(self._engine_keys)
+                else ""
+            ),
             "model_name": (
                 self._model_entries[self.model_row.get_selected()].name
                 if self._model_entries
