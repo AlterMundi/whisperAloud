@@ -1,5 +1,7 @@
 """Root conftest: ensure worktree src is first in sys.path."""
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -9,7 +11,13 @@ from pathlib import Path
 # "Add Keyboard Shortcuts" dialog on every run, and anything resolving XDG
 # dirs could touch the real config/history. Tests that need a bus must start
 # a private one explicitly.
+#
+# Hugging Face keeps using the real model cache: redirecting it made every run
+# re-download Whisper models into the temp tree (/tmp is a RAM-backed tmpfs).
+_real_cache = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+os.environ.setdefault("HF_HOME", os.path.join(_real_cache, "huggingface"))
 _test_home = tempfile.mkdtemp(prefix="whisper-aloud-tests-")
+atexit.register(shutil.rmtree, _test_home, ignore_errors=True)
 os.environ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/nonexistent/whisper-aloud-tests-bus"
 for _var in ("WAYLAND_DISPLAY", "DISPLAY"):
     os.environ.pop(_var, None)
