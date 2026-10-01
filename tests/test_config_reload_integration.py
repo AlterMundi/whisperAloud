@@ -132,7 +132,7 @@ class TestDaemonReloadConfig:
         try:
             new_config = WhisperAloudConfig()
             new_config.model.name = "large-v3"
-            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(lambda: new_config))
+            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(lambda **kwargs: new_config))
 
             daemon._daemon_module.create_engine.reset_mock()
             result = daemon.ReloadConfig()
@@ -153,7 +153,7 @@ class TestDaemonReloadConfig:
         try:
             new_config = WhisperAloudConfig()
             new_config.audio.device_id = (new_config.audio.device_id or 0) + 1
-            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(lambda: new_config))
+            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(lambda **kwargs: new_config))
 
             daemon._daemon_module.AudioRecorder.reset_mock()
             result = daemon.ReloadConfig()
@@ -173,7 +173,7 @@ class TestDaemonReloadConfig:
         daemon = make_daemon()
         try:
             unchanged_config = WhisperAloudConfig()
-            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(lambda: unchanged_config))
+            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(lambda **kwargs: unchanged_config))
 
             old_transcriber = daemon.transcriber
             old_recorder = daemon.recorder
@@ -193,7 +193,7 @@ class TestDaemonReloadConfig:
     def test_reload_config_failure_emits_error_and_returns_false(self, monkeypatch):
         daemon = make_daemon()
         try:
-            def _boom():
+            def _boom(**kwargs):
                 raise RuntimeError("config file corrupted")
 
             monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(_boom))
@@ -205,6 +205,53 @@ class TestDaemonReloadConfig:
             error_code, error_message = daemon.Error.call_args[0]
             assert error_code == "reload_failed"
             assert "config file corrupted" in error_message
+        finally:
+            daemon._patches.close()
+
+    def test_reload_config_calls_load_with_strict_true(self, monkeypatch):
+        """WHISP-71: ReloadConfig() is the one caller that must opt into
+        strict=True, so a malformed file raises instead of silently
+        reloading defaults -- see WhisperAloudConfig.load()'s docstring."""
+        daemon = make_daemon()
+        try:
+            calls = []
+
+            def _record(**kwargs):
+                calls.append(kwargs)
+                return WhisperAloudConfig()
+
+            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(_record))
+
+            result = daemon.ReloadConfig()
+
+            assert result is True
+            assert calls == [{"strict": True}]
+        finally:
+            daemon._patches.close()
+
+    def test_reload_config_malformed_file_leaves_live_config_untouched(self, monkeypatch):
+        """A strict-mode ConfigurationError from a malformed file must not
+        mutate daemon.config -- the in-memory config stays exactly what it
+        was before the failed reload attempt."""
+        daemon = make_daemon()
+        try:
+            from whisper_aloud.exceptions import ConfigurationError
+
+            old_config = daemon.config
+
+            def _boom(**kwargs):
+                raise ConfigurationError("Config file corrupted: Expecting value")
+
+            monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(_boom))
+
+            result = daemon.ReloadConfig()
+
+            assert result is False
+            assert daemon.config is old_config
+            daemon.Error.assert_called_once()
+            error_code, error_message = daemon.Error.call_args[0]
+            assert error_code == "reload_failed"
+            assert "corrupted" in error_message
         finally:
             daemon._patches.close()
 

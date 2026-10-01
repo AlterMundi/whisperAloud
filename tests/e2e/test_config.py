@@ -80,25 +80,15 @@ def test_reload_config_rereads_file_and_emits_empty_changes(daemon):
     client.disconnect()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: docs/dbus-api.md documents ReloadConfig() as returning false and "
-        "emitting Error('reload_failed', ...) on a malformed config file (e.g. "
-        "invalid JSON). WhisperAloudConfig.load() (src/whisper_aloud/config.py) "
-        "catches json.JSONDecodeError internally, logs it, and silently falls "
-        "back to in-memory defaults WITHOUT re-raising -- so ReloadConfig() "
-        "actually returns True and emits ConfigChanged({}) even for a corrupt "
-        "config.json. The 'malformed file' failure path the docs promise is "
-        "unreachable for this specific cause."
-    ),
-)
 def test_reload_config_malformed_file_fails(daemon):
-    handle = daemon()
+    handle = daemon(config_overrides={"LANGUAGE": "en"})
     client = handle.client()
     error = SignalCapture(client, "Error")
 
     assert client.set_config({}) is True  # materialize config.json (see above)
+    before = client.get_config()
+    assert before["transcription.language"] == "en"
+
     config_path = handle.xdg_home / ".config" / "whisper_aloud" / "config.json"
     assert config_path.exists()
     config_path.write_text("{ not valid json")
@@ -107,5 +97,12 @@ def test_reload_config_malformed_file_fails(daemon):
     code, message = error.wait(timeout=5.0)
     assert code == "reload_failed"
     assert message
+
+    # WHISP-71: the live config must be left exactly as it was -- a failed
+    # reload must not quietly fall back to defaults -- and the malformed
+    # file on disk must not be overwritten either.
+    config = client.get_config()
+    assert config["transcription.language"] == "en"
+    assert config_path.read_text() == "{ not valid json"
 
     client.disconnect()

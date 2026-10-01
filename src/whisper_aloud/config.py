@@ -357,12 +357,31 @@ class WhisperAloudConfig:
         return WhisperAloudConfig.from_dict(self.to_dict())
 
     @classmethod
-    def load(cls) -> 'WhisperAloudConfig':
+    def load(cls, strict: bool = False) -> 'WhisperAloudConfig':
         """
         Load configuration with priority: defaults < file < env vars.
 
+        Args:
+            strict: If True, a config file that exists but can't be read or
+                parsed raises ConfigurationError instead of silently falling
+                back to defaults. Used by ReloadConfig() (WHISP-71): an
+                explicit reload of a malformed file must fail loudly --
+                docs/dbus-api.md documents ReloadConfig() returning False
+                and emitting Error("reload_failed", ...) in that case, not
+                quietly replacing the in-memory config (and, via SetConfig's
+                caller-triggered save(), the file on disk) with defaults.
+                Startup (WhisperAloudService.__init__ -> load() with no
+                arguments) intentionally keeps the lenient default: log the
+                error, keep defaults in memory, and never touch the file on
+                disk (nothing here calls save()) -- see docs/dbus-api.md's
+                ReloadConfig section for the full rationale.
+
         Returns:
             WhisperAloudConfig instance
+
+        Raises:
+            ConfigurationError: if strict=True and the config file exists
+                but cannot be read or parsed.
         """
         # Compute path dynamically to support HOME changes in tests
         config_file = Path.home() / ".config" / "whisper_aloud" / "config.json"
@@ -378,8 +397,12 @@ class WhisperAloudConfig:
                 logger.info(f"Loading configuration from {config_file}")
                 config = cls.from_dict(file_config)
             except json.JSONDecodeError as e:
+                if strict:
+                    raise ConfigurationError(f"Config file corrupted: {e}") from e
                 logger.error(f"Config file corrupted: {e}. Using defaults.")
             except Exception as e:
+                if strict:
+                    raise ConfigurationError(f"Failed to load config from file: {e}") from e
                 logger.warning(f"Failed to load config from file: {e}")
 
         # Apply environment variable overrides

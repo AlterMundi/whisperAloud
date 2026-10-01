@@ -338,3 +338,83 @@ def test_faster_whisper_rejects_parakeet_model():
     config.model.name = "parakeet-tdt-0.6b-v3"
     with pytest.raises(ConfigurationError, match="for engine 'faster-whisper'"):
         config.validate()
+
+
+# =============================================================================
+# WHISP-71: load(strict=...) on a malformed config file
+# =============================================================================
+
+
+def _write_malformed_config():
+    """Write an unparseable config.json under the isolated HOME and return
+    its path."""
+    config_dir = os.path.join(os.environ["HOME"], ".config", "whisper_aloud")
+    os.makedirs(config_dir, exist_ok=True)
+    config_path = os.path.join(config_dir, "config.json")
+    with open(config_path, "w") as f:
+        f.write("{ not valid json")
+    return config_path
+
+
+def test_load_default_falls_back_to_defaults_on_malformed_file():
+    """load() (strict=False, the default) must keep today's lenient
+    startup behavior: log and fall back to defaults rather than raising.
+    This is the daemon-startup path -- see WhisperAloudService.__init__,
+    which calls WhisperAloudConfig.load() with no arguments."""
+    _write_malformed_config()
+    config = WhisperAloudConfig.load()
+    assert config.model.name == "base"  # default, not read from the broken file
+
+
+def test_load_default_does_not_overwrite_the_malformed_file():
+    """Falling back to defaults must never silently replace the user's
+    (malformed) file on disk -- only an explicit save() should write it."""
+    config_path = _write_malformed_config()
+    original_bytes = open(config_path, "rb").read()
+    WhisperAloudConfig.load()
+    assert open(config_path, "rb").read() == original_bytes
+
+
+def test_load_strict_raises_configuration_error_on_malformed_file():
+    """load(strict=True) -- the ReloadConfig() path -- must raise instead
+    of silently falling back, so the caller can tell the difference
+    between 'reloaded' and 'kept the old config because the file was
+    broken'."""
+    _write_malformed_config()
+    with pytest.raises(ConfigurationError):
+        WhisperAloudConfig.load(strict=True)
+
+
+def test_load_strict_raises_on_file_read_error_too():
+    """Not just JSON decode errors -- any failure to read/parse the file
+    should raise in strict mode (the non-strict path already treats both
+    the same way, via two separate except clauses that both log-and-
+    fall-back)."""
+    config_dir = os.path.join(os.environ["HOME"], ".config", "whisper_aloud")
+    os.makedirs(config_dir, exist_ok=True)
+    config_path = os.path.join(config_dir, "config.json")
+    os.mkdir(os.path.join(config_dir, "config.json.d"))  # irrelevant, just ensure dir exists
+    # A directory where a file is expected reliably raises on open() (IsADirectoryError).
+    os.rmdir(os.path.join(config_dir, "config.json.d"))
+    os.mkdir(config_path)
+    try:
+        with pytest.raises(ConfigurationError):
+            WhisperAloudConfig.load(strict=True)
+    finally:
+        os.rmdir(config_path)
+
+
+def test_load_strict_succeeds_normally_on_a_valid_file():
+    """strict=True must not change behavior for a well-formed file."""
+    config = WhisperAloudConfig()
+    config.transcription.language = "fr"
+    config.save()
+    loaded = WhisperAloudConfig.load(strict=True)
+    assert loaded.transcription.language == "fr"
+
+
+def test_load_strict_with_no_file_still_uses_defaults():
+    """strict=True with no config file at all (the common first-run case)
+    must not raise -- there is nothing malformed to report."""
+    config = WhisperAloudConfig.load(strict=True)
+    assert config.model.name == "base"
