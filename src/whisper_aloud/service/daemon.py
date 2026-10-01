@@ -35,6 +35,15 @@ OBJECT_PATH = "/org/fede/whisperaloud"
 # instance does not restart-loop forever (see data/whisper-aloud.service).
 EXIT_ALREADY_RUNNING = 3
 
+# Semantic version of the org.fede.whisperaloud.Control D-Bus *interface*
+# itself (methods/signals/properties), not the WhisperAloud application
+# version (see GetStatus()["version"] for that). Exposed read-only via the
+# ApiVersion property. Bump per docs/dbus-api.md's versioning policy
+# (additive = minor, breaking = major + a new Control2 interface) and
+# record the change in that document's Changelog section, in the same
+# commit as the interface change.
+API_VERSION = "1.0.0"
+
 
 class AlreadyRunningError(RuntimeError):
     """Raised when another process already owns BUS_NAME on the session bus."""
@@ -157,6 +166,7 @@ class WhisperAloudService:
           <arg type="s" name="code"/>
           <arg type="s" name="message"/>
         </signal>
+        <property name="ApiVersion" type="s" access="read"/>
       </interface>
     </node>
     """
@@ -379,6 +389,13 @@ class WhisperAloudService:
             raise
         finally:
             self._cleanup()
+
+    # ─── D-Bus Properties ───────────────────────────────────────────────
+
+    @property
+    def ApiVersion(self) -> str:
+        """Semantic version of this D-Bus interface (see docs/dbus-api.md)."""
+        return API_VERSION
 
     # ─── D-Bus Methods ───────────────────────────────────────────────────
 

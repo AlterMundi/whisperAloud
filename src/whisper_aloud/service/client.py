@@ -259,6 +259,21 @@ class WhisperAloudClient:
             logger.warning(f"quit_daemon failed: {e}")
             return False
 
+    def get_api_version(self) -> str:
+        """Get the org.fede.whisperaloud.Control interface's semantic version.
+
+        This is a D-Bus property (not a method call), read via plain
+        attribute access on the proxy. Returns "" if not connected or the
+        property can't be read (e.g. an older daemon without ApiVersion).
+        """
+        if not self._connected or not self._proxy:
+            return ""
+        try:
+            return self._proxy.ApiVersion
+        except Exception as e:
+            logger.warning(f"get_api_version failed: {e}")
+            return ""
+
     # ─── Signal subscriptions ────────────────────────────────────────────
 
     def on_recording_started(self, callback: Callable) -> None:

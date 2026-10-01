@@ -132,6 +132,15 @@ journalctl --user -u whisper-aloud -f
 busctl --user introspect org.fede.whisperaloud /org/fede/whisperaloud
 ```
 
+## Integrations / D-Bus API
+
+WhisperAloud's daemon publishes `org.fede.whisperaloud.Control` on the
+session bus as a stable, versioned API (read its `ApiVersion` property) —
+every recording/transcription/history/config operation the GUI and CLI use
+is available to other clients and scripts the same way. See
+[`docs/dbus-api.md`](docs/dbus-api.md) for the full method/signal/property
+reference, a state diagram, and `busctl`/`gdbus`/Python examples.
+
 ## Configuration
 
 Runtime config file:
@@ -194,6 +203,7 @@ tests/           # unit + integration tests
 
 - `INSTALL.md` - full installation guide
 - `DEPENDENCIES.md` - system and Python dependency reference
+- `docs/dbus-api.md` - versioned D-Bus API reference (org.fede.whisperaloud.Control)
 - `TROUBLESHOOTING.md` - common runtime issues and fixes
 - `CHANGELOG.md` - user-facing release history
 - `docs/release-checklist.md` - manual smoke and release procedure
