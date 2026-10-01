@@ -1,6 +1,7 @@
 """Audio processing utilities."""
 
 import logging
+from math import gcd
 from typing import Tuple
 
 import numpy as np
@@ -582,3 +583,61 @@ class AudioPipeline:
                 "use process() for one-shot (non-streaming) processing."
             )
         return self.process(audio, sample_rate)
+
+
+class StreamingResampler:
+    """Causal, chunk-wise resampler for streaming audio.
+
+    ``AudioProcessor.resample()`` uses ``scipy.signal.resample``, which is
+    FFT-based over the *entire* input array — every output sample depends on
+    every input sample, including ones that haven't been recorded yet in a
+    streaming context (WHISP-34 finding: ``test_resample_has_lookahead_xfail``).
+    That makes it unsuitable for per-chunk use.
+
+    This class wraps ``scipy.signal.resample_poly`` (a local, FIR/polyphase
+    operation) and carries a short rolling history of raw input samples
+    across calls, so that splitting a signal into chunks and resampling each
+    one in sequence converges to the same result as resampling the whole
+    signal at once — see ``tests/test_audio_pipeline_streaming.py``'s
+    resampling-continuity test.
+    """
+
+    def __init__(self, orig_rate: int, target_rate: int):
+        if orig_rate <= 0 or target_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        g = gcd(orig_rate, target_rate)
+        self.orig_rate = orig_rate
+        self.target_rate = target_rate
+        self.up = target_rate // g
+        self.down = orig_rate // g
+        self._history = np.empty(0, dtype=np.float32)
+        # scipy's default Kaiser FIR kernel for resample_poly spans roughly
+        # 2 * 10 * max(up, down) + 1 taps; keeping that many trailing raw
+        # samples as history is enough for the filter to "see" the same
+        # context a one-shot call would have at the start of each chunk.
+        self._history_len = 10 * max(self.up, self.down)
+
+    def reset(self) -> None:
+        """Clear carried-over history (start a fresh streaming session)."""
+        self._history = np.empty(0, dtype=np.float32)
+
+    def process(self, chunk: np.ndarray) -> np.ndarray:
+        """Resample one chunk, continuing from the previous call's history."""
+        if chunk.size == 0:
+            return chunk.astype(np.float32)
+
+        history = self._history
+        h = len(history)
+        combined = np.concatenate([history, chunk.astype(np.float32)])
+
+        resampled_combined = signal.resample_poly(combined, self.up, self.down)
+
+        # Samples of resampled_combined attributable to the history prefix,
+        # using the same length scaling resample_poly itself applies.
+        h_out = int(round(h * self.up / self.down))
+        out = resampled_combined[h_out:]
+
+        keep = min(self._history_len, len(combined))
+        self._history = combined[len(combined) - keep:] if keep > 0 else np.empty(0, dtype=np.float32)
+
+        return out.astype(np.float32)
