@@ -549,20 +549,35 @@ install_autostart() {
     local autostart_dir="$HOME/.config/autostart"
     mkdir -p "$autostart_dir"
 
-    # Use the venv path so it works without PATH setup
+    # On a systemd session, the user service (installed above, enabled +
+    # started already) is the single owner of org.fede.whisperaloud; this
+    # entry must not race it with a second direct spawn. "systemctl --user
+    # status" (no unit argument) only checks whether a user manager exists,
+    # so this is not the old per-unit is-active race -- systemd itself
+    # serializes "start" on an already-running/-starting unit, so calling it
+    # here is idempotent. Only on a non-systemd session do we spawn directly.
     cat > "$autostart_dir/whisper-aloud-autostart.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=WhisperAloud Daemon
 GenericName=Voice Transcription Daemon
 Comment=Start WhisperAloud background service at login
-Exec=sh -lc 'systemctl --user -q is-active whisper-aloud.service 2>/dev/null || $VENV_PATH/bin/whisper-aloud --daemon'
+Exec=sh -lc 'command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1 && exec systemctl --user start whisper-aloud.service; exec $VENV_PATH/bin/whisper-aloud --daemon'
 Icon=audio-input-microphone-symbolic
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=3
 NoDisplay=true
 StartupNotify=false
 EOF
+
+    # Remove the legacy autostart entry from older installs: it spawned the
+    # daemon directly and had no coordination with the systemd unit at all,
+    # which is exactly the WHISP-63 race.
+    local legacy_autostart="$autostart_dir/whisperaloud-daemon.desktop"
+    if [ -f "$legacy_autostart" ]; then
+        rm "$legacy_autostart"
+        print_success "Removed legacy autostart entry: whisperaloud-daemon.desktop"
+    fi
 
     print_success "XDG autostart entry installed"
 }
