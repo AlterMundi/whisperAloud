@@ -187,7 +187,7 @@ class HotkeyManager:
                 if shortcut_id == "toggle":
                     callback()
 
-            portal.bind_shortcuts(
+            portal.bind_shortcuts_if_needed(
                 shortcuts=[
                     {
                         "id": "toggle",
