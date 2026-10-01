@@ -220,7 +220,13 @@ class FakeStreamingSpeechEngine:
         # finalize() (which runs real sherpa-onnx calls outside the lock) --
         # a real ThreadPoolExecutor can interleave a new start_session() here.
         if self._finalize_gate is not None:
-            self._finalize_gate.wait()
+            # Bounded wait, not `.wait()` with no timeout: this runs on a
+            # background executor thread, and ThreadPoolExecutor worker
+            # threads are joined at interpreter exit (atexit) -- a test that
+            # fails before calling `.set()` on the gate must not leave a
+            # thread blocked forever, which would hang the whole test run
+            # rather than failing it. 10s is generous for any unit test.
+            self._finalize_gate.wait(timeout=10.0)
         else:
             env_latency = os.environ.get("WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S")
             latency = float(env_latency) if env_latency else self._finalize_latency_s

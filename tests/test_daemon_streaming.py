@@ -12,6 +12,8 @@ Uses tests/_daemon_harness.py so GainController, MprisController, the
 indicator, HotkeyManager and notifications are always mocked — this suite
 never constructs a real WhisperAloudService.
 """
+import concurrent.futures
+import threading
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -355,3 +357,63 @@ class TestStreamingErrorPaths:
         assert daemon._transcribing is False
         assert daemon._streaming_session is False
         assert daemon._partial_timer_id is None
+
+
+class TestStreamingRealConcurrency:
+    """WHISP-57 audit (HIGH): a regression test using a REAL
+    ThreadPoolExecutor (not the harness's `_SyncExecutor`) and the real
+    `FakeStreamingSpeechEngine`, proving the `_transcribing` guard closes the
+    Stop->Start double-tap race end-to-end -- not just against the
+    synchronous-executor unit tests above, which can't exercise the actual
+    in-flight-on-another-thread window. No sleeps: a `threading.Event` holds
+    finalize() open at an exact point and releases it deterministically.
+    Partially covers WHISP-67 (real-concurrency daemon regression coverage).
+    """
+
+    def test_stop_then_immediate_start_is_refused_until_finalize_completes(
+        self, daemon, tmp_path, monkeypatch
+    ):
+        from whisper_aloud.stt.fake_engine import FakeStreamingSpeechEngine
+
+        wav = tmp_path / "session.wav"
+        wav.write_bytes(b"")
+        wav.with_suffix(".txt").write_text("session a text")
+        monkeypatch.setenv("WHISPER_ALOUD_FAKE_AUDIO_WAV", str(wav))
+
+        gate = threading.Event()
+        engine = FakeStreamingSpeechEngine(daemon.config, finalize_gate=gate)
+        daemon.transcriber = engine
+        daemon.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        daemon.history_manager.add_transcription.return_value = 1
+
+        # --- Session A: start, then stop -- finalize() blocks on `gate`. ---
+        daemon.recorder.is_recording = False
+        assert daemon.StartRecording() is True
+        session_a_id = daemon._current_session_id
+
+        daemon.recorder.is_recording = True
+        daemon.recorder.stop.return_value = np.zeros(16000, dtype=np.float32)
+        assert daemon.StopRecording() == "transcribing"
+        daemon.recorder.is_recording = False  # recorder.stop() has already run
+
+        # --- The double-tap: Start while A's finalize() is still blocked. ---
+        assert daemon.StartRecording() is False
+        daemon.TranscriptionReady.assert_not_called()
+        assert daemon._current_session_id == session_a_id  # untouched by the refusal
+
+        # --- Release A's finalize() and wait for it to actually finish. ---
+        gate.set()
+        daemon.executor.shutdown(wait=True)
+
+        daemon.TranscriptionReady.assert_called_once()
+        emitted_text, meta = daemon.TranscriptionReady.call_args[0]
+        assert emitted_text == "session a text"
+        assert meta["session_id"] == session_a_id
+        assert daemon._transcribing is False
+        assert daemon._streaming_session is False
+
+        # --- Now a fresh Start succeeds, with a brand-new session_id. ---
+        daemon.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        assert daemon.StartRecording() is True
+        assert daemon._current_session_id != session_a_id
+        daemon.executor.shutdown(wait=True)
