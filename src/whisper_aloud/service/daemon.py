@@ -47,7 +47,14 @@ EXIT_ALREADY_RUNNING = 3
 # (additive = minor, breaking = major + a new Control2 interface) and
 # record the change in that document's Changelog section, in the same
 # commit as the interface change.
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
+
+# Polling cadence for PartialTranscript while a streaming engine is recording
+# (WHISP-57): docs/dbus-api.md's "Planned" entry says 3-10Hz; 5Hz is a
+# mid-range default. An internal polling cadence, not a user-facing setting,
+# so it lives here as a constant rather than in WhisperAloudConfig.
+PARTIAL_TRANSCRIPT_HZ = 5
+PARTIAL_TRANSCRIPT_INTERVAL_MS = int(1000 / PARTIAL_TRANSCRIPT_HZ)
 
 
 class AlreadyRunningError(RuntimeError):
@@ -161,6 +168,12 @@ class WhisperAloudService:
         <signal name="LevelUpdate">
           <arg type="d" name="level"/>
         </signal>
+        <signal name="PartialTranscript">
+          <arg type="s" name="session_id"/>
+          <arg type="s" name="committed"/>
+          <arg type="s" name="tentative"/>
+          <arg type="u" name="seq"/>
+        </signal>
         <signal name="StatusChanged">
           <arg type="s" name="state"/>
         </signal>
@@ -181,6 +194,7 @@ class WhisperAloudService:
     RecordingStopped = signal()
     TranscriptionReady = signal()
     LevelUpdate = signal()
+    PartialTranscript = signal()
     StatusChanged = signal()
     ConfigChanged = signal()
     Error = signal()
@@ -235,6 +249,17 @@ class WhisperAloudService:
         # Level tracking (throttled at 10Hz)
         self._peak_level = 0.0
         self._level_timer_id = None
+
+        # Streaming session state (WHISP-57). `_current_session_id` is
+        # generated fresh in StartRecording for every recording (streaming or
+        # not), so TranscriptionReady can always carry a `session_id` for
+        # client-side correlation; `_streaming_session` / `_partial_timer_id`
+        # / `_last_partial_seq` are only meaningful while the configured
+        # engine `is_streaming` (see StartRecording).
+        self._current_session_id: Optional[str] = None
+        self._streaming_session = False
+        self._partial_timer_id = None
+        self._last_partial_seq = None
 
         # GNOME integration
         self.notifications: Optional[NotificationManager] = None
@@ -457,7 +482,27 @@ class WhisperAloudService:
             if rf.raise_mic_gain:
                 self._gain.raise_to(rf.target_gain_linear)
 
+            # WHISP-57: a fresh session_id per recording, regardless of
+            # engine -- TranscriptionReady always carries it in meta so
+            # clients can correlate (streaming or not). `is_streaming` is
+            # checked with `is True` rather than truthiness: a MagicMock
+            # test double for a *non*-streaming engine auto-creates a
+            # truthy `.is_streaming` attribute, which would otherwise send
+            # every mocked-engine test down the streaming path by accident.
+            self._current_session_id = uuid.uuid4().hex
+            is_streaming = getattr(self.transcriber, "is_streaming", False) is True
+            self._streaming_session = is_streaming
+            if is_streaming:
+                self._ensure_model_loaded()
+                self.transcriber.start_session(self.config.transcription.language)
+                self.recorder.on_processed_chunk = self.transcriber.accept_chunk
+                self._last_partial_seq = None
+            else:
+                self.recorder.on_processed_chunk = None
+
             self.recorder.start()
+            if is_streaming:
+                self._start_partial_timer()
             self._start_level_timer()
             self.RecordingStarted()
             self.StatusChanged("recording")
@@ -471,6 +516,13 @@ class WhisperAloudService:
             # Best-effort cleanup on start failure
             self._gain.restore()
             self._mpris.clear()
+            if self._streaming_session:
+                self._stop_partial_timer()
+                try:
+                    self.transcriber.cancel_session()
+                except Exception as cancel_error:
+                    logger.warning(f"engine cancel_session on start failure failed: {cancel_error}")
+                self._streaming_session = False
             self.Error("recording_failed", str(e))
             return False
 
@@ -482,6 +534,7 @@ class WhisperAloudService:
 
         try:
             self._stop_level_timer()
+            self._stop_partial_timer()
 
             # Generate job ID for per-job window capture
             job_id = uuid.uuid4().hex
@@ -520,9 +573,20 @@ class WhisperAloudService:
             if self.notifications:
                 self.notifications.show_recording_stopped()
 
-            # Start transcription in background thread (non-blocking)
+            # Start transcription in background thread (non-blocking). For a
+            # streaming engine, recorder.stop() above has already drained and
+            # joined the chunk-hook worker (AudioRecorder.stop()'s documented
+            # contract) before this submits engine.finalize() -- the WHISP-56
+            # mandatory order: stop() happens-before finalize(), so finalize()
+            # never races a still-in-flight accept_chunk().
             self._transcribing = True
-            self.executor.submit(self._transcribe_and_emit, audio_data, job_id)
+            recording_session_id = self._current_session_id or ""
+            if self._streaming_session:
+                self.executor.submit(
+                    self._finalize_streaming_and_emit, audio_data, job_id, recording_session_id
+                )
+            else:
+                self.executor.submit(self._transcribe_and_emit, audio_data, job_id, recording_session_id)
 
             # Return immediately - result will be emitted via signal
             return "transcribing"
@@ -547,7 +611,18 @@ class WhisperAloudService:
         """Cancel active recording without transcribing."""
         if self.recorder and self.recorder.is_recording:
             self._stop_level_timer()
+            self._stop_partial_timer()
             self.recorder.cancel()
+            # WHISP-56 mandatory order: recorder.cancel() (which drains and
+            # joins the chunk-hook worker, same as stop()) happens-before
+            # engine.cancel_session() -- never touch the engine session while
+            # an accept_chunk() could still be in flight.
+            if self._streaming_session:
+                try:
+                    self.transcriber.cancel_session()
+                except Exception as e:
+                    logger.warning(f"engine cancel_session on cancel failed: {e}")
+                self._streaming_session = False
             # Restore gain and resume media on cancel too
             try:
                 self._gain.restore()
@@ -796,6 +871,41 @@ class WhisperAloudService:
         self.LevelUpdate(level)
         return True  # Keep timer running
 
+    # ─── Partial-transcript polling (WHISP-57) ────────────────────────────
+
+    def _start_partial_timer(self):
+        """Start the PartialTranscript polling timer (streaming engines only)."""
+        if self._partial_timer_id is None:
+            self._partial_timer_id = GLib.timeout_add(
+                PARTIAL_TRANSCRIPT_INTERVAL_MS, self._emit_partial_transcript
+            )
+
+    def _stop_partial_timer(self):
+        """Stop the PartialTranscript polling timer."""
+        if self._partial_timer_id is not None:
+            GLib.source_remove(self._partial_timer_id)
+            self._partial_timer_id = None
+
+    def _emit_partial_transcript(self):
+        """Poll the streaming engine for its latest partial (called at
+        PARTIAL_TRANSCRIPT_HZ by GLib) and emit PartialTranscript only when
+        `seq` has advanced since the last emission -- a raw partial that
+        repeats the previous seq (the engine had nothing new to report) is
+        not re-emitted.
+        """
+        try:
+            partial = self.transcriber.get_partial()
+        except Exception as e:
+            logger.warning(f"get_partial failed: {e}")
+            return True  # keep polling; a flaky poll shouldn't kill the timer
+
+        if partial.seq != self._last_partial_seq:
+            self._last_partial_seq = partial.seq
+            self.PartialTranscript(
+                self._current_session_id or "", partial.committed, partial.tentative, partial.seq
+            )
+        return True  # Keep timer running
+
     # ─── Auto-stop handler ───────────────────────────────────────────────
 
     def _on_recorder_auto_stop(self, audio_data) -> None:
@@ -820,6 +930,7 @@ class WhisperAloudService:
         def _on_main_thread():
             logger.info("Auto-stop triggered by max recording duration")
             self._stop_level_timer()
+            self._stop_partial_timer()
             rf = self.config.recording_flow
             try:
                 self._gain.restore()
@@ -839,7 +950,15 @@ class WhisperAloudService:
                 self.notifications.show_recording_stopped()
 
             self._transcribing = True
-            self.executor.submit(self._transcribe_and_emit, audio_data, job_id)
+            recording_session_id = self._current_session_id or ""
+            if self._streaming_session:
+                self.executor.submit(
+                    self._finalize_streaming_and_emit, audio_data, job_id, recording_session_id
+                )
+            else:
+                self.executor.submit(
+                    self._transcribe_and_emit, audio_data, job_id, recording_session_id
+                )
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(_on_main_thread)
@@ -859,6 +978,7 @@ class WhisperAloudService:
         if self.indicator:
             self.indicator.set_state("shutdown")
         self._stop_level_timer()
+        self._stop_partial_timer()
         self._shutdown = True
         if hasattr(self, '_loop') and self._loop:
             self._loop.quit()
@@ -871,103 +991,138 @@ class WhisperAloudService:
         self._ensure_model_loaded()
         return self.transcriber.transcribe_numpy(audio_data)
 
-    def _transcribe_and_emit(self, audio_data, job_id: str = "") -> None:
-        """Transcribe audio and emit completion signal (runs in thread).
-
-        All D-Bus signal emissions and indicator updates are marshalled
-        to the GLib main loop via idle_add for thread safety.
-        """
+    def _transcribe_and_emit(
+        self, audio_data, job_id: str = "", recording_session_id: str = ""
+    ) -> None:
+        """Batch (non-streaming) path: transcribe audio and emit completion
+        signal (runs in thread)."""
         try:
             result = self._transcribe_audio(audio_data)
-
-            # Save to history database (safe from worker thread)
-            try:
-                entry_id = self.history_manager.add_transcription(
-                    result=result,
-                    audio=audio_data if self.config.persistence.save_audio else None,
-                    sample_rate=self.config.audio.sample_rate,
-                    session_id=self.session_id
-                )
-                logger.info(f"Transcription saved to database: ID {entry_id}")
-            except Exception as e:
-                logger.error(f"Failed to save history: {e}")
-                entry_id = -1
-
-            meta = {
-                "duration": GLib.Variant("d", result.duration),
-                "language": GLib.Variant("s", result.language),
-                "confidence": GLib.Variant("d", result.confidence),
-                "history_id": GLib.Variant("i", entry_id),
-            }
-
-            def _emit_success():
-                self._transcribing = False
-                self.StatusChanged("idle")
-                if self.indicator:
-                    self.indicator.set_state("idle")
-                    self.indicator.set_last_text(result.text)
-                self.TranscriptionReady(result.text, meta)
-                if self.config.clipboard.auto_copy and self.clipboard_manager:
-                    try:
-                        self.clipboard_manager.copy(result.text)
-                        logger.info("Transcription copied to clipboard")
-                    except Exception as e:
-                        logger.warning(f"Failed to copy to clipboard: {e}")
-                if (self.config.clipboard.auto_copy
-                        and self.config.clipboard.auto_paste
-                        and not self._test_mode
-                        and self.clipboard_manager
-                        and result.text):
-                    try:
-                        from ..clipboard import PasteSimulator
-                        import threading as _threading
-                        simulator = PasteSimulator(
-                            self.clipboard_manager._session_type,
-                            self.config.clipboard,
-                        )
-                        captured = self._captured_by_job.pop(job_id, None)
-
-                        def _do_paste():
-                            if captured and self.config.clipboard.paste_to_captured_window:
-                                try:
-                                    self.window_manager.activate_window(captured)
-                                    time.sleep(self.config.clipboard.paste_delay_ms / 1000.0)
-                                except Exception as e:
-                                    logger.warning(f"Failed to activate captured window: {e}")
-                            simulator.simulate_paste()
-
-                        _threading.Thread(target=_do_paste, daemon=True).start()
-                        logger.info("Auto-paste triggered")
-                    except Exception as e:
-                        logger.warning(f"Failed to trigger auto-paste: {e}")
-                if self.notifications:
-                    self.notifications.show_transcription_completed(result.text)
-                logger.info("Transcription completed and signals emitted")
-                return False
-
-            GLib.idle_add(_emit_success)
-
         except Exception as e:
-            error_message = str(e)
-            logger.error(f"Transcription failed: {error_message}")
+            self._emit_transcription_error(e)
+            return
+        self._emit_transcription_success(result, audio_data, job_id, recording_session_id)
 
-            def _emit_error():
-                self._transcribing = False
-                self.StatusChanged("idle")
-                if self.indicator:
-                    self.indicator.set_state("idle")
-                self.Error("transcription_failed", error_message)
-                if self.notifications:
-                    self.notifications.show_error(error_message)
-                return False
+    def _finalize_streaming_and_emit(
+        self, audio_data, job_id: str = "", recording_session_id: str = ""
+    ) -> None:
+        """Streaming path: `engine.finalize()` then the same post-processing as
+        the batch path (runs in thread, submitted to the executor only after
+        StopRecording's/auto-stop's synchronous recorder.stop()/cancel() has
+        already drained and joined the chunk-hook worker -- the WHISP-56
+        mandatory order, so finalize() never races an in-flight accept_chunk()).
+        `audio_data` is the full recorded buffer from recorder.stop() (collected
+        independently of the streaming hook), used for history exactly like the
+        batch path.
+        """
+        try:
+            result = self.transcriber.finalize()
+        except Exception as e:
+            self._emit_transcription_error(e)
+            return
+        self._emit_transcription_success(result, audio_data, job_id, recording_session_id)
 
-            GLib.idle_add(_emit_error)
+    def _emit_transcription_error(self, exc: Exception) -> None:
+        """Shared failure path for both the batch and streaming transcription
+        routes. All D-Bus signal emissions are marshalled to the GLib main
+        loop via idle_add for thread safety."""
+        error_message = str(exc)
+        logger.error(f"Transcription failed: {error_message}")
+
+        def _emit_error():
+            self._transcribing = False
+            self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
+            self.Error("transcription_failed", error_message)
+            if self.notifications:
+                self.notifications.show_error(error_message)
+            return False
+
+        GLib.idle_add(_emit_error)
+
+    def _emit_transcription_success(
+        self, result, audio_data, job_id: str, recording_session_id: str
+    ) -> None:
+        """Shared success path for both the batch and streaming transcription
+        routes: save history, emit TranscriptionReady (with `session_id` in
+        meta -- WHISP-57, for client-side correlation with PartialTranscript),
+        then clipboard copy/paste and notifications. All D-Bus signal
+        emissions and indicator updates are marshalled to the GLib main loop
+        via idle_add for thread safety."""
+        try:
+            entry_id = self.history_manager.add_transcription(
+                result=result,
+                audio=audio_data if self.config.persistence.save_audio else None,
+                sample_rate=self.config.audio.sample_rate,
+                session_id=self.session_id
+            )
+            logger.info(f"Transcription saved to database: ID {entry_id}")
+        except Exception as e:
+            logger.error(f"Failed to save history: {e}")
+            entry_id = -1
+
+        meta = {
+            "duration": GLib.Variant("d", result.duration),
+            "language": GLib.Variant("s", result.language),
+            "confidence": GLib.Variant("d", result.confidence),
+            "history_id": GLib.Variant("i", entry_id),
+            "session_id": GLib.Variant("s", recording_session_id or ""),
+        }
+
+        def _emit_success():
+            self._transcribing = False
+            self.StatusChanged("idle")
+            if self.indicator:
+                self.indicator.set_state("idle")
+                self.indicator.set_last_text(result.text)
+            self.TranscriptionReady(result.text, meta)
+            if self.config.clipboard.auto_copy and self.clipboard_manager:
+                try:
+                    self.clipboard_manager.copy(result.text)
+                    logger.info("Transcription copied to clipboard")
+                except Exception as e:
+                    logger.warning(f"Failed to copy to clipboard: {e}")
+            if (self.config.clipboard.auto_copy
+                    and self.config.clipboard.auto_paste
+                    and not self._test_mode
+                    and self.clipboard_manager
+                    and result.text):
+                try:
+                    from ..clipboard import PasteSimulator
+                    import threading as _threading
+                    simulator = PasteSimulator(
+                        self.clipboard_manager._session_type,
+                        self.config.clipboard,
+                    )
+                    captured = self._captured_by_job.pop(job_id, None)
+
+                    def _do_paste():
+                        if captured and self.config.clipboard.paste_to_captured_window:
+                            try:
+                                self.window_manager.activate_window(captured)
+                                time.sleep(self.config.clipboard.paste_delay_ms / 1000.0)
+                            except Exception as e:
+                                logger.warning(f"Failed to activate captured window: {e}")
+                        simulator.simulate_paste()
+
+                    _threading.Thread(target=_do_paste, daemon=True).start()
+                    logger.info("Auto-paste triggered")
+                except Exception as e:
+                    logger.warning(f"Failed to trigger auto-paste: {e}")
+            if self.notifications:
+                self.notifications.show_transcription_completed(result.text)
+            logger.info("Transcription completed and signals emitted")
+            return False
+
+        GLib.idle_add(_emit_success)
 
     def _cleanup(self) -> None:
         """Clean up resources."""
         logger.info("Cleaning up service resources")
 
         self._stop_level_timer()
+        self._stop_partial_timer()
 
         # Unregister hotkeys
         if self.hotkey_manager:

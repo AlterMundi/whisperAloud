@@ -296,6 +296,13 @@ class TestWhisperAloudClient:
         client.on_level_update(callback)
         mock_proxy.LevelUpdate.connect.assert_called_once_with(callback)
 
+    def test_signal_subscription_partial_transcript(self):
+        """on_partial_transcript should subscribe callback to signal (WHISP-57)."""
+        _, client, _, mock_proxy = self._make_client()
+        callback = MagicMock()
+        client.on_partial_transcript(callback)
+        mock_proxy.PartialTranscript.connect.assert_called_once_with(callback)
+
     def test_signal_subscription_status_changed(self):
         """on_status_changed should subscribe callback to signal."""
         _, client, _, mock_proxy = self._make_client()
