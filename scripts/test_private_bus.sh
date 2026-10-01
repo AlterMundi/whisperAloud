@@ -3,5 +3,10 @@
 # as this command: dbus-run-session tears it down on exit, so nothing ever
 # needs to be killed. Example:
 #   scripts/test_private_bus.sh -m dbus_private tests/test_hotkey_portal_flow.py
+#
+# PYTHON can be overridden (e.g. in CI, to a --system-site-packages venv's
+# interpreter) without changing local behavior, which defaults to whatever
+# "python" resolves to on PATH (normally an activated venv).
+PYTHON="${PYTHON:-python}"
 exec timeout "${WHISPER_ALOUD_TEST_TIMEOUT:-300}" \
-    dbus-run-session -- env WHISPER_ALOUD_PRIVATE_BUS=1 python -m pytest "$@"
+    dbus-run-session -- env WHISPER_ALOUD_PRIVATE_BUS=1 "$PYTHON" -m pytest "$@"
