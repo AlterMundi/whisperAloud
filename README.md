@@ -183,6 +183,37 @@ python -m ruff check src tests
 python -m mypy src
 ```
 
+## Testing
+
+Several of these wrap the real pytest invocation instead of calling it directly
+because the daemon, D-Bus, and GTK touch the real desktop by default (the
+session bus, the display, the clipboard); the wrappers give each suite its own
+disposable bus/display/HOME so a test run can never reach your session.
+
+```bash
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# Unit tests: fast, no display/audio/dbus (same subset CI's `fast` job runs)
+./scripts/test_ci.sh
+
+# e2e: real daemon subprocess + fake audio/STT, on a private dbus-run-session bus
+./scripts/test_e2e.sh
+
+# GUI smoke tests: real GTK4/libadwaita widgets under a private Xvfb display
+# and D-Bus session, with a disposable HOME/XDG tree
+./scripts/test_gui.sh
+
+# Any test marked dbus_private (e.g. the hotkey/portal flow), on a private bus
+./scripts/test_private_bus.sh -m dbus_private tests/test_hotkey_portal_flow.py
+```
+
+`test_e2e.sh` and `test_private_bus.sh` honor a `PYTHON` env var (defaulting to
+`python`, i.e. whatever is first on `PATH`) to pick the interpreter, and
+`test_gui.sh` honors `WHISPER_ALOUD_VENV_PYTHON` (defaulting to
+`~/.venvs/whisper_aloud/bin/python`) for the same purpose — CI uses these to
+point at a `--system-site-packages` venv built from the runner's own `python3`.
+
 ## Repository Layout
 
 ```text
