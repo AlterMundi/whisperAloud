@@ -8,19 +8,39 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gdk, GLib, Gtk
+gi.require_version('Adw', '1')
+from gi.repository import Adw, Gdk, GLib, Gtk
 
 from ..config import (
     NotificationConfig,
     PersistenceConfig,
     WhisperAloudConfig,
 )
+from ..stt import catalog
 from .error_handler import InputValidator, ValidationError
+from .model_picker_logic import (
+    badges_for,
+    default_index,
+    device_for_index,
+    device_row_index,
+    download_state_for,
+    entries_for_engine,
+    needs_download_note,
+    row_label,
+    save_selection,
+    selectable_entries,
+)
 from .settings_logic import (
     has_unsaved_changes,
     normalize_language_input,
     should_block_close,
 )
+
+
+def _fmt_size(size_mb: Optional[int]) -> str:
+    """Human-facing size string for a catalog entry, or "—" when unknown."""
+    return f"{size_mb} MB" if size_mb is not None else "—"
+
 
 logger = logging.getLogger(__name__)
 
@@ -221,22 +241,99 @@ class SettingsDialog(Gtk.Window):
         model_section.add_css_class("wa-section-title")
         page.append(model_section)
 
-        # Model selector
-        model_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        model_label = Gtk.Label(label="Model:")
-        model_label.set_halign(Gtk.Align.START)
-        model_label.set_hexpand(True)
+        # Model selector — catalog-driven boxed-list (WHISP-42)
+        self._model_list_box = Gtk.ListBox()
+        self._model_list_box.add_css_class("boxed-list")
+        self._model_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
 
-        self.model_dropdown = Gtk.DropDown.new_from_strings([
-            "tiny (fastest)", "base", "small", "medium", "large (most accurate)"
-        ])
-        models = ["tiny", "base", "small", "medium", "large"]
-        if self._config.model.name in models:
-            self.model_dropdown.set_selected(models.index(self._config.model.name))
+        self.model_row = Adw.ComboRow()
+        self.model_row.set_title("Model")
+        self._model_entries: list = []  # populated by _refresh_model_row()
+        self._suppress_model_sync = False
 
-        model_box.append(model_label)
-        model_box.append(self.model_dropdown)
-        page.append(model_box)
+        # Notice widgets must exist *before* the first _refresh_model_row() call below:
+        # it calls _update_notices(), which reads these (WHISP-42 audit BLOCKER #1 —
+        # previously built after _refresh_model_row(), causing an AttributeError on
+        # every dialog open).
+        self._download_notice = Gtk.Label(wrap=True, xalign=0)
+        self._download_notice.add_css_class("dim-label")
+        self._download_notice.set_visible(False)
+
+        self._license_notice = Gtk.Label(wrap=True, xalign=0)
+        self._license_notice.add_css_class("dim-label")
+        self._license_notice.set_visible(False)
+
+        # Shown when an Advanced->Engine switch has no entries for the configured
+        # language and _refresh_model_row() fell back to that engine's full list
+        # (model_picker_logic.entries_for_engine, WHISP-42 audit HIGH #2).
+        self._language_fallback_notice = Gtk.Label(wrap=True, xalign=0)
+        self._language_fallback_notice.add_css_class("dim-label")
+        self._language_fallback_notice.set_visible(False)
+
+        self._refresh_model_row()
+        self._model_list_box.append(self.model_row)
+        page.append(self._model_list_box)
+        page.append(self._download_notice)
+        page.append(self._license_notice)
+        page.append(self._language_fallback_notice)
+
+        self.model_row.connect("notify::selected", self._on_model_row_changed)
+
+        # Advanced override: Engine, Device, Compute type (WHISP-42)
+        self.advanced_row = Adw.ExpanderRow()
+        self.advanced_row.set_title("Advanced")
+        self.advanced_row.set_expanded(False)
+
+        self._engine_keys = catalog.engines()
+        self.engine_row = Adw.ComboRow()
+        self.engine_row.set_title("Engine")
+        self.engine_row.set_model(
+            Gtk.StringList.new([catalog.ENGINES[k] for k in self._engine_keys])
+        )
+        if self._config.model.engine in self._engine_keys:
+            self.engine_row.set_selected(self._engine_keys.index(self._config.model.engine))
+        self.advanced_row.add_row(self.engine_row)
+
+        self.device_row = Adw.ComboRow()
+        self.device_row.set_title("Device")
+        # Order must match model_picker_logic._DEVICE_OPTIONS = ("auto", "cpu", "cuda").
+        # "auto" previously had no row option and was silently coerced to "cpu" on
+        # Save (WHISP-42 audit MEDIUM #5) — it's now a first-class, round-trippable
+        # choice.
+        self.device_row.set_model(Gtk.StringList.new(["Auto", "CPU", "CUDA (GPU)"]))
+        self.device_row.set_selected(device_row_index(self._config.model.device))
+        self.advanced_row.add_row(self.device_row)
+
+        self.compute_type_row = Adw.ComboRow()
+        self.compute_type_row.set_title("Compute type")
+        compute_types = ["int8", "float16", "float32"]  # mirrors config.validate()'s allowlist
+        self.compute_type_row.set_model(Gtk.StringList.new(compute_types))
+        self.compute_type_row.set_selected(
+            compute_types.index(self._config.model.compute_type)
+            if self._config.model.compute_type in compute_types
+            else 0
+        )
+        self.advanced_row.add_row(self.compute_type_row)
+
+        self._model_list_box.append(self.advanced_row)
+
+        self.engine_row.connect("notify::selected", self._on_engine_row_changed)
+        # Set initial compute-type sensitivity for whatever engine is configured, without
+        # triggering a spurious model-row repopulation (the row is already correctly
+        # populated from _refresh_model_row() above).
+        self._suppress_model_sync = True
+        try:
+            self._on_engine_row_changed(self.engine_row, None)
+        finally:
+            self._suppress_model_sync = False
+
+        # "View full catalog…" — reachable even when the language/device filter above
+        # hides a model the user still wants to pick manually (WHISP-42 §1.6).
+        catalog_row = Adw.ActionRow()
+        catalog_row.set_title("View full catalog…")
+        catalog_row.set_activatable(True)
+        catalog_row.connect("activated", self._on_view_catalog_clicked)
+        self._model_list_box.append(catalog_row)
 
         # Language (hidden - managed by main window dropdown now)
         self.language_entry = Gtk.Entry()
@@ -504,6 +601,187 @@ class SettingsDialog(Gtk.Window):
 
         self.stack.add_titled(page, "general", "General")
 
+    def _refresh_model_row(
+        self,
+        preferred_engine: Optional[str] = None,
+        preferred_name: Optional[str] = None,
+    ) -> None:
+        """Repopulate the Model row's list from the catalog, filtered by the current
+        language/device, and (re)select an entry.
+
+        `preferred_engine` narrows the list to one engine's entries (used when the
+        Advanced→Engine row changes); `preferred_name` additionally pins the exact
+        entry to select (used when a catalog-view row is explicitly chosen), bypassing
+        the default_index() recommendation fallback since the user already made an
+        explicit choice.
+
+        When both `preferred_engine` and `preferred_name` are given (an explicit
+        catalog-view pick), the language/device filter is bypassed entirely for that
+        engine's entries — the whole point of the full-catalog view (spec §1.6) is to
+        let the user cross a language filter that would otherwise hide the entry they
+        just chose (e.g. picking Parakeet from the catalog while language="ja").
+
+        When only `preferred_engine` is given (an Advanced->Engine switch), uses
+        model_picker_logic.entries_for_engine so a switch to an engine with zero
+        entries for the configured language falls back to that engine's full list
+        instead of silently keeping the *previous* engine's entries on screen (and on
+        Save) — WHISP-42 audit HIGH #2. The language-fallback notice is shown/hidden
+        accordingly.
+        """
+        used_language_fallback = False
+        if preferred_engine is not None and preferred_name is not None:
+            entries = catalog.models_for(preferred_engine)
+        elif preferred_engine is not None:
+            entries, used_language_fallback = entries_for_engine(
+                self._config.transcription.language, self._config.model.device, preferred_engine
+            )
+        else:
+            entries = selectable_entries(
+                self._config.transcription.language, self._config.model.device
+            )
+
+        self._model_entries = entries
+        if used_language_fallback:
+            self._language_fallback_notice.set_text(
+                f"No {self._config.transcription.language} models for this engine; showing all."
+            )
+        self._language_fallback_notice.set_visible(used_language_fallback)
+
+        # TODO(WHISP-42-followup): per-row badge pills via Gtk.SignalListItemFactory,
+        # per spec §1.2 — badges are plain text appended to the label for now
+        # (model_picker_logic.row_label), not separate pill widgets.
+        labels = [row_label(e, download_state_for(e).downloaded) for e in entries]
+        self.model_row.set_model(Gtk.StringList.new(labels))
+
+        if not entries:
+            self.model_row.set_selected(Gtk.INVALID_LIST_POSITION)
+            self._update_notices()
+            return
+
+        if preferred_name is not None:
+            index = next((i for i, e in enumerate(entries) if e.name == preferred_name), 0)
+        else:
+            index = default_index(
+                entries,
+                self._config.model.engine,
+                self._config.model.name,
+                self._config.transcription.language,
+            )
+        self.model_row.set_selected(index)
+        self._update_notices()
+
+    def _update_notices(self) -> None:
+        """Refresh the not-downloaded and license notices for the currently selected
+        Model row entry."""
+        index = self.model_row.get_selected()
+        if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
+            self._download_notice.set_visible(False)
+            self._license_notice.set_visible(False)
+            return
+
+        entry = self._model_entries[index]
+        state = download_state_for(entry)
+        if needs_download_note(state.downloaded):
+            self._download_notice.set_text(
+                f"{entry.label} ({_fmt_size(entry.size_mb)}) downloads the first time you use it."
+            )
+            self._download_notice.set_visible(True)
+        else:
+            self._download_notice.set_visible(False)
+
+        badges = badges_for(entry)
+        if entry.license in badges:
+            self._license_notice.set_text(
+                f"This model's license ({entry.license}) differs from this app's MIT license."
+            )
+            self._license_notice.set_visible(True)
+        else:
+            self._license_notice.set_visible(False)
+
+    def _on_model_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
+        """Handle a (user- or programmatically-driven) Model row selection change."""
+        self._update_notices()
+        if self._suppress_model_sync:
+            return
+        index = row.get_selected()
+        if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
+            return
+        entry = self._model_entries[index]
+        # Guard like _on_catalog_entry_chosen does: entry.engine may not be in
+        # self._engine_keys for a catalog entry whose engine isn't registered in
+        # catalog.ENGINES yet (e.g. WHISP-56's nemotron-streaming) — WHISP-42 audit
+        # MEDIUM #3. Such an entry is reachable via the full-catalog view even though
+        # it's never in the Advanced->Engine dropdown.
+        if hasattr(self, "engine_row") and entry.engine in self._engine_keys:
+            self._suppress_model_sync = True
+            try:
+                self.engine_row.set_selected(self._engine_keys.index(entry.engine))
+            finally:
+                self._suppress_model_sync = False
+
+    def _on_engine_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
+        """Handle an Advanced→Engine row change: repopulate/re-sync the Model row and
+        update the Compute type row's sensitivity (sherpa-onnx/Parakeet ignores it)."""
+        engine = self._engine_keys[row.get_selected()]
+        self.compute_type_row.set_sensitive(engine != "parakeet")
+        self.compute_type_row.set_tooltip_text(
+            "Not used by this engine" if engine == "parakeet" else None
+        )
+        if self._suppress_model_sync:
+            return
+        self._suppress_model_sync = True
+        try:
+            self._refresh_model_row(preferred_engine=engine)
+        finally:
+            self._suppress_model_sync = False
+
+    def _on_view_catalog_clicked(self, _row: "Adw.ActionRow") -> None:
+        """Open a read-only window listing every catalog.entries() row, unfiltered by
+        language/device — the only way to cross the Model row's language filter."""
+        window = Gtk.Window(transient_for=self, modal=True)
+        window.set_title("Model Catalog")
+        window.set_default_size(560, 480)
+
+        scrolled = Gtk.ScrolledWindow(vexpand=True)
+        list_box = Gtk.ListBox()
+        list_box.add_css_class("boxed-list")
+        for entry in catalog.entries():
+            row = Adw.ActionRow()
+            row.set_title(entry.label)
+            langs = (
+                "multilingual" if entry.languages is None else f"{len(entry.languages)} languages"
+            )
+            size = _fmt_size(entry.size_mb)
+            state = download_state_for(entry)
+            downloaded = "downloaded" if state.downloaded else "not downloaded"
+            row.set_subtitle(f"{entry.engine} · {size} · {langs} · {entry.license} · {downloaded}")
+            row.set_activatable(True)
+            row.connect("activated", self._on_catalog_entry_chosen, entry, window)
+            list_box.append(row)
+        scrolled.set_child(list_box)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(Gtk.HeaderBar())
+        box.append(scrolled)
+        window.set_child(box)
+        window.present()
+
+    def _on_catalog_entry_chosen(
+        self, _row: "Adw.ActionRow", entry: "catalog.ModelEntry", window: Gtk.Window
+    ) -> None:
+        """Honor an explicit catalog-view pick: select that exact entry (bypassing the
+        default_index() recommendation fallback) and sync Advanced→Engine to match."""
+        window.close()
+        self._suppress_model_sync = True
+        try:
+            self._refresh_model_row(preferred_engine=entry.engine, preferred_name=entry.name)
+            if entry.engine in self._engine_keys:
+                self.engine_row.set_selected(self._engine_keys.index(entry.engine))
+        finally:
+            self._suppress_model_sync = False
+        self._update_notices()
+        self._mark_dirty()
+
     def _style_setting_rows_in_page(self, page: Gtk.Box) -> None:
         """Apply a shared style class to horizontal setting rows."""
         child = page.get_first_child()
@@ -525,8 +803,21 @@ class SettingsDialog(Gtk.Window):
 
     def _capture_ui_state(self) -> dict:
         """Capture current form state for unsaved-change detection."""
+        engine_idx = self.engine_row.get_selected()
         return {
-            "model": self.model_dropdown.get_selected(),
+            "model_engine": (
+                self._engine_keys[engine_idx]
+                if 0 <= engine_idx < len(self._engine_keys)
+                else ""
+            ),
+            "model_name": (
+                self._model_entries[self.model_row.get_selected()].name
+                if self._model_entries
+                and self.model_row.get_selected() != Gtk.INVALID_LIST_POSITION
+                else ""
+            ),
+            "model_device": self.device_row.get_selected(),
+            "model_compute_type": self.compute_type_row.get_selected(),
             "language": self.language_entry.get_text(),
             "audio_device": self.audio_device_dropdown.get_selected(),
             "auto_copy": self.auto_copy_switch.get_active(),
@@ -538,7 +829,6 @@ class SettingsDialog(Gtk.Window):
             "notif_stop": self.notification_recording_stopped_switch.get_active(),
             "notif_done": self.notification_transcription_completed_switch.get_active(),
             "notif_error": self.notification_error_switch.get_active(),
-            "compute_device": self.compute_device_dropdown.get_selected(),
             "sample_rate": self.sample_rate_entry.get_text(),
             "vad_enabled": self.vad_switch.get_active(),
             "vad_threshold": self.vad_threshold_entry.get_text(),
@@ -566,7 +856,10 @@ class SettingsDialog(Gtk.Window):
     def _connect_dirty_tracking(self) -> None:
         """Connect form inputs to unsaved-change tracking."""
         tracked_widgets = [
-            self.model_dropdown,
+            self.model_row,
+            self.engine_row,
+            self.device_row,
+            self.compute_type_row,
             self.language_entry,
             self.audio_device_dropdown,
             self.auto_copy_switch,
@@ -578,7 +871,6 @@ class SettingsDialog(Gtk.Window):
             self.notification_recording_stopped_switch,
             self.notification_transcription_completed_switch,
             self.notification_error_switch,
-            self.compute_device_dropdown,
             self.sample_rate_entry,
             self.vad_switch,
             self.vad_threshold_entry,
@@ -598,7 +890,7 @@ class SettingsDialog(Gtk.Window):
         for widget in tracked_widgets:
             if isinstance(widget, Gtk.Switch):
                 widget.connect("notify::active", self._mark_dirty)
-            elif isinstance(widget, Gtk.DropDown):
+            elif isinstance(widget, (Gtk.DropDown, Adw.ComboRow)):
                 widget.connect("notify::selected", self._mark_dirty)
             elif isinstance(widget, Gtk.Entry):
                 widget.connect("changed", self._mark_dirty)
@@ -769,33 +1061,13 @@ class SettingsDialog(Gtk.Window):
         page.set_margin_bottom(24)
         scrolled.set_child(page)
 
-        # --- Performance Section ---
-        perf_section = Gtk.Label(label="Performance")
-        perf_section.set_halign(Gtk.Align.START)
-        perf_section.add_css_class("heading")
-        perf_section.add_css_class("wa-section-title")
-        page.append(perf_section)
-
-        # Compute device
-        device_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        device_label = Gtk.Label(label="Compute device:")
-        device_label.set_halign(Gtk.Align.START)
-        device_label.set_hexpand(True)
-
-        self.compute_device_dropdown = Gtk.DropDown.new_from_strings(["CPU", "CUDA (GPU)"])
-        if self._config.model.device == "cuda":
-            self.compute_device_dropdown.set_selected(1)
-
-        device_box.append(device_label)
-        device_box.append(self.compute_device_dropdown)
-        page.append(device_box)
-
         # --- Audio Processing Section ---
+        # (Compute device moved to Settings → General → Model → Advanced, WHISP-42 —
+        # it's now grouped with Engine/Compute type as a single manual-override block.)
         audio_section = Gtk.Label(label="Audio Processing")
         audio_section.set_halign(Gtk.Align.START)
         audio_section.add_css_class("heading")
         audio_section.add_css_class("wa-section-title")
-        audio_section.set_margin_top(12)
         page.append(audio_section)
 
         # Sample rate
@@ -1019,9 +1291,20 @@ class SettingsDialog(Gtk.Window):
 
         try:
             logger.debug("Updating model config")
-            # Update model config
-            models = ["tiny", "base", "small", "medium", "large"]
-            self._config.model.name = models[self.model_dropdown.get_selected()]
+            # Update model config (catalog-driven — WHISP-42)
+            model_idx = self.model_row.get_selected()
+            if self._model_entries and model_idx != Gtk.INVALID_LIST_POSITION and model_idx >= 0:
+                selected_entry = self._model_entries[model_idx]
+                engine, name = save_selection(selected_entry.engine, selected_entry.name)
+                self._config.model.engine = engine
+                self._config.model.name = name
+
+            self._config.model.device = device_for_index(self.device_row.get_selected())
+
+            compute_types = ["int8", "float16", "float32"]
+            selected_compute_type_idx = self.compute_type_row.get_selected()
+            if selected_compute_type_idx != -1 and selected_compute_type_idx < len(compute_types):
+                self._config.model.compute_type = compute_types[selected_compute_type_idx]
 
             # Validate language code
             lang = self.language_entry.get_text()
@@ -1029,11 +1312,6 @@ class SettingsDialog(Gtk.Window):
                 self._config.transcription.language = normalize_language_input(lang)
             except ValueError as e:
                 raise ValidationError(str(e)) from e
-
-            devices = ["cpu", "cuda"]
-            selected_compute_idx = self.compute_device_dropdown.get_selected()
-            if selected_compute_idx != -1 and selected_compute_idx < len(devices):
-                self._config.model.device = devices[selected_compute_idx]
 
             logger.debug("Updating audio config")
             # Update audio config

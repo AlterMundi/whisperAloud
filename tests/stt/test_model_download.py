@@ -55,3 +55,26 @@ def test_ensure_model_downloads_and_flattens(monkeypatch, tmp_path):
     assert (d / "tokens.txt").exists()
     assert (d / "encoder.onnx").exists()
     assert d == md.model_dir("parakeet-tdt-0.6b-v3")
+
+
+def test_is_present_true_when_model_files_exist(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    d = md.model_dir("parakeet-tdt-0.6b-v3")
+    d.mkdir(parents=True)
+    (d / "tokens.txt").write_text("<blk> 0\n")
+    (d / "encoder.onnx").write_bytes(b"\x00")
+    assert md.is_present("parakeet-tdt-0.6b-v3") is True
+
+
+def test_is_present_false_when_absent(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert md.is_present("parakeet-tdt-0.6b-v3") is False
+
+
+def test_is_present_false_for_partial_download(monkeypatch, tmp_path):
+    """tokens.txt alone (no encoder*.onnx) is not a complete model."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    d = md.model_dir("parakeet-tdt-0.6b-v3")
+    d.mkdir(parents=True)
+    (d / "tokens.txt").write_text("<blk> 0\n")
+    assert md.is_present("parakeet-tdt-0.6b-v3") is False

@@ -35,6 +35,13 @@ def _is_present(d: Path) -> bool:
     return (d / "tokens.txt").exists() and any(d.glob("encoder*.onnx"))
 
 
+def is_present(name: str) -> bool:
+    """Public, name-based wrapper over _is_present — used by the Settings UI (WHISP-42) to
+    show a model's downloaded/not-downloaded state without reaching into model_dir()/
+    _is_present() directly."""
+    return _is_present(model_dir(name))
+
+
 def _download(url: str, dest: str) -> None:
     """Download url to dest with a coarse progress log. Monkeypatched in tests."""
     def _hook(block_num, block_size, total):
