@@ -10,6 +10,7 @@ remainder, so it is unit-testable without any model or audio.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
     import numpy as np
 
     from ..transcriber import TranscriptionResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,7 +63,35 @@ class StreamingSpeechEngine(Protocol):
     def cancel_session(self) -> None: ...
 
 
-_SENTENCE_END_RE = re.compile(r"[.!?]")
+_SENTENCE_PUNCT = ".!?"
+
+# Abbreviations (es/en) whose trailing period must never be read as a sentence end.
+# Matched case-insensitively against the whole token (punctuation included).
+_ABBREVIATIONS = frozenset(
+    {
+        "sr.", "sra.", "dr.", "dra.", "ud.", "uds.", "p.ej.", "ee.uu.",
+        "mr.", "mrs.", "ms.", "e.g.", "i.e.", "vs.",
+    }
+)
+
+# A numeric token (possibly with a trailing sentence-punctuation char stripped, e.g.
+# the "." in "3." or "3.5."): digits optionally grouped by "." or "," separators.
+_NUMERIC_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
+
+
+def _is_sentence_end(word: str) -> bool:
+    """True if `word` ends a sentence: its last char is one of `.!?`, it isn't a
+    known abbreviation, and stripping that punctuation doesn't leave a bare number
+    or decimal (so "3.5" / "El Sr." / "3." never trigger an early commit, but
+    "Hello." / "Really?" / "Wow!" do)."""
+    if not word or word[-1] not in _SENTENCE_PUNCT:
+        return False
+    if word.lower() in _ABBREVIATIONS:
+        return False
+    core = word.rstrip(_SENTENCE_PUNCT)
+    if core and _NUMERIC_RE.fullmatch(core):
+        return False
+    return True
 
 
 class CommitTracker:
@@ -73,12 +104,19 @@ class CommitTracker:
       - Independently, any prefix ending in sentence-ending punctuation (``.``,
         ``!``, ``?``) in the *current* partial commits immediately, even on the
         very first update (useful for short utterances / fast speakers where two
-        partials may never arrive before the sentence is spoken).
+        partials may never arrive before the sentence is spoken). A token only
+        counts as a sentence end when the punctuation is its *last* character, the
+        token isn't a number/decimal (``3.5``, ``3.``), and it isn't in a small
+        es/en abbreviation set (``Sr.``, ``Dr.``, ``Mr.``, ``e.g.``, ...) -- see
+        `_is_sentence_end`.
       - Once committed, text is never retracted: the committed length is
         monotonically non-decreasing, and already-committed words are kept
         verbatim even if a later raw partial revises that span (greedy streaming
         decode occasionally touches up earlier words; we do not take those edits
         back once we've told the caller they're final).
+
+    `flush()` (used by `finalize()`) applies a separate reconciliation rule against
+    the final, authoritative raw text -- see its docstring.
     """
 
     def __init__(self, stable_count: int = 2) -> None:
@@ -118,12 +156,59 @@ class CommitTracker:
             seq=self._seq,
         )
 
-    def flush(self) -> PartialResult:
-        """Commit everything outstanding (used by `finalize()`): no more revisions coming."""
-        if self._history:
-            self._committed_words = list(self._history[-1])
+    def flush(self, final_raw_text: str | None = None) -> PartialResult:
+        """Commit everything outstanding: no more revisions are coming.
+
+        `final_raw_text`, when given, is the authoritative post-tail-padding decode
+        (what `finalize()` gets back from the recognizer after `input_finished()`).
+        Reconciliation rule against the already-committed prefix:
+          - If `final_raw_text`'s words extend (or exactly match) the already
+            committed prefix, the final text wins outright -- it is the most
+            authoritative hypothesis the decoder will ever produce for this
+            session, so no committed length is lost.
+          - If it *diverges* (the committed prefix is not a prefix of the final
+            words -- e.g. the decoder's one-shot finalization revised words we had
+            already told the caller were final), we do NOT retract: the result is
+            the existing committed words, followed by whatever of the final text
+            comes after the longest common word-prefix with committed. A warning
+            is logged with both strings so a mismatch is visible, but the
+            already-committed text is never shortened or replaced.
+        With no `final_raw_text` (legacy/defensive path), the last raw partial from
+        `update()` history is used the same way -- it can only ever extend or match
+        committed, by construction, since it's what committed was derived from.
+        """
+        if final_raw_text is not None:
+            final_words = final_raw_text.split()
+        elif self._history:
+            final_words = list(self._history[-1])
+        else:
+            final_words = []
+
+        committed = self._committed_words
+        if final_words[: len(committed)] == committed:
+            merged = final_words
+        else:
+            common_len = self._common_prefix_len(committed, final_words)
+            merged = committed + final_words[common_len:]
+            logger.warning(
+                "CommitTracker.flush(): final text diverges from the committed "
+                "prefix; keeping committed text and appending the remainder after "
+                "the longest common word-prefix. committed=%r final=%r",
+                " ".join(committed),
+                " ".join(final_words),
+            )
+        self._committed_words = merged
         self._seq += 1
         return PartialResult(committed=" ".join(self._committed_words), tentative="", seq=self._seq)
+
+    @staticmethod
+    def _common_prefix_len(a: list[str], b: list[str]) -> int:
+        length = 0
+        for x, y in zip(a, b):
+            if x != y:
+                break
+            length += 1
+        return length
 
     def _stable_prefix_len(self) -> int:
         recent = self._history[-self._stable_count:]
@@ -141,6 +226,6 @@ class CommitTracker:
     def _punctuation_prefix_len(words: list[str]) -> int:
         length = 0
         for i, w in enumerate(words):
-            if _SENTENCE_END_RE.search(w):
+            if _is_sentence_end(w):
                 length = i + 1
         return length

@@ -85,6 +85,61 @@ class TestCommitTrackerPunctuation:
         assert tracker.update("Wow!").committed == "Wow!"
 
 
+class TestCommitTrackerPunctuationEdgeCases:
+    """WHISP-56 CHANGES_REQUIRED item 3: punctuation must only commit at a true
+    sentence end, not inside/after abbreviations or numeric tokens."""
+
+    def test_spanish_abbreviation_sr_does_not_commit(self):
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("El Sr. Garcia")
+        assert result.committed == ""
+        assert result.tentative == "El Sr. Garcia"
+
+    def test_spanish_abbreviation_dra_does_not_commit(self):
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("Hablé con la Dra. Lopez")
+        assert result.committed == ""
+
+    def test_english_abbreviation_mr_does_not_commit(self):
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("I saw Mr. Smith")
+        assert result.committed == ""
+
+    def test_eg_and_ie_do_not_commit(self):
+        tracker = CommitTracker(stable_count=2)
+        assert tracker.update("bring snacks e.g. chips").committed == ""
+        tracker.reset()
+        assert tracker.update("bring snacks i.e. chips").committed == ""
+
+    def test_decimal_number_does_not_commit(self):
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("Pi is 3.5 roughly")
+        assert result.committed == ""
+
+    def test_trailing_period_on_bare_number_does_not_commit(self):
+        """A trailing sentence-punctuation char on a pure numeric token ("3.") is
+        still treated as a decimal/number artifact, not a sentence end."""
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("It costs 3.")
+        assert result.committed == ""
+
+    def test_abbreviation_followed_by_a_real_sentence_end_commits_up_to_the_real_one(self):
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("El Sr. Garcia llegó.")
+        assert result.committed == "El Sr. Garcia llegó."
+        assert result.tentative == ""
+
+    def test_ee_uu_abbreviation_does_not_commit(self):
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("Nació en EE.UU. ayer")
+        assert result.committed == ""
+
+    def test_genuine_sentence_end_still_commits(self):
+        tracker = CommitTracker(stable_count=2)
+        result = tracker.update("Hello world.")
+        assert result.committed == "Hello world."
+
+
 class TestCommitTrackerReset:
     def test_reset_clears_history_and_committed_state(self):
         tracker = CommitTracker(stable_count=2)
@@ -116,6 +171,61 @@ class TestCommitTrackerFlush:
         result = tracker.flush()
         assert result.committed == ""
         assert result.tentative == ""
+
+    def test_flush_never_retracts_already_committed_words(self):
+        """Audit repro (WHISP-56 CHANGES_REQUIRED item 1): update("Hello world.")
+        commits "Hello world." via punctuation; a later, shorter partial
+        ("Hello") must not make flush() retract to just "Hello"."""
+        tracker = CommitTracker(stable_count=2)
+        tracker.update("Hello world.")
+        tracker.update("Hello")
+        result = tracker.flush()
+        assert result.committed == "Hello world."
+        words = result.committed.split()
+        assert len(words) >= 2
+
+    def test_flush_with_final_text_that_extends_committed_wins_outright(self):
+        tracker = CommitTracker(stable_count=2)
+        tracker.update("hola")
+        tracker.update("hola mundo")  # commits "hola"
+        result = tracker.flush("hola mundo completo")
+        assert result.committed == "hola mundo completo"
+        assert result.tentative == ""
+
+    def test_flush_with_final_text_equal_to_committed_keeps_it(self):
+        tracker = CommitTracker(stable_count=2)
+        tracker.update("Hello world.")  # commits "Hello world." via punctuation
+        result = tracker.flush("Hello world.")
+        assert result.committed == "Hello world."
+
+    def test_flush_with_diverging_final_text_keeps_committed_and_appends_remainder(self):
+        """The final decode revised an already-committed word ("there"->"city"); we
+        keep the committed text and append whatever comes after the longest common
+        word-prefix with committed, rather than accepting the revision or losing
+        the committed words."""
+        tracker = CommitTracker(stable_count=2)
+        tracker.update("hello there")
+        tracker.update("hello there general")  # commits "hello there"
+        result = tracker.flush("hello city general kenobi")
+        # Longest common word-prefix with committed ("hello there") is just "hello"
+        # (index 1 diverges: "there" vs "city"), so committed is kept whole and
+        # everything in the final text after that common prefix is appended.
+        assert result.committed == "hello there city general kenobi"
+
+    def test_flush_logs_a_warning_on_divergence(self, caplog):
+        tracker = CommitTracker(stable_count=2)
+        tracker.update("hello there")
+        tracker.update("hello there general")
+        with caplog.at_level("WARNING"):
+            tracker.flush("hello city general")
+        assert any("diverges" in r.message for r in caplog.records)
+
+    def test_flush_with_no_final_text_falls_back_to_last_history_entry(self):
+        tracker = CommitTracker(stable_count=2)
+        tracker.update("hola")
+        tracker.update("hola mundo")
+        result = tracker.flush()
+        assert result.committed == "hola mundo"
 
 
 class TestStreamingSpeechEngineProtocol:
