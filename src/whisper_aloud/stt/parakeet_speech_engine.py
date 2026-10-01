@@ -23,6 +23,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Sherpa-onnx thread count, capped regardless of core count (WHISP-56 audit item 5):
+# no meaningful RTF win was seen past a handful of threads in the WHISP-55 spike, and
+# capping bounds worst-case CPU contention on constrained laptops (and in CI). No
+# existing config field fits this -- revisit if one is added. Shared naming/value
+# with NemotronStreamingEngine's _NUM_THREADS.
+_NUM_THREADS = min(4, os.cpu_count() or 4)
+
 
 class ParakeetSpeechEngine:
     """Parakeet TDT transducer engine satisfying the SpeechEngine protocol."""
@@ -74,7 +81,7 @@ class ParakeetSpeechEngine:
                 decoder=decoder,
                 joiner=joiner,
                 tokens=tokens,
-                num_threads=os.cpu_count() or 4,
+                num_threads=_NUM_THREADS,
                 model_type="nemo_transducer",
                 provider=provider,
             )
