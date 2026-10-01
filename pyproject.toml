@@ -98,8 +98,11 @@ markers = [
     "dbus_private: Tests that must run under `dbus-run-session` on a private bus (see WHISP-64).",
     "e2e: Full daemon-subprocess tests on a private dbus-run-session bus (see tests/e2e/).",
     "real_model: Tests that exercise a real downloaded model; skipped unless already cached locally (see WHISP-56). Never downloads.",
+    "gui: Tests that build real GTK/Adw widgets and need a live display (Xvfb). Excluded from the default run (see tests/gui/ and scripts/test_gui.sh) — run explicitly with `-m gui tests/gui`.",
 ]
-norecursedirs = [".*", "build", "dist", "node_modules", "tests/e2e"]
+# tests/gui needs a live display (Xvfb) and is never collected by a plain `pytest`/
+# `pytest -q` run — see scripts/test_gui.sh, the only supported way to run it.
+norecursedirs = [".*", "build", "dist", "node_modules", "tests/e2e", "tests/gui"]
 
 [tool.coverage.run]
 source = ["whisper_aloud"]
