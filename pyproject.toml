@@ -96,3 +96,7 @@ markers = [
     "requires_display: Tests that need a GUI display/GTK environment.",
     "requires_dbus: Tests that need a live user D-Bus session.",
 ]
+
+[tool.coverage.run]
+source = ["whisper_aloud"]
+branch = true
