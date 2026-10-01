@@ -21,6 +21,7 @@ from typing import Callable, Iterator, Optional
 import pytest
 
 from tests._private_bus import private_bus_address
+from tests.e2e.env_builder import build_daemon_env
 
 # ─── Session guard: refuse to run anywhere but a private dbus-run-session bus ──
 #
@@ -47,14 +48,6 @@ from whisper_aloud.service.client import WhisperAloudClient  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "audio"
 BUS_NAME = "org.fede.whisperaloud"
-
-# The dev venv's whisper_aloud install may be editable against a *different*
-# checkout (e.g. the main repo, not this worktree) -- pytest itself only
-# sees the worktree's src/ because the root conftest.py inserts it into
-# sys.path for THIS process. The daemon subprocess is a brand new
-# interpreter that does not inherit sys.path, only env vars, so it must be
-# told explicitly via PYTHONPATH or it will run the wrong code.
-_WORKTREE_SRC = str(Path(__file__).resolve().parent.parent.parent / "src")
 
 
 # ─── DaemonHandle: owns one daemon subprocess, stopped only via its Popen ──────
@@ -108,39 +101,14 @@ class DaemonHandle:
 
 
 def _build_daemon_env(xdg_home: Path, config_overrides: Optional[dict] = None) -> dict:
-    """Harness defaults from the design doc's env table (section 4): fake
-    engine, every real-world side effect disabled, a fresh HOME/XDG tree, and
-    the private bus address this whole pytest session is running on."""
-    env = dict(os.environ)
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        _WORKTREE_SRC if not existing_pythonpath else f"{_WORKTREE_SRC}{os.pathsep}{existing_pythonpath}"
-    )
-    env.update(
-        {
-            "WHISPER_ALOUD_TEST_MODE": "1",
-            "WHISPER_ALOUD_MODEL_ENGINE": "fake",
-            "WHISPER_ALOUD_MODEL_NAME": "fake",
-            "WHISPER_ALOUD_RAISE_MIC_GAIN": "0",
-            "WHISPER_ALOUD_PAUSE_MEDIA": "0",
-            "WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE": "0",
-            "WHISPER_ALOUD_NOTIFICATIONS_ENABLED": "0",
-            "WHISPER_ALOUD_DB_PATH": str(xdg_home / "data" / "history.sqlite3"),
-            "HOME": str(xdg_home),
-            "XDG_CONFIG_HOME": str(xdg_home / "config"),
-            "XDG_DATA_HOME": str(xdg_home / "data"),
-            "XDG_CACHE_HOME": str(xdg_home / "cache"),
-            "XDG_STATE_HOME": str(xdg_home / "state"),
-            "DBUS_SESSION_BUS_ADDRESS": _PRIVATE_BUS_ADDRESS,
-        }
-    )
-    # DISPLAY / WAYLAND_DISPLAY / XDG_SESSION_TYPE intentionally absent --
-    # the daemon's natural degradation path for hotkeys/indicator.
-    for var in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE"):
-        env.pop(var, None)
-    for key, value in (config_overrides or {}).items():
-        env[f"WHISPER_ALOUD_{key}"] = str(value)
-    return env
+    """Thin wrapper around env_builder.build_daemon_env binding this
+    session's private bus address and creating the fresh runtime dir it
+    references (kept a separate, pure, importable function so it can be
+    unit-tested without a real bus -- see tests/test_e2e_env_builder.py)."""
+    runtime_dir = xdg_home / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(runtime_dir, 0o700)
+    return build_daemon_env(xdg_home, _PRIVATE_BUS_ADDRESS, config_overrides)
 
 
 def _wait_for_daemon_ready(proc: subprocess.Popen, timeout: float) -> None:
