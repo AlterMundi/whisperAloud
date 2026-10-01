@@ -48,6 +48,12 @@ class NoiseGate:
         self._gate_open = False
         self._hold_remaining = 0  # samples left in hold period
 
+    def reset(self) -> None:
+        """Clear envelope/open/hold state, as if freshly constructed."""
+        self._envelope = 0.0
+        self._gate_open = False
+        self._hold_remaining = 0
+
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply noise gate to audio chunk.
 
@@ -167,6 +173,11 @@ class AGC:
         # of prior audio, which made chunked output diverge sharply from
         # one-shot output). Starts empty, so the very first call (or a
         # single one-shot call) behaves exactly as before.
+        self._history = np.empty(0, dtype=np.float64)
+
+    def reset(self) -> None:
+        """Clear gain and RMS history, as if freshly constructed."""
+        self._current_gain = 1.0
         self._history = np.empty(0, dtype=np.float64)
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -583,6 +594,25 @@ class AudioPipeline:
                 "use process() for one-shot (non-streaming) processing."
             )
         return self.process(audio, sample_rate)
+
+    def reset(self) -> None:
+        """Clear all stateful history (gate envelope/hold, AGC gain/RMS
+        history) so this pipeline behaves like a freshly constructed one on
+        the next process()/process_chunk() call.
+
+        This exists because AudioRecorder keeps a single AudioPipeline
+        instance (``self._pipeline``) alive across many recording sessions
+        (the daemon reuses one AudioRecorder for its whole lifetime) --
+        without resetting it between recordings, AGC's rolling RMS history
+        and NoiseGate's envelope/hold state from recording N would leak into
+        recording N+1's one-shot process() call (WHISP-65 audit finding).
+        PeakLimiter and Denoiser are stateless, so there is nothing to reset
+        for them.
+        """
+        if self._gate is not None:
+            self._gate.reset()
+        if self._agc is not None:
+            self._agc.reset()
 
 
 class StreamingResampler:

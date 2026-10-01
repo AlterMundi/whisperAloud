@@ -263,6 +263,12 @@ class AudioRecorder:
             self._frames = []
             self._level_meter.reset()
             self._start_time = time.time()
+            # AudioRecorder keeps a single one-shot AudioPipeline instance
+            # alive across the daemon's whole lifetime (many recordings), so
+            # it must be reset per session -- otherwise AGC's rolling RMS
+            # history and NoiseGate's envelope/hold state from the previous
+            # recording leak into this one's stop() processing.
+            self._pipeline.reset()
             self._start_chunk_worker()
 
             # Open stream
