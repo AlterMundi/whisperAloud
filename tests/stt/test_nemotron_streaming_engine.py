@@ -8,6 +8,7 @@ dependency required to run this file.
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from unittest.mock import patch
 
@@ -252,6 +253,47 @@ class TestFinalize:
         assert engine._stream is None
 
 
+class TestFinalizeReconciliation:
+    """WHISP-56 CHANGES_REQUIRED item 2: finalize() must route the post-tail-padding
+    raw text through CommitTracker.flush() instead of returning it bypassing the
+    tracker, so the final text can never contradict what get_partial() already told
+    a caller was committed."""
+
+    def test_finalize_extends_the_committed_prefix_cleanly(self, tmp_path):
+        engine = NemotronStreamingEngine(_cfg())
+        _write_fake_model_files(tmp_path)
+        fake_module = make_fake_sherpa_module(["hola dia", "hola dia bueno"])
+        _load_with_fake(engine, tmp_path, fake_module)
+        engine.start_session("es")
+        engine.accept_chunk(np.zeros(100, dtype=np.float32))
+        # Stable across this one partial only so far; nothing committed yet.
+        assert engine.get_partial().committed == ""
+
+        result = engine.finalize()
+        assert result.text == "hola dia bueno"
+
+    def test_finalize_on_divergence_keeps_committed_and_logs_a_warning(self, tmp_path, caplog):
+        engine = NemotronStreamingEngine(_cfg())
+        _write_fake_model_files(tmp_path)
+        fake_module = make_fake_sherpa_module(
+            ["hola dia", "hola dia bueno", "halo dia bueno completo"]
+        )
+        _load_with_fake(engine, tmp_path, fake_module)
+        engine.start_session("es")
+        engine.accept_chunk(np.zeros(100, dtype=np.float32))
+        engine.accept_chunk(np.zeros(100, dtype=np.float32))
+        assert engine.get_partial().committed == "hola dia"
+
+        with caplog.at_level("WARNING"):
+            result = engine.finalize()
+
+        # Committed ("hola dia") is never retracted even though the final decode
+        # revised its first word to "halo"; the remainder after the longest common
+        # word-prefix ("" here, since word 0 already diverges) is appended instead.
+        assert result.text == "hola dia halo dia bueno completo"
+        assert any("diverges" in r.message for r in caplog.records)
+
+
 class TestCancel:
     def test_cancel_session_then_accept_chunk_is_a_no_op(self, tmp_path):
         engine = NemotronStreamingEngine(_cfg())
@@ -351,6 +393,80 @@ class TestUnloadAndLifecycle:
         engine.unload_model()
         assert engine.is_loaded is False
         assert engine._stream is None
+
+
+class TestConcurrency:
+    """WHISP-56 CHANGES_REQUIRED item 6 (pre-WHISP-57 hardening): a lock guards the
+    engine's session state (stream/tracker/etc.) so accept_chunk() racing against
+    finalize()/start_session() from another thread never raises."""
+
+    def test_accept_chunk_and_finalize_race_without_exceptions(self, tmp_path):
+        engine = NemotronStreamingEngine(_cfg())
+        _write_fake_model_files(tmp_path)
+        # A long-ish, repeating script so decode_stream() always has something to
+        # return regardless of how many times either thread drives a decode.
+        fake_module = make_fake_sherpa_module(["hola", "hola mundo"] * 200)
+        _load_with_fake(engine, tmp_path, fake_module)
+        engine.start_session("es")
+
+        errors: list[BaseException] = []
+
+        def accept_loop() -> None:
+            for _ in range(200):
+                try:
+                    engine.accept_chunk(np.zeros(10, dtype=np.float32))
+                except Exception as e:  # pragma: no cover - only hit on a real bug
+                    errors.append(e)
+
+        def finalize_loop() -> None:
+            for _ in range(20):
+                try:
+                    engine.finalize()
+                    engine.start_session("es")
+                except Exception as e:  # pragma: no cover - only hit on a real bug
+                    errors.append(e)
+
+        t_accept = threading.Thread(target=accept_loop)
+        t_finalize = threading.Thread(target=finalize_loop)
+        t_accept.start()
+        t_finalize.start()
+        t_accept.join(timeout=10)
+        t_finalize.join(timeout=10)
+
+        assert not t_accept.is_alive()
+        assert not t_finalize.is_alive()
+        assert errors == []
+
+    def test_get_partial_during_concurrent_accept_chunk_never_raises(self, tmp_path):
+        engine = NemotronStreamingEngine(_cfg())
+        _write_fake_model_files(tmp_path)
+        fake_module = make_fake_sherpa_module(["hola", "hola mundo"] * 200)
+        _load_with_fake(engine, tmp_path, fake_module)
+        engine.start_session("es")
+
+        errors: list[BaseException] = []
+
+        def accept_loop() -> None:
+            for _ in range(200):
+                try:
+                    engine.accept_chunk(np.zeros(10, dtype=np.float32))
+                except Exception as e:  # pragma: no cover
+                    errors.append(e)
+
+        def read_loop() -> None:
+            for _ in range(200):
+                try:
+                    engine.get_partial()
+                except Exception as e:  # pragma: no cover
+                    errors.append(e)
+
+        threads = [threading.Thread(target=accept_loop), threading.Thread(target=read_loop)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == []
 
 
 class TestFactoryWiring:

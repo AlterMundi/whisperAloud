@@ -21,6 +21,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,13 @@ _CHUNK_MS_BY_MODEL_NAME: dict[str, int] = {
 }
 _DEFAULT_CHUNK_MS = 560
 
+# Sherpa-onnx thread count, capped regardless of core count: the WHISP-55 spike saw
+# no meaningful RTF win past a handful of threads, and capping bounds worst-case CPU
+# contention on constrained laptops (and in CI). No existing config field fits this
+# (WHISP-56 audit item 5) -- revisit if one is added. Shared naming/value with
+# ParakeetSpeechEngine's _NUM_THREADS.
+_NUM_THREADS = min(4, os.cpu_count() or 4)
+
 
 class NemotronStreamingEngine:
     """Nemotron 3.5 ASR Streaming via ``sherpa_onnx.OnlineRecognizer`` (model_type="nemotron").
@@ -67,6 +75,14 @@ class NemotronStreamingEngine:
         self._tracker = CommitTracker(stable_count=2)
         self._last_partial = PartialResult(committed="", tentative="", seq=0)
         self._chunk_ms = _CHUNK_MS_BY_MODEL_NAME.get(config.model.name, _DEFAULT_CHUNK_MS)
+        # Guards all session state below (_stream, _tracker, _last_partial,
+        # _cancelling, _recognizer, _session_started) -- WHISP-56 audit item 6,
+        # ahead of WHISP-57 wiring this engine to concurrent D-Bus calls. Decode
+        # work itself (stream.accept_waveform/decode_stream/get_result) runs
+        # outside the lock using a local snapshot, so a slow decode never blocks
+        # get_partial()/cancel_session() from another thread.
+        self._lock = threading.Lock()
+        self._session_started = False
 
     @property
     def is_loaded(self) -> bool:
@@ -111,13 +127,14 @@ class NemotronStreamingEngine:
             feature_dim=_FEATURE_DIM,
             model_type="nemotron",
             decoding_method="greedy_search",
-            num_threads=os.cpu_count() or 4,
+            num_threads=_NUM_THREADS,
         )
         logger.info("Nemotron streaming engine loaded (chunk=%dms)", self._chunk_ms)
 
     def unload_model(self) -> None:
-        self._recognizer = None
-        self._stream = None
+        with self._lock:
+            self._recognizer = None
+            self._stream = None
 
     def cancel_transcription(self) -> None:
         """Alias for `cancel_session`, satisfying the batch `SpeechEngine` protocol."""
@@ -128,51 +145,79 @@ class NemotronStreamingEngine:
     def start_session(self, language: str) -> None:
         if self._recognizer is None:
             self.load_model()
-        self._stream = self._recognizer.create_stream()
-        self._stream.set_option("language", language)
-        self._tracker.reset()
-        self._cancelling = False
-        self._last_partial = PartialResult(committed="", tentative="", seq=0)
+        stream = self._recognizer.create_stream()
+        stream.set_option("language", language)
+        with self._lock:
+            self._stream = stream
+            self._tracker.reset()
+            self._cancelling = False
+            self._last_partial = PartialResult(committed="", tentative="", seq=0)
+            self._session_started = True
 
     def accept_chunk(self, samples: np.ndarray) -> None:
-        if self._stream is None:
-            raise RuntimeError("accept_chunk() called before start_session()")
-        if self._cancelling:
+        with self._lock:
+            stream = self._stream
+            recognizer = self._recognizer
+            cancelling = self._cancelling
+            ever_started = self._session_started
+
+        if stream is None:
+            if not ever_started:
+                raise RuntimeError("accept_chunk() called before start_session()")
+            return  # session already ended (e.g. a concurrent finalize/cancel); no-op
+        if cancelling:
             return
-        self._stream.accept_waveform(_SAMPLE_RATE, np.asarray(samples, dtype=np.float32))
-        while self._recognizer.is_ready(self._stream):
-            self._recognizer.decode_stream(self._stream)
-        text = self._recognizer.get_result(self._stream)
-        self._last_partial = self._tracker.update(text)
+
+        stream.accept_waveform(_SAMPLE_RATE, np.asarray(samples, dtype=np.float32))
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+        text = recognizer.get_result(stream)
+
+        with self._lock:
+            if self._stream is not stream:
+                return  # session ended/replaced while this chunk was decoding
+            self._last_partial = self._tracker.update(text)
 
     def get_partial(self) -> PartialResult:
-        return self._last_partial
+        with self._lock:
+            return self._last_partial
 
     def finalize(self) -> TranscriptionResult:
         t0 = time.time()
         language = self.config.transcription.language
-        if self._stream is None:
+
+        with self._lock:
+            stream = self._stream
+            recognizer = self._recognizer
+            cancelling = self._cancelling
+            self._stream = None  # the session ends now regardless of what follows
+
+        if stream is None:
             return TranscriptionResult(
                 text="", language=language, segments=[], confidence=0.0,
                 duration=0.0, processing_time=round(time.time() - t0, 3),
             )
-        if self._cancelling:
-            self._cancelling = False
-            self._stream = None
+        if cancelling:
+            with self._lock:
+                self._cancelling = False
             return TranscriptionResult(
                 text="", language=language, segments=[], confidence=0.0,
                 duration=0.0, processing_time=round(time.time() - t0, 3),
             )
 
         tail = np.zeros(int(_TAIL_PADDING_SECONDS * _SAMPLE_RATE), dtype=np.float32)
-        self._stream.accept_waveform(_SAMPLE_RATE, tail)
-        self._stream.input_finished()
-        while self._recognizer.is_ready(self._stream):
-            self._recognizer.decode_stream(self._stream)
-        final_text = self._recognizer.get_result(self._stream).strip()
-        self._stream = None
+        stream.accept_waveform(_SAMPLE_RATE, tail)
+        stream.input_finished()
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+        final_text = recognizer.get_result(stream).strip()
+
+        with self._lock:
+            flushed = self._tracker.flush(final_text)
+            self._last_partial = flushed
+
         return TranscriptionResult(
-            text=final_text,
+            text=flushed.committed,
             language=language,
             segments=[],
             confidence=0.0,
@@ -181,7 +226,8 @@ class NemotronStreamingEngine:
         )
 
     def cancel_session(self) -> None:
-        self._cancelling = True
+        with self._lock:
+            self._cancelling = True
 
     # -- batch surface (SpeechEngine), feeding the streaming path chunk by chunk ---
 
