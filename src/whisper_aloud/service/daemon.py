@@ -799,10 +799,18 @@ class WhisperAloudService:
             return False
 
     def ReloadConfig(self) -> bool:
-        """Reload configuration from file and apply changes."""
+        """Reload configuration from file and apply changes.
+
+        Uses strict=True (WHISP-71): a malformed config.json must fail this
+        explicit reload with reload_failed, not silently replace the live
+        config with defaults (WhisperAloudConfig.load() raises
+        ConfigurationError in that case, caught below like any other
+        failure). self.config is only reassigned inside
+        _apply_config_changes(), so a raise here leaves it untouched.
+        """
         try:
             logger.info("Reloading configuration...")
-            new_config = WhisperAloudConfig.load()
+            new_config = WhisperAloudConfig.load(strict=True)
             self._apply_config_changes(new_config)
             self.ConfigChanged({})
             logger.info("Configuration reloaded successfully")
