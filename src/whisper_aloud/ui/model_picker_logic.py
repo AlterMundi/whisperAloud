@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from ..stt import catalog, model_download
 from ..stt.catalog import ModelEntry
@@ -23,11 +24,39 @@ def selectable_entries(language: str, device: str) -> list[ModelEntry]:
     Tolerates entries whose `engine` isn't a key in `catalog.ENGINES` (e.g. a
     streaming engine registered on another branch before its label lands here) —
     this function only reads `.languages`/`.devices`, never `catalog.ENGINES`.
+
+    Excludes any entry with `needs_review=True` (WHISP-56: a license pending human
+    legal review, e.g. the real nemotron-streaming entry) — such an entry is never a
+    default-list choice, only reachable through the full-catalog view (WHISP-42 audit
+    MEDIUM #3).
     """
     by_language = catalog.filter_by_language(catalog.entries(), language)
-    if not device or device == "auto":
-        return list(by_language)
-    return [e for e in by_language if device in e.devices]
+    if device and device != "auto":
+        by_language = [e for e in by_language if device in e.devices]
+    return [e for e in by_language if not e.needs_review]
+
+
+def entries_for_engine(language: str, device: str, engine: str) -> tuple[list[ModelEntry], bool]:
+    """Entries for one `engine`, honoring `language`/`device` when possible.
+
+    Returns `(entries, used_fallback)`. If `selectable_entries(language, device)`
+    narrowed to `engine` is non-empty, that's returned with `used_fallback=False`.
+    Otherwise falls back to `catalog.models_for(engine)` (bypassing the language/
+    device filter entirely — the same escape hatch the full-catalog view uses) with
+    `used_fallback=True`: silently keeping the *previous* engine's entries on screen
+    (the WHISP-42 audit HIGH #2 bug) is worse than showing this engine's models even
+    though they don't match the configured language — the user explicitly asked for
+    this engine, so leaving the Model row showing a different engine's entry (and
+    persisting it on Save) is the actual bug, not showing an imperfect-language match.
+
+    `catalog.models_for(engine)` already excludes nothing by `needs_review` — that's
+    intentional here too, matching the full-catalog view's "show everything for this
+    engine" semantics once a user has gone looking for it via Advanced->Engine.
+    """
+    matches = [e for e in selectable_entries(language, device) if e.engine == engine]
+    if matches:
+        return matches, False
+    return catalog.models_for(engine), True
 
 
 def default_index(
@@ -58,13 +87,16 @@ def default_index(
 
 def badges_for(entry: ModelEntry) -> list[str]:
     """Ordered badge strings: "Streaming" if entry.streaming, entry.license if
-    is_nonstandard_license(entry.license), else []. Download state is NOT included
-    here (it needs filesystem state — see download_state_for)."""
+    is_nonstandard_license(entry.license), "pending license review" if
+    entry.needs_review (WHISP-56), else []. Download state is NOT included here
+    (it needs filesystem state — see download_state_for)."""
     badges = []
     if entry.streaming:
         badges.append("Streaming")
     if is_nonstandard_license(entry.license):
         badges.append(entry.license)
+    if entry.needs_review:
+        badges.append("pending license review")
     return badges
 
 
@@ -74,6 +106,49 @@ def is_nonstandard_license(license_str: str) -> bool:
 
 def needs_download_note(downloaded: bool) -> bool:
     return not downloaded
+
+
+def _fmt_size(size_mb: Optional[int]) -> str:
+    """Human-facing size string for a catalog entry, or "—" when unknown."""
+    return f"{size_mb} MB" if size_mb is not None else "—"
+
+
+def row_label(entry: ModelEntry, downloaded: bool) -> str:
+    """Full display string for a Model-row or catalog-view row: the base
+    "{label} · {size} · {tier}" text, with badges_for(entry) and the live download
+    state each appended as a plain " · <badge>" suffix (WHISP-42 audit MEDIUM #4 — no
+    per-row pill widgets yet; see settings_dialog.py's WHISP-42-followup TODO).
+
+    "not downloaded" is only appended when `downloaded` is False — a downloaded entry
+    gets no download-state suffix at all, keeping the common case's label short.
+    """
+    parts = [f"{entry.label} · {_fmt_size(entry.size_mb)} · {entry.tier}"]
+    parts.extend(badges_for(entry))
+    if not downloaded:
+        parts.append("not downloaded")
+    return " · ".join(parts)
+
+
+# Device row <-> config.model.device mapping (audit MEDIUM #5): fixed display order.
+# "auto" previously had no row option at all and was silently coerced to "cpu" on
+# Save — it's now a first-class, round-trippable choice.
+_DEVICE_OPTIONS: tuple[str, ...] = ("auto", "cpu", "cuda")
+
+
+def device_row_index(device: str) -> int:
+    """Index to preselect in the Device row for a configured device string. Defaults
+    to "auto" (index 0) for an unrecognized value — the safest default, since it never
+    excludes a model and never silently narrows to one backend."""
+    return _DEVICE_OPTIONS.index(device) if device in _DEVICE_OPTIONS else 0
+
+
+def device_for_index(index: int) -> str:
+    """Config value for a Device row selection index. Defaults to "auto" for an
+    out-of-range index (including Gtk.INVALID_LIST_POSITION) — belt-and-suspenders,
+    should not happen since the row always has exactly these three options."""
+    if 0 <= index < len(_DEVICE_OPTIONS):
+        return _DEVICE_OPTIONS[index]
+    return "auto"
 
 
 def save_selection(engine: str, name: str) -> tuple[str, str]:

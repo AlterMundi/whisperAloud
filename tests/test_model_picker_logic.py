@@ -37,9 +37,39 @@ def test_selectable_entries_excludes_parakeet_for_language_outside_its_list():
     assert any(e.engine == "faster-whisper" for e in entries)  # multilingual still shown
 
 
-def test_selectable_entries_auto_language_returns_everything_for_the_device():
+def test_selectable_entries_auto_language_returns_everything_reviewable_for_the_device():
     all_cpu = mpl.selectable_entries("auto", "cpu")
-    assert len(all_cpu) == len(catalog.entries())  # every current entry supports cpu
+    reviewable = [e for e in catalog.entries() if not e.needs_review]
+    assert len(all_cpu) == len(reviewable)  # every current reviewable entry supports cpu
+
+
+def test_selectable_entries_excludes_needs_review_entries():
+    """A needs_review=True entry (e.g. the real nemotron-streaming, pending license
+    review per WHISP-56) is never in the default Model list — it only shows up in
+    the full-catalog view."""
+    entries = mpl.selectable_entries("auto", "cpu")
+    assert not any(e.needs_review for e in entries)
+    assert not any(e.name == "nemotron-3.5-streaming-560ms" for e in entries)
+
+
+def test_selectable_entries_still_excludes_needs_review_with_synthetic_entry(monkeypatch):
+    reviewed = _entry(name="reviewed", needs_review=False)
+    pending = _entry(name="pending-review", needs_review=True)
+    monkeypatch.setattr(catalog, "entries", lambda: (reviewed, pending))
+    entries = mpl.selectable_entries("auto", "cpu")
+    assert [e.name for e in entries] == ["reviewed"]
+
+
+def test_selectable_entries_auto_device_includes_cpu_only_and_cuda_only_synthetic_entries(
+    monkeypatch,
+):
+    """selectable_entries(lang, "auto") must not drop a device-restricted entry —
+    "auto" device passes everything through, same convention as "auto" language."""
+    cuda_only = _entry(name="cuda-only", devices=("cuda",))
+    cpu_only = _entry(name="cpu-only", devices=("cpu",))
+    monkeypatch.setattr(catalog, "entries", lambda: (cuda_only, cpu_only))
+    names = {e.name for e in mpl.selectable_entries("en", "auto")}
+    assert names == {"cuda-only", "cpu-only"}
 
 
 def test_selectable_entries_filters_by_device(monkeypatch):
@@ -92,6 +122,16 @@ def test_default_index_empty_entries_returns_zero():
     assert mpl.default_index([], "faster-whisper", "base", "en") == 0
 
 
+def test_default_index_matches_current_selection_via_alias():
+    """Mutation guard: default_index must match the configured (engine, name) via an
+    alias, not just an exact name — e.g. a config saved with the legacy "turbo" name
+    should resolve to its canonical large-v3-turbo row, not fall through to the
+    recommendation (as it would if the `name in e.aliases` branch were ever dropped)."""
+    entries = mpl.selectable_entries("en", "cpu")
+    idx = mpl.default_index(entries, "faster-whisper", "turbo", "en")
+    assert entries[idx].name == "large-v3-turbo"
+
+
 def test_badges_for_streaming_entry():
     assert mpl.badges_for(_entry(streaming=True)) == ["Streaming"]
 
@@ -108,6 +148,16 @@ def test_badges_for_streaming_and_nonstandard_license():
 
 def test_badges_for_plain_entry_is_empty():
     assert mpl.badges_for(_entry()) == []
+
+
+def test_badges_for_needs_review_entry():
+    assert mpl.badges_for(_entry(needs_review=True)) == ["pending license review"]
+
+
+def test_badges_for_streaming_nonstandard_license_and_needs_review_entry():
+    """Matches the real nemotron-streaming catalog entry's shape (WHISP-56)."""
+    entry = _entry(streaming=True, license="OpenMDW-1.1", needs_review=True)
+    assert mpl.badges_for(entry) == ["Streaming", "OpenMDW-1.1", "pending license review"]
 
 
 @pytest.mark.parametrize("lic", ["MIT", "Apache-2.0", "CC-BY-4.0", "BSD-3-Clause"])
@@ -203,3 +253,88 @@ def test_download_state_unknown_engine_is_conservatively_not_downloaded():
     state = mpl.download_state_for(entry)
     assert state.downloaded is False
     assert state.detection == "unknown"
+
+
+# --- row_label: full Model/catalog row text, badges appended as plain text ---
+# (audit MEDIUM #4 — no per-row pill widgets yet; see settings_dialog.py's
+# WHISP-42-followup TODO.)
+
+
+def test_row_label_plain_entry_has_no_trailing_badges():
+    assert mpl.row_label(_entry(), downloaded=True) == "Synthetic · 100 MB · fast"
+
+
+def test_row_label_appends_not_downloaded():
+    assert mpl.row_label(_entry(), downloaded=False) == (
+        "Synthetic · 100 MB · fast · not downloaded"
+    )
+
+
+def test_row_label_appends_streaming_and_license_badges_in_order():
+    entry = _entry(streaming=True, license="OpenMDW-1.1")
+    assert mpl.row_label(entry, downloaded=True) == (
+        "Synthetic · 100 MB · fast · Streaming · OpenMDW-1.1"
+    )
+
+
+def test_row_label_appends_badges_and_not_downloaded_together():
+    entry = _entry(streaming=True, needs_review=True)
+    assert mpl.row_label(entry, downloaded=False) == (
+        "Synthetic · 100 MB · fast · Streaming · pending license review · not downloaded"
+    )
+
+
+def test_row_label_unknown_size_uses_dash():
+    assert mpl.row_label(_entry(size_mb=None), downloaded=True) == "Synthetic · — · fast"
+
+
+# --- Device row <-> config.model.device mapping (audit MEDIUM #5) ---
+# The Device row has three options in this fixed order: Auto, CPU, CUDA. Previously
+# "auto" was silently coerced to "cpu" on Save because the row only had two options.
+
+
+def test_device_row_index_round_trips_auto_cpu_cuda():
+    assert mpl.device_row_index("auto") == 0
+    assert mpl.device_row_index("cpu") == 1
+    assert mpl.device_row_index("cuda") == 2
+
+
+def test_device_row_index_defaults_to_auto_for_unrecognized_value():
+    assert mpl.device_row_index("quantum-computer") == 0
+
+
+def test_device_for_index_round_trips():
+    assert mpl.device_for_index(0) == "auto"
+    assert mpl.device_for_index(1) == "cpu"
+    assert mpl.device_for_index(2) == "cuda"
+
+
+def test_device_for_index_defaults_to_auto_for_out_of_range_index():
+    assert mpl.device_for_index(99) == "auto"
+    assert mpl.device_for_index(-1) == "auto"
+
+
+# --- entries_for_engine: language-aware Advanced->Engine switch (audit HIGH #2) ---
+# Reproduces: language="ja" + Advanced->Parakeet must not silently keep showing the
+# previous engine's (faster-whisper) entries just because Parakeet has none for "ja".
+
+
+def test_entries_for_engine_uses_language_filtered_list_when_nonempty():
+    entries, used_fallback = mpl.entries_for_engine("es", "cpu", "faster-whisper")
+    assert used_fallback is False
+    assert entries  # non-empty
+    assert all(e.engine == "faster-whisper" for e in entries)
+
+
+def test_entries_for_engine_falls_back_to_full_engine_list_when_language_excludes_it():
+    entries, used_fallback = mpl.entries_for_engine("ja", "cpu", "parakeet")
+    assert used_fallback is True
+    assert entries == catalog.models_for("parakeet")
+    assert entries  # the fallback must not be empty-handed either
+    assert all(e.engine == "parakeet" for e in entries)
+
+
+def test_entries_for_engine_fallback_for_unknown_engine_is_empty_but_flagged():
+    entries, used_fallback = mpl.entries_for_engine("auto", "cpu", "no-such-engine")
+    assert entries == []
+    assert used_fallback is True
