@@ -130,6 +130,7 @@ def make_daemon(
     stack.enter_context(patch.object(daemon_module, "NotificationManager"))
     stack.enter_context(patch.object(daemon_module, "HistoryManager"))
     stack.enter_context(patch.object(daemon_module, "ClipboardManager"))
+    stack.enter_context(patch.object(daemon_module, "WindowManager"))
     mock_ind_cls = stack.enter_context(patch.object(daemon_module, "WhisperAloudIndicator"))
     mock_hk_cls = stack.enter_context(patch.object(daemon_module, "HotkeyManager"))
     mock_gain_cls = stack.enter_context(patch.object(daemon_module, "GainController"))
