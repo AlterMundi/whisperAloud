@@ -50,4 +50,8 @@ def test_hotkeys_disabled_and_api_version(client):
     status = client.get_status()
     assert status["hotkey_backend"] == "none"
 
-    assert client.get_api_version() == "1.0.0"
+    # 1.1.0 as of WHISP-57's additive PartialTranscript signal -- assert the
+    # major is still 1 (no breaking Control2 bump) rather than pinning the
+    # exact minor, so the next additive bump doesn't require editing this.
+    version = client.get_api_version()
+    assert version.startswith("1."), version
