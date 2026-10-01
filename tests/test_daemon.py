@@ -740,6 +740,69 @@ class TestAcquireBusName:
         assert daemon_module.EXIT_ALREADY_RUNNING == 3
 
 
+# ─── WHISP-64: portal must only be touched after the bus name is owned ─────
+
+
+class TestPortalTouchedOnlyAfterBusNameOwned:
+    """The XDG portal (hotkey_portal.PortalHotkeys, via HotkeyManager) must
+    never be contacted before the daemon has confirmed it owns BUS_NAME --
+    otherwise a losing instance (see TestAcquireBusName) could still pop a
+    portal consent dialog despite exiting right after.
+
+    WHISP-63 already arranged this structurally: the CLI entrypoint calls
+    acquire_bus_name(bus) *before* constructing WhisperAloudService, and
+    HotkeyManager() (which is what may create a PortalHotkeys instance) is
+    only created inside WhisperAloudService.__init__ -- see
+    TestHandleDaemonCommandBusRace in test_cli.py for the CLI-level version
+    of this guarantee. This test pins the call order directly against the
+    daemon module so a future refactor that moves hotkey init earlier (e.g.
+    into WhisperAloudService.__init__ before _bus/_name_owner are known, or
+    back into run()) fails loudly.
+    """
+
+    def test_acquire_bus_name_happens_before_hotkey_manager_construction(self):
+        stub_modules = _build_stub_modules()
+        daemon_module = _import_daemon_module(stub_modules)
+
+        call_order = []
+        fake_bus = MagicMock()
+        fake_bus.request_name.side_effect = lambda *a, **k: call_order.append(
+            "acquire_bus_name"
+        ) or MagicMock()
+
+        def _hotkey_manager_ctor(*args, **kwargs):
+            call_order.append("HotkeyManager")
+            mock = MagicMock()
+            mock.available = True
+            mock.backend = "portal"
+            return mock
+
+        with patch.dict(sys.modules, stub_modules), \
+             patch.dict("os.environ", {"DISPLAY": ":0"}, clear=False), \
+             patch.object(daemon_module, "AudioRecorder"), \
+             patch.object(daemon_module, "create_engine"), \
+             patch.object(daemon_module, "NotificationManager"), \
+             patch.object(daemon_module, "HistoryManager"), \
+             patch.object(daemon_module, "ClipboardManager"), \
+             patch.object(daemon_module, "WhisperAloudIndicator"), \
+             patch.object(daemon_module, "HotkeyManager", side_effect=_hotkey_manager_ctor), \
+             patch.object(daemon_module, "GLib") as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            mock_glib.idle_add = lambda fn, *args: fn(*args)
+            mock_glib.SOURCE_REMOVE = False
+
+            # Mirrors what the CLI entrypoint does: acquire the name first...
+            name_owner = daemon_module.acquire_bus_name(fake_bus)
+            # ...and only then construct the (heavy) service, which is where
+            # hotkey/portal init lives.
+            config = WhisperAloudConfig()
+            daemon_module.WhisperAloudService(
+                config=config, bus=fake_bus, name_owner=name_owner
+            )
+
+        assert call_order == ["acquire_bus_name", "HotkeyManager"]
+
+
 class TestServiceRunBusHandoff:
     """The daemon's run() must accept an already-acquired bus/name and must
     not re-request the name in that case (the CLI entrypoint acquires it
