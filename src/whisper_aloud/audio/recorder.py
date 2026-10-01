@@ -1,6 +1,7 @@
 """Audio recording with state management."""
 
 import logging
+import queue
 import threading
 import time
 from enum import Enum
@@ -11,7 +12,7 @@ import sounddevice as sd
 
 from ..config import AudioConfig, AudioProcessingConfig
 from ..exceptions import AudioDeviceError, AudioRecordingError
-from .audio_processor import AudioPipeline, AudioProcessor
+from .audio_processor import AudioPipeline, AudioProcessor, StreamingResampler
 from .device_manager import AudioDevice, DeviceManager
 from .level_meter import AudioLevel, LevelMeter
 
@@ -46,6 +47,7 @@ class AudioRecorder:
         level_callback: Optional[Callable[[AudioLevel], None]] = None,
         processing_config: Optional[AudioProcessingConfig] = None,
         auto_stop_callback: Optional[Callable[["np.ndarray"], None]] = None,
+        on_processed_chunk: Optional[Callable[[np.ndarray], None]] = None,
     ):
         """
         Initialize recorder.
@@ -54,10 +56,22 @@ class AudioRecorder:
             config: Audio configuration
             level_callback: Optional callback for real-time level updates
             processing_config: Optional audio processing pipeline config
+            on_processed_chunk: Optional hook invoked with each ~chunk_duration
+                slice of audio as it is captured, resampled to 16kHz (if the
+                device isn't already at 16kHz) and run through a per-session
+                streaming AudioPipeline (gate -> AGC -> limiter, no denoiser).
+                When set, a background worker thread is started in start()
+                and stopped in stop()/cancel() — the audio callback itself
+                only enqueues raw chunks, so a slow or raising hook can never
+                block or crash audio capture. Nothing in the daemon wires
+                this up yet (that's WHISP-57); the one-shot stop() path
+                (full buffer -> one-shot pipeline -> return) is unaffected
+                by this parameter.
         """
         self.config = config
         self.level_callback = level_callback
         self.auto_stop_callback = auto_stop_callback
+        self.on_processed_chunk = on_processed_chunk
 
         # State
         self._state = RecordingState.IDLE
@@ -73,6 +87,14 @@ class AudioRecorder:
         self._level_meter = LevelMeter(attack_ms=10.0, release_ms=300.0, sample_rate=config.sample_rate)
         self._processor = AudioProcessor()  # Keep for format conversion utilities
         self._pipeline = AudioPipeline(processing_config or AudioProcessingConfig())
+
+        # Per-session streaming state (only used when on_processed_chunk is
+        # set). Built fresh in start() and torn down in stop()/cancel() so
+        # each recording session gets its own pipeline/resampler state.
+        self._chunk_queue: Optional["queue.Queue"] = None
+        self._chunk_worker: Optional[threading.Thread] = None
+        self._streaming_pipeline: Optional[AudioPipeline] = None
+        self._streaming_resampler: Optional[StreamingResampler] = None
 
         logger.info("AudioRecorder initialized")
 
@@ -122,6 +144,16 @@ class AudioRecorder:
         # Store frame
         self._frames.append(audio_chunk)
 
+        # Hand the raw chunk to the streaming worker thread (if a hook is
+        # registered). Only a cheap, non-blocking enqueue happens here --
+        # resampling, pipeline processing, and the hook itself all run off
+        # this thread so they can never stall or crash audio capture.
+        if self._chunk_queue is not None:
+            try:
+                self._chunk_queue.put_nowait(audio_chunk)
+            except queue.Full:
+                logger.warning("Chunk queue full, dropping a processed-chunk hook frame")
+
         # Calculate and report level
         if self.level_callback:
             try:
@@ -148,6 +180,58 @@ class AudioRecorder:
         except Exception as e:
             logger.error(f"Auto-stop failed: {e}")
             self._set_state(RecordingState.ERROR)
+
+    def _chunk_worker_loop(self) -> None:
+        """Consume raw chunks from the queue off the audio-callback thread.
+
+        Resamples each chunk to 16kHz (if needed, causally, via
+        StreamingResampler) then runs it through this session's streaming
+        AudioPipeline before calling on_processed_chunk. A None sentinel on
+        the queue stops the loop. Any exception from the hook (or from
+        resampling/processing) is logged and swallowed so it can never kill
+        recording or this worker thread.
+        """
+        while True:
+            chunk = self._chunk_queue.get()
+            if chunk is None:
+                break
+            try:
+                processed = chunk
+                if self._streaming_resampler is not None:
+                    processed = self._streaming_resampler.process(processed)
+                if self._streaming_pipeline is not None and processed.size:
+                    processed = self._streaming_pipeline.process_chunk(processed, 16000)
+                if self.on_processed_chunk is not None and processed.size:
+                    self.on_processed_chunk(processed)
+            except Exception as e:
+                logger.error(f"on_processed_chunk hook failed: {e}", exc_info=True)
+
+    def _start_chunk_worker(self) -> None:
+        """Set up a fresh per-session streaming pipeline/resampler/queue/thread."""
+        if self.on_processed_chunk is None:
+            return
+        self._streaming_pipeline = AudioPipeline(self._pipeline.config, streaming=True)
+        self._streaming_resampler = (
+            StreamingResampler(self.config.sample_rate, 16000)
+            if self.config.sample_rate != 16000
+            else None
+        )
+        self._chunk_queue = queue.Queue()
+        self._chunk_worker = threading.Thread(
+            target=self._chunk_worker_loop, name="AudioRecorderChunkWorker", daemon=True
+        )
+        self._chunk_worker.start()
+
+    def _stop_chunk_worker(self) -> None:
+        """Signal the worker thread to drain and stop, then discard session state."""
+        if self._chunk_queue is not None:
+            self._chunk_queue.put(None)
+        if self._chunk_worker is not None:
+            self._chunk_worker.join(timeout=2.0)
+        self._chunk_queue = None
+        self._chunk_worker = None
+        self._streaming_pipeline = None
+        self._streaming_resampler = None
 
     def start(self, device_id: Optional[int] = None) -> None:
         """
@@ -179,6 +263,7 @@ class AudioRecorder:
             self._frames = []
             self._level_meter.reset()
             self._start_time = time.time()
+            self._start_chunk_worker()
 
             # Open stream
             self._stream = sd.InputStream(
@@ -224,6 +309,10 @@ class AudioRecorder:
                 self._stream.close()
                 self._stream = None
 
+            # No more chunks can arrive now; drain and stop the worker thread
+            # (if a hook was registered) before processing the full buffer.
+            self._stop_chunk_worker()
+
             # Now safe to read _frames — callback cannot append after stream is closed
             with self._state_lock:
                 frames_snapshot = list(self._frames)
@@ -268,6 +357,7 @@ class AudioRecorder:
             self._stream.close()
             self._stream = None
 
+        self._stop_chunk_worker()
         self._frames = []
         self._set_state(RecordingState.IDLE)
         logger.info("Recording cancelled")
