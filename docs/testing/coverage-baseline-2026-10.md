@@ -1,7 +1,9 @@
 # Coverage Baseline — October 2026 (WHISP-45)
 
 - **Date:** 2026-10-01
-- **Commit:** `84f15b8` (`build(coverage): configure coverage.run source and branch tracking`, on top of master `a332713`)
+- **Measured on:** master `a332713` plus the coverage-config commit, before any WHISP-45 tests.
+  The branch was later rebased onto a newer master (WHISP-65 added ~70 tests), so re-running at the
+  rebased commit gives different totals; these figures describe the pre-WHISP-65 tree.
 - **Command:** `pytest -q --cov=whisper_aloud --cov-branch --cov-report=term-missing`
 - **Suite result:** 568 passed, 10 skipped, 8 xfailed
 - **Overall coverage:** 48% statements (6587 stmts / 3430 missed), branch coverage tracked (1422 branches, 214 partial)
