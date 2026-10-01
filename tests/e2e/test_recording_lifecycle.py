@@ -96,6 +96,54 @@ def test_cancel_mid_recording_produces_no_transcript(daemon, audio_fixture):
     client.disconnect()
 
 
+def test_cancel_while_transcribing_produces_no_transcript(daemon, audio_fixture, tmp_path):
+    """WHISP-73: CancelRecording() while the daemon is "transcribing" (the
+    fake engine deliberately held in flight via
+    WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S) suppresses the TranscriptionReady
+    that engine eventually emits -- no signal, and the TestClipboardStub's
+    clipboard file (see src/whisper_aloud/clipboard/clipboard_manager.py)
+    stays untouched. Covers the real daemon-subprocess/real-D-Bus path for
+    the same contract tests/test_daemon_concurrency.py's
+    TestCancelWhileTranscribing exercises against an in-process daemon."""
+    clipboard_file = tmp_path / "clipboard.log"
+    handle = daemon(
+        config_overrides={
+            "FAKE_ENGINE_LATENCY_S": "0.5",
+            "TEST_CLIPBOARD_FILE": str(clipboard_file),
+        },
+        fake_audio="tone",
+    )
+    client = handle.client()
+    started = SignalCapture(client, "RecordingStarted")
+    status = SignalCapture(client, "StatusChanged")
+    ready = SignalCapture(client, "TranscriptionReady")
+    error = SignalCapture(client, "Error")
+
+    assert client.start_recording() is True
+    started.wait(timeout=5.0)
+    assert client.stop_recording() == "transcribing"
+    (state,) = status.wait(timeout=5.0, predicate=lambda s: s == "transcribing")
+    assert state == "transcribing"
+
+    assert client.cancel_recording() is True
+    (state,) = status.wait(timeout=5.0, predicate=lambda s: s == "idle")
+    assert state == "idle"
+
+    # The fake engine is still "transcribing" for ~0.5s more -- give it
+    # noticeably longer than that and confirm nothing ever surfaces.
+    with pytest.raises(AssertionError):
+        ready.wait(timeout=1.5)
+    with pytest.raises(AssertionError):
+        error.wait(timeout=0.2)
+
+    assert not clipboard_file.exists() or clipboard_file.read_text() == "", (
+        "CancelRecording() during transcription must not copy the stale "
+        "transcript to the clipboard"
+    )
+
+    client.disconnect()
+
+
 def test_start_recording_while_already_recording(daemon):
     """StartRecording() while already recording does not error: the
     underlying recorder treats it as a no-op (still RECORDING), but the
