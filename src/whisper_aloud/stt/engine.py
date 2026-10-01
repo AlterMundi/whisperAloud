@@ -57,6 +57,10 @@ def create_engine(config: "WhisperAloudConfig") -> "SpeechEngine":
         from .parakeet_speech_engine import ParakeetSpeechEngine
 
         return ParakeetSpeechEngine(config)
+    if engine == "nemotron-streaming":
+        from .nemotron_streaming_engine import NemotronStreamingEngine
+
+        return NemotronStreamingEngine(config)
 
     from ..exceptions import ConfigurationError
 

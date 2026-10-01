@@ -515,9 +515,11 @@ def test_download_model_network_failure(monkeypatch, capsys):
 
 
 def test_models_lists_all_catalog_engines_and_names(capsys):
-    """`whisper-aloud models` prints every catalog entry's engine and name."""
+    """`whisper-aloud models --all` prints every catalog entry's engine and name,
+    including ones pending license review (hidden by default -- see the
+    needs_review tests below)."""
     from whisper_aloud.stt import catalog
-    rc = main(["models"])
+    rc = main(["models", "--all"])
     assert rc == 0
     out = capsys.readouterr().out
     for entry in catalog.entries():
@@ -531,6 +533,53 @@ def test_models_marks_recommended_entries(capsys):
     out = capsys.readouterr().out
     assert "recommended" in out
     assert "yes" in out
+
+
+# ─── WHISP-56 CHANGES_REQUIRED item 4: needs_review gating ─────────────────────
+
+
+def test_models_hides_needs_review_entries_by_default(capsys):
+    from whisper_aloud.stt import catalog
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    rc = main(["models"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert entry.name not in out
+
+
+def test_models_all_shows_needs_review_entries_marked(capsys):
+    from whisper_aloud.stt import catalog
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    rc = main(["models", "--all"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert entry.name in out
+    assert "pending license review" in out
+
+
+def test_download_model_refuses_needs_review_without_accept_license(capsys):
+    rc = main(["download-model", "nemotron-3.5-streaming-560ms"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "pending license review" in err
+    assert "OpenMDW-1.1" in err
+    assert "whisp55-nemotron-sherpa-findings.md" in err
+
+
+def test_download_model_proceeds_with_accept_license(monkeypatch, capsys):
+    import whisper_aloud.stt.model_download as md
+    monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")
+    rc = main(["download-model", "nemotron-3.5-streaming-560ms", "--accept-license"])
+    assert rc == 0
+    assert "/cache/nemotron-3.5-streaming-560ms" in capsys.readouterr().out
+
+
+def test_download_model_accept_license_is_a_no_op_for_non_review_models(monkeypatch, capsys):
+    """--accept-license on an ordinary model is harmless (no gate to pass)."""
+    import whisper_aloud.stt.model_download as md
+    monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")
+    rc = main(["download-model", "parakeet-tdt-0.6b-v3", "--accept-license"])
+    assert rc == 0
 
 
 # ─── WHISP-63: daemon-start bus-name race ──────────────────────────────────

@@ -36,6 +36,13 @@ class ModelEntry:
     download_url: Optional[str] = None
     notes: str = ""
     aliases: tuple[str, ...] = ()
+    # WHISP-56 audit item 4: true for an entry whose license is pending human legal
+    # review (see its `notes`). Such an entry is still fully wired (config
+    # validation, create_engine) for testers who hand-configure it, but is hidden
+    # from the CLI/UI picker by default and can never be an auto-selected default.
+    # Additive + defaults False so other in-flight catalog work (e.g. WHISP-42's
+    # selector, which filters by ENGINES/badges) merges cleanly against this.
+    needs_review: bool = False
 
 
 # Human-facing label for each engine key. Order here is display order for an engine
@@ -177,7 +184,38 @@ _ENTRIES: tuple[ModelEntry, ...] = (
             "see docs/research/2026-10-01-sota-stt-offline/report.md)."
         ),
     ),
+    ModelEntry(
+        engine="nemotron-streaming",
+        name="nemotron-3.5-streaming-560ms",
+        label="Nemotron 3.5 ASR Streaming 0.6B (560ms)",
+        size_mb=682,
+        languages=("es", "en"),
+        streaming=True,
+        license="OpenMDW-1.1",
+        devices=("cpu",),
+        tier="balanced",
+        recommended=False,
+        download_url=(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+            "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2"
+        ),
+        notes=(
+            "WHISP-56: genuinely cache-aware streaming (560 ms chunks), int8-only "
+            "export, greedy_search decoding only (no hotwords/beam search for "
+            "model_type='nemotron' yet). NEEDS-HUMAN: OpenMDW-1.1 license is pending "
+            "legal review against the project's existing CC-BY-4.0/MIT STT "
+            "dependencies (see docs/superpowers/specs/"
+            "2026-10-01-whisp55-nemotron-sherpa-findings.md) -- not recommended "
+            "until that review completes."
+        ),
+        needs_review=True,
+    ),
 )
+
+# Intentionally NOT added to `ENGINES` (the UI/CLI engine-picker list): this model is
+# wired end-to-end (catalog, config validation, create_engine) for development and
+# testing, but kept out of the picker until the OpenMDW-1.1 license review above
+# completes. `models_for`/`get`/`engine_models` all still find it via `_ENTRIES`.
 
 
 def entries() -> tuple[ModelEntry, ...]:
@@ -219,12 +257,17 @@ def recommended(engine: Optional[str] = None, language: Optional[str] = None) ->
     recommendation is the more deliberate one (e.g. Parakeet for es/en over the
     generic faster-whisper default).
 
+    An entry with `needs_review=True` (pending license review) is never returned,
+    even if it is also marked `recommended=True` -- this should not currently
+    happen (the only `needs_review` entry today has `recommended=False`), but this
+    is a deliberate, defensive invariant (WHISP-56 audit item 4).
+
     Raises LookupError if no entry matches (should not happen for a known engine).
     """
     candidates: tuple[ModelEntry, ...] = _ENTRIES
     if engine is not None:
         candidates = tuple(e for e in candidates if e.engine == engine)
-    candidates = tuple(e for e in candidates if e.recommended)
+    candidates = tuple(e for e in candidates if e.recommended and not e.needs_review)
     if not candidates:
         raise LookupError(f"No recommended model for engine={engine!r}")
 
