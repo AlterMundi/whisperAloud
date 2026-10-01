@@ -3,7 +3,6 @@ import pytest
 
 from whisper_aloud.stt import catalog
 
-
 # The dict literal `config.ENGINE_MODELS` carried before WHISP-50 — frozen here so this
 # test fails if the catalog ever drops a name that used to be valid.
 LEGACY_ENGINE_MODELS = {
