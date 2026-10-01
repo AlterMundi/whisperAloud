@@ -662,6 +662,7 @@ class WhisperAloudService:
         if self._transcribing and self.transcriber:
             self.transcriber.cancel_transcription()
             self._transcribing = False
+            self._streaming_session = False
             self.StatusChanged("idle")
             if self.indicator:
                 self.indicator.set_state("idle")
@@ -1072,6 +1073,7 @@ class WhisperAloudService:
 
         def _emit_error():
             self._transcribing = False
+            self._streaming_session = False
             self.StatusChanged("idle")
             if self.indicator:
                 self.indicator.set_state("idle")
@@ -1120,6 +1122,7 @@ class WhisperAloudService:
 
         def _emit_success():
             self._transcribing = False
+            self._streaming_session = False
             self.StatusChanged("idle")
             if self.indicator:
                 self.indicator.set_state("idle")

@@ -45,6 +45,7 @@ class _StreamingEngineDouble:
         self.start_session = MagicMock(side_effect=lambda language: self.order.append("start_session"))
         self.accept_chunk = MagicMock()
         self.cancel_session = MagicMock(side_effect=lambda: self.order.append("cancel_session"))
+        self.cancel_transcription = MagicMock(side_effect=self.cancel_session)
         self._partials: list = []
         self._partial_index = 0
         self.finalize = MagicMock(side_effect=self._do_finalize)
@@ -178,6 +179,9 @@ class TestStreamingStopRecording:
         daemon.TranscriptionReady.assert_called_once()
         emitted_text, meta = daemon.TranscriptionReady.call_args[0]
         assert emitted_text == "streamed result"
+        # WHISP-57 audit (LOW): _streaming_session must be reset once the
+        # session completes, not left stale until the next StartRecording.
+        assert daemon._streaming_session is False
 
     def test_transcription_ready_meta_includes_session_id(self, daemon):
         _install_streaming_engine(daemon)
@@ -272,6 +276,7 @@ class TestStreamingCancel:
         daemon.CancelRecording()
 
         daemon._mock_glib.source_remove.assert_called()
+        assert daemon._partial_timer_id is None
 
     def test_non_streaming_cancel_does_not_touch_cancel_session(self, daemon):
         daemon.recorder.is_recording = True
@@ -279,3 +284,74 @@ class TestStreamingCancel:
         assert not hasattr(daemon.transcriber, "cancel_session") or (
             not daemon.transcriber.cancel_session.called
         )
+
+    def test_cancel_during_transcribing_resets_streaming_session(self, daemon):
+        """WHISP-57 audit (LOW): _streaming_session must not be left stale
+        when a streaming session's finalize() is cancelled while already in
+        the 'transcribing' state (CancelRecording's other branch)."""
+        _install_streaming_engine(daemon)
+        daemon.recorder.is_recording = False
+        daemon.ToggleRecording()
+        daemon.recorder.is_recording = False
+        daemon._transcribing = True
+        assert daemon._streaming_session is True
+
+        result = daemon.CancelRecording()
+
+        assert result is True
+        assert daemon._streaming_session is False
+
+
+class TestStreamingErrorPaths:
+    """WHISP-57 audit (MEDIUM), item 4: start_session()/finalize() raising
+    must still land the daemon back in idle with an Error signal, the
+    partial timer cleared, and _streaming_session reset -- same contract as
+    the pre-existing batch-engine failure path."""
+
+    def test_start_session_raising_emits_error_and_stays_idle(self, daemon):
+        engine = _install_streaming_engine(daemon)
+        engine.start_session.side_effect = RuntimeError("model exploded")
+        daemon.recorder.is_recording = False
+
+        result = daemon.StartRecording()
+
+        assert result is False
+        daemon.Error.assert_called_once()
+        error_code, error_message = daemon.Error.call_args[0]
+        assert error_code == "recording_failed"
+        assert "model exploded" in error_message
+        assert daemon._streaming_session is False
+        assert daemon._partial_timer_id is None
+        daemon.RecordingStarted.assert_not_called()
+        # The engine's own session must also be told to give up (best-effort).
+        engine.cancel_session.assert_called_once()
+
+    def test_start_session_raising_does_not_start_level_timer_or_recorder(self, daemon):
+        engine = _install_streaming_engine(daemon)
+        engine.start_session.side_effect = RuntimeError("boom")
+        daemon.recorder.is_recording = False
+
+        daemon.StartRecording()
+
+        daemon.recorder.start.assert_not_called()
+
+    def test_finalize_raising_emits_error_and_resets_streaming_session(self, daemon):
+        engine = _install_streaming_engine(daemon)
+        engine.finalize.side_effect = RuntimeError("decode exploded")
+        daemon.recorder.is_recording = False
+        daemon.recorder.stop.return_value = np.zeros(16000, dtype=np.float32)
+        daemon.ToggleRecording()
+        daemon.recorder.is_recording = True
+
+        state = daemon.StopRecording()
+
+        assert state == "transcribing"  # StopRecording's immediate return value
+        daemon.Error.assert_called_once()
+        error_code, error_message = daemon.Error.call_args[0]
+        assert error_code == "transcription_failed"
+        assert "decode exploded" in error_message
+        daemon.TranscriptionReady.assert_not_called()
+        daemon.StatusChanged.assert_any_call("idle")
+        assert daemon._transcribing is False
+        assert daemon._streaming_session is False
+        assert daemon._partial_timer_id is None
