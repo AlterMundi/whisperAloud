@@ -1,12 +1,13 @@
 """Tests for audio recorder."""
 
+import time
 from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 
 from whisper_aloud.audio import AudioRecorder, RecordingState
-from whisper_aloud.config import AudioConfig
+from whisper_aloud.config import AudioConfig, AudioProcessingConfig
 from whisper_aloud.exceptions import AudioRecordingError
 
 
@@ -290,3 +291,170 @@ def test_max_duration_triggers_full_stop_path(mock_stream, mock_validate):
 
     assert recorder.state == RecordingState.IDLE, f"Expected IDLE, got {recorder.state}"
     assert recorder._stream is None, "Stream was not closed by auto-stop"
+
+
+# ── WHISP-65: on_processed_chunk streaming hook ─────────────────────────────
+
+
+def _feed_chunks(recorder: AudioRecorder, n: int, chunk_samples: int = 1600) -> None:
+    """Simulate n audio callback invocations with distinct, identifiable chunks."""
+    for i in range(n):
+        chunk = np.full((chunk_samples, 1), fill_value=(i + 1) * 0.01, dtype=np.float32)
+        recorder._audio_callback(chunk, chunk_samples, None, None)
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_hook_not_called_when_none(mock_stream, mock_validate):
+    """No hook registered -> no chunk queue/worker, no calls at all."""
+    mock_validate.return_value = Mock()
+    mock_stream.return_value = Mock()
+
+    config = AudioConfig()
+    recorder = AudioRecorder(config)  # on_processed_chunk defaults to None
+    recorder.start()
+
+    assert recorder._chunk_queue is None
+    assert recorder._chunk_worker is None
+
+    _feed_chunks(recorder, 3)
+    recorder._frames = [np.zeros(1600, dtype=np.float32)]
+    recorder.stop()
+    # Nothing to assert on a hook that doesn't exist; the key behaviour is
+    # that no queue/thread were ever created, and stop() still works.
+    assert recorder.state == RecordingState.IDLE
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_hook_receives_chunks_in_order(mock_stream, mock_validate):
+    """Chunks must reach the hook in the order the callback produced them."""
+    mock_validate.return_value = Mock()
+    mock_stream.return_value = Mock()
+
+    received = []
+    config = AudioConfig(sample_rate=16000)
+    proc_config = AudioProcessingConfig(
+        noise_gate_enabled=False, agc_enabled=False, denoising_enabled=False, limiter_enabled=False
+    )
+    recorder = AudioRecorder(
+        config, processing_config=proc_config, on_processed_chunk=lambda c: received.append(c.copy())
+    )
+    recorder.start()
+
+    assert recorder._chunk_queue is not None
+    assert recorder._chunk_worker is not None
+    assert recorder._streaming_pipeline is not None
+    assert recorder._streaming_resampler is None  # already 16kHz, no resampling needed
+
+    n = 5
+    _feed_chunks(recorder, n)
+
+    recorder._frames = [np.zeros(1600, dtype=np.float32)]
+    recorder.stop()  # joins the worker thread, draining the queue first
+
+    assert len(received) == n
+    for i, chunk in enumerate(received):
+        expected_value = (i + 1) * 0.01
+        np.testing.assert_allclose(chunk, np.full_like(chunk, expected_value), atol=1e-6)
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_hook_exception_does_not_kill_recording(mock_stream, mock_validate):
+    """An exception raised inside the hook must be swallowed, not propagate,
+    and must not prevent subsequent chunks or stop() from working."""
+    mock_validate.return_value = Mock()
+    mock_stream.return_value = Mock()
+
+    calls = []
+
+    def flaky_hook(chunk):
+        calls.append(chunk)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+
+    config = AudioConfig()
+    recorder = AudioRecorder(config, on_processed_chunk=flaky_hook)
+    recorder.start()
+
+    _feed_chunks(recorder, 4)
+
+    recorder._frames = [np.zeros(1600, dtype=np.float32)]
+    audio = recorder.stop()  # must not raise, worker thread must still be alive/joinable
+
+    assert len(calls) == 4, "hook should still be called for all chunks despite one raising"
+    assert isinstance(audio, np.ndarray)
+    assert recorder.state == RecordingState.IDLE
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_streaming_pipeline_reset_between_sessions(mock_stream, mock_validate):
+    """Each start() must build a fresh per-session streaming pipeline so AGC
+    gain / gate state from a previous recording never leaks into the next."""
+    mock_validate.return_value = Mock()
+    mock_stream.return_value = Mock()
+
+    config = AudioConfig()
+    recorder = AudioRecorder(config, on_processed_chunk=lambda c: None)
+
+    recorder.start()
+    first_pipeline = recorder._streaming_pipeline
+    assert first_pipeline is not None
+    recorder._frames = [np.zeros(1600, dtype=np.float32)]
+    recorder.stop()
+    assert recorder._streaming_pipeline is None  # torn down after stop()
+
+    recorder.start()
+    second_pipeline = recorder._streaming_pipeline
+    assert second_pipeline is not None
+    assert second_pipeline is not first_pipeline
+    recorder._frames = [np.zeros(1600, dtype=np.float32)]
+    recorder.stop()
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_hook_resamples_when_device_rate_not_16k(mock_stream, mock_validate):
+    """A device running at a non-16kHz rate must get a StreamingResampler;
+    chunks delivered to the hook should already be at 16kHz."""
+    mock_validate.return_value = Mock()
+    mock_stream.return_value = Mock()
+
+    received = []
+    config = AudioConfig(sample_rate=48000)
+    recorder = AudioRecorder(config, on_processed_chunk=lambda c: received.append(c))
+    recorder.start()
+
+    assert recorder._streaming_resampler is not None
+
+    chunk_samples = int(0.1 * 48000)  # matches default chunk_duration at 48kHz
+    _feed_chunks(recorder, 2, chunk_samples=chunk_samples)
+
+    recorder._frames = [np.zeros(chunk_samples, dtype=np.float32)]
+    recorder.stop()
+
+    assert len(received) == 2
+    for chunk in received:
+        # Resampled 100ms chunk at 48kHz -> 16kHz should be ~1600 samples.
+        assert abs(len(chunk) - 1600) <= 2
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_cancel_stops_chunk_worker(mock_stream, mock_validate):
+    """cancel() must also tear down the chunk worker, not just stop()."""
+    mock_validate.return_value = Mock()
+    mock_stream.return_value = Mock()
+
+    config = AudioConfig()
+    recorder = AudioRecorder(config, on_processed_chunk=lambda c: None)
+    recorder.start()
+    assert recorder._chunk_worker is not None
+
+    recorder.cancel()
+
+    assert recorder._chunk_worker is None
+    assert recorder._chunk_queue is None
+    assert recorder.state == RecordingState.IDLE
