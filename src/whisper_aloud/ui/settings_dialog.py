@@ -643,9 +643,10 @@ class SettingsDialog(Gtk.Window):
             )
         self._language_fallback_notice.set_visible(used_language_fallback)
 
-        labels = [
-            row_label(e, download_state_for(e).downloaded) for e in entries
-        ]
+        # TODO(WHISP-42-followup): per-row badge pills via Gtk.SignalListItemFactory,
+        # per spec §1.2 — badges are plain text appended to the label for now
+        # (model_picker_logic.row_label), not separate pill widgets.
+        labels = [row_label(e, download_state_for(e).downloaded) for e in entries]
         self.model_row.set_model(Gtk.StringList.new(labels))
 
         if not entries:
