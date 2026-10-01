@@ -21,8 +21,12 @@ from .error_handler import InputValidator, ValidationError
 from .model_picker_logic import (
     badges_for,
     default_index,
+    device_for_index,
+    device_row_index,
     download_state_for,
+    entries_for_engine,
     needs_download_note,
+    row_label,
     save_selection,
     selectable_entries,
 )
@@ -259,11 +263,19 @@ class SettingsDialog(Gtk.Window):
         self._license_notice.add_css_class("dim-label")
         self._license_notice.set_visible(False)
 
+        # Shown when an Advanced->Engine switch has no entries for the configured
+        # language and _refresh_model_row() fell back to that engine's full list
+        # (model_picker_logic.entries_for_engine, WHISP-42 audit HIGH #2).
+        self._language_fallback_notice = Gtk.Label(wrap=True, xalign=0)
+        self._language_fallback_notice.add_css_class("dim-label")
+        self._language_fallback_notice.set_visible(False)
+
         self._refresh_model_row()
         self._model_list_box.append(self.model_row)
         page.append(self._model_list_box)
         page.append(self._download_notice)
         page.append(self._license_notice)
+        page.append(self._language_fallback_notice)
 
         self.model_row.connect("notify::selected", self._on_model_row_changed)
 
@@ -604,18 +616,36 @@ class SettingsDialog(Gtk.Window):
         engine's entries — the whole point of the full-catalog view (spec §1.6) is to
         let the user cross a language filter that would otherwise hide the entry they
         just chose (e.g. picking Parakeet from the catalog while language="ja").
+
+        When only `preferred_engine` is given (an Advanced->Engine switch), uses
+        model_picker_logic.entries_for_engine so a switch to an engine with zero
+        entries for the configured language falls back to that engine's full list
+        instead of silently keeping the *previous* engine's entries on screen (and on
+        Save) — WHISP-42 audit HIGH #2. The language-fallback notice is shown/hidden
+        accordingly.
         """
+        used_language_fallback = False
         if preferred_engine is not None and preferred_name is not None:
             entries = catalog.models_for(preferred_engine)
+        elif preferred_engine is not None:
+            entries, used_language_fallback = entries_for_engine(
+                self._config.transcription.language, self._config.model.device, preferred_engine
+            )
         else:
             entries = selectable_entries(
                 self._config.transcription.language, self._config.model.device
             )
-            if preferred_engine is not None:
-                entries = [e for e in entries if e.engine == preferred_engine] or entries
 
         self._model_entries = entries
-        labels = [f"{e.label} · {_fmt_size(e.size_mb)} · {e.tier}" for e in entries]
+        if used_language_fallback:
+            self._language_fallback_notice.set_text(
+                f"No {self._config.transcription.language} models for this engine; showing all."
+            )
+        self._language_fallback_notice.set_visible(used_language_fallback)
+
+        labels = [
+            row_label(e, download_state_for(e).downloaded) for e in entries
+        ]
         self.model_row.set_model(Gtk.StringList.new(labels))
 
         if not entries:
