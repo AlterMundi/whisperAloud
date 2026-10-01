@@ -551,18 +551,24 @@ install_autostart() {
 
     # On a systemd session, the user service (installed above, enabled +
     # started already) is the single owner of org.fede.whisperaloud; this
-    # entry must not race it with a second direct spawn. "systemctl --user
-    # status" (no unit argument) only checks whether a user manager exists,
-    # so this is not the old per-unit is-active race -- systemd itself
-    # serializes "start" on an already-running/-starting unit, so calling it
-    # here is idempotent. Only on a non-systemd session do we spawn directly.
+    # entry must not race it with a second direct spawn. We check that the
+    # unit itself is installed with "systemctl --user cat" (a bare "systemctl
+    # --user status" only tells us a user manager exists, not that our unit
+    # does), then ask systemd to start it -- "start" is idempotent (systemd
+    # serializes job execution per unit, so this never spawns a second
+    # process even if the unit is already starting/running). The direct
+    # spawn fallback only runs when the unit genuinely isn't managed by
+    # systemd here (no systemctl, or the unit isn't installed); it is safe
+    # even when `systemctl --user start` fails for another reason (e.g. the
+    # unit hit its StartLimitBurst) because a second instance of the daemon
+    # now exits cleanly via EXIT_ALREADY_RUNNING instead of restart-looping.
     cat > "$autostart_dir/whisper-aloud-autostart.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=WhisperAloud Daemon
 GenericName=Voice Transcription Daemon
 Comment=Start WhisperAloud background service at login
-Exec=sh -lc 'command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1 && exec systemctl --user start whisper-aloud.service; exec $VENV_PATH/bin/whisper-aloud --daemon'
+Exec=sh -lc 'if command -v systemctl >/dev/null 2>&1 && systemctl --user cat whisper-aloud.service >/dev/null 2>&1; then systemctl --user start whisper-aloud.service && exit 0; fi; exec $VENV_PATH/bin/whisper-aloud --daemon'
 Icon=audio-input-microphone-symbolic
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=3
