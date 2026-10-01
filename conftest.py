@@ -1,6 +1,25 @@
 """Root conftest: ensure worktree src is first in sys.path."""
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+# Isolate the suite from the developer's live desktop session. Without this,
+# HotkeyManager tests reached the real GlobalShortcuts portal and popped an
+# "Add Keyboard Shortcuts" dialog on every run, and anything resolving XDG
+# dirs could touch the real config/history. Tests that need a bus must start
+# a private one explicitly.
+_test_home = tempfile.mkdtemp(prefix="whisper-aloud-tests-")
+os.environ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/nonexistent/whisper-aloud-tests-bus"
+for _var in ("WAYLAND_DISPLAY", "DISPLAY"):
+    os.environ.pop(_var, None)
+for _var, _sub in (
+    ("XDG_CONFIG_HOME", "config"),
+    ("XDG_DATA_HOME", "data"),
+    ("XDG_CACHE_HOME", "cache"),
+    ("XDG_STATE_HOME", "state"),
+):
+    os.environ[_var] = os.path.join(_test_home, _sub)
 
 # Keep the worktree's src ahead of any other whisper_aloud installation
 # so that editable-install path resets don't affect test results.
