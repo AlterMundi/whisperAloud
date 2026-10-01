@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from whisper_aloud.__main__ import daemon_main, main, _format_uptime, _format_time_ago, _error
+from whisper_aloud.exceptions import WhisperAloudError
 
 
 # ─── Utility tests ────────────────────────────────────────────────────────────
@@ -147,6 +148,52 @@ def test_cli_transcribe_keyboard_interrupt(mock_transcriber_class):
             assert exit_code == 130
 
 
+@patch('whisper_aloud.__main__.Transcriber')
+def test_cli_transcribe_unexpected_exception(mock_transcriber_class, capsys):
+    """An unexpected (non-WhisperAloudError) failure is reported, not left to crash the CLI."""
+    mock_transcriber = mock_transcriber_class.return_value
+    mock_transcriber.transcribe_file.side_effect = RuntimeError("ctranslate2 segfaulted")
+
+    with patch('sys.argv', ['whisper-aloud', 'transcribe', 'test.wav']):
+        with patch.object(Path, 'exists', return_value=True):
+            exit_code = main()
+            assert exit_code == 1
+            assert "ctranslate2 segfaulted" in capsys.readouterr().err
+
+
+@patch('whisper_aloud.__main__.Transcriber')
+def test_cli_transcribe_unexpected_exception_verbose_prints_traceback(mock_transcriber_class, capsys):
+    """-v (placed *after* the subcommand) additionally prints a traceback on failure."""
+    mock_transcriber = mock_transcriber_class.return_value
+    mock_transcriber.transcribe_file.side_effect = RuntimeError("ctranslate2 segfaulted")
+
+    with patch('sys.argv', ['whisper-aloud', 'transcribe', '-v', 'test.wav']):
+        with patch.object(Path, 'exists', return_value=True):
+            exit_code = main()
+            assert exit_code == 1
+            assert "Traceback" in capsys.readouterr().err
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG: both the top-level parser and the `transcribe` subparser define "
+        "--verbose/-v (default=False). When -v is given *before* the subcommand "
+        "(`whisper-aloud -v transcribe file.wav`), the subparser's own default "
+        "silently overwrites args.verbose back to False, so verbose output (model "
+        "load message, metadata block, traceback-on-error) is lost even though the "
+        "user asked for it. `-v` placed after the subcommand works correctly. "
+        "See src/whisper_aloud/__main__.py build_parser(): the top-level --verbose "
+        "(~line 476) and `p_transcribe`'s own --verbose (~line 531) collide."
+    ),
+)
+def test_global_verbose_flag_before_subcommand_is_lost():
+    from whisper_aloud.__main__ import build_parser
+
+    args = build_parser().parse_args(["-v", "transcribe", "test.wav"])
+    assert args.verbose is True
+
+
 # ─── Daemon commands ──────────────────────────────────────────────────────────
 
 
@@ -203,6 +250,134 @@ def test_quit_command(mock_check, mock_call, capsys):
         assert "Daemon stopped" in capsys.readouterr().out
 
 
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_stop_command(mock_check, mock_call, capsys):
+    """Stop command calls daemon StopRecording."""
+    with patch('sys.argv', ['whisper-aloud', 'stop']):
+        exit_code = main()
+        assert exit_code == 0
+        mock_call.assert_called_once_with("StopRecording")
+        assert "transcribing" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_toggle_command(mock_check, mock_call, capsys):
+    """Toggle command prints the state returned by the daemon."""
+    mock_call.return_value = "recording"
+    with patch('sys.argv', ['whisper-aloud', 'toggle']):
+        exit_code = main()
+        assert exit_code == 0
+        mock_call.assert_called_once_with("ToggleRecording")
+        assert "State: recording" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_cancel_command_while_recording(mock_check, mock_call, capsys):
+    """Cancel command reports success when a recording was actually cancelled."""
+    mock_call.return_value = True
+    with patch('sys.argv', ['whisper-aloud', 'cancel']):
+        exit_code = main()
+        assert exit_code == 0
+        assert "Recording cancelled" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_cancel_command_when_idle(mock_check, mock_call, capsys):
+    """Cancel command reports 'Not recording' when there was nothing to cancel."""
+    mock_call.return_value = False
+    with patch('sys.argv', ['whisper-aloud', 'cancel']):
+        exit_code = main()
+        assert exit_code == 0
+        assert "Not recording" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_reload_command_success(mock_check, mock_call, capsys):
+    """Reload command reports success when the daemon reloads cleanly."""
+    mock_call.return_value = True
+    with patch('sys.argv', ['whisper-aloud', 'reload']):
+        exit_code = main()
+        assert exit_code == 0
+        assert "Configuration reloaded" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_reload_command_failure_still_exits_zero(mock_check, mock_call, capsys):
+    """A daemon-reported reload failure prints the message but the CLI call itself succeeded."""
+    mock_call.return_value = False
+    with patch('sys.argv', ['whisper-aloud', 'reload']):
+        exit_code = main()
+        assert exit_code == 0
+        assert "Configuration reload failed" in capsys.readouterr().out
+
+
+@patch(
+    'whisper_aloud.__main__.call_service_method',
+    side_effect=WhisperAloudError("D-Bus call timed out"),
+)
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_start_command_reports_service_error(mock_check, mock_call, capsys):
+    """A WhisperAloudError from the D-Bus call is surfaced as a CLI error, not a crash."""
+    with patch('sys.argv', ['whisper-aloud', 'start']):
+        exit_code = main()
+        assert exit_code == 1
+        assert "D-Bus call timed out" in capsys.readouterr().err
+
+
+# ─── History subcommand ───────────────────────────────────────────────────────
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_lists_recent_entries(mock_check, mock_call, capsys):
+    mock_call.return_value = [
+        {"id": 1, "text": "hello there", "timestamp": 0},
+    ]
+    with patch('sys.argv', ['whisper-aloud', 'history']):
+        exit_code = main()
+        assert exit_code == 0
+        mock_call.assert_called_once_with("GetHistory", 10)
+        assert "hello there" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_empty_prints_placeholder(mock_check, mock_call, capsys):
+    mock_call.return_value = []
+    with patch('sys.argv', ['whisper-aloud', 'history']):
+        exit_code = main()
+        assert exit_code == 0
+        assert "No transcriptions yet." in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_truncates_long_text(mock_check, mock_call, capsys):
+    mock_call.return_value = [{"id": 1, "text": "x" * 100, "timestamp": 0}]
+    with patch('sys.argv', ['whisper-aloud', 'history']):
+        exit_code = main()
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "..." in out
+        assert "x" * 100 not in out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_search_passes_query_through(mock_check, mock_call, capsys):
+    mock_call.return_value = []
+    with patch('sys.argv', ['whisper-aloud', 'history', 'search', 'budget meeting']):
+        exit_code = main()
+        assert exit_code == 0
+        mock_call.assert_called_once_with("SearchHistory", "budget meeting", 10)
+
+
 # ─── Config subcommand ────────────────────────────────────────────────────────
 
 
@@ -232,6 +407,51 @@ def test_config_no_action_defaults_to_show(capsys):
         assert exit_code == 0
         output = capsys.readouterr().out
         assert "[Model]" in output
+
+
+def test_config_unknown_action_is_an_error(capsys):
+    """cmd_config() defends against an action outside {'show', 'validate'}.
+
+    Not reachable through the argparse subparser (it only ever produces those two
+    values or None), but cmd_config() guards it anyway -- exercise that branch
+    directly.
+    """
+    from whisper_aloud.__main__ import cmd_config
+
+    class _Args:
+        config_action = "frobnicate"
+
+    exit_code = cmd_config(_Args())
+    assert exit_code == 1
+    assert "unknown config action" in capsys.readouterr().err
+
+
+def test_config_validate_reports_error_on_failure(capsys, monkeypatch):
+    """A broken config load surfaces as a CLI error from `config validate`."""
+    import whisper_aloud.__main__ as cli
+
+    def _boom():
+        raise RuntimeError("config.json is not valid JSON")
+
+    monkeypatch.setattr(cli.WhisperAloudConfig, "load", staticmethod(_boom))
+    with patch('sys.argv', ['whisper-aloud', 'config', 'validate']):
+        exit_code = main()
+        assert exit_code == 1
+        assert "configuration error" in capsys.readouterr().err
+
+
+def test_config_show_reports_error_on_failure(capsys, monkeypatch):
+    """A broken config load surfaces as a CLI error from `config show`."""
+    import whisper_aloud.__main__ as cli
+
+    def _boom():
+        raise RuntimeError("config.json is not valid JSON")
+
+    monkeypatch.setattr(cli.WhisperAloudConfig, "load", staticmethod(_boom))
+    with patch('sys.argv', ['whisper-aloud', 'config', 'show']):
+        exit_code = main()
+        assert exit_code == 1
+        assert "configuration error" in capsys.readouterr().err
 
 
 # ─── Bus name ─────────────────────────────────────────────────────────────────
@@ -289,6 +509,17 @@ def test_download_model_unknown(monkeypatch, capsys):
     rc = main(["download-model", "nope"])
     assert rc == 1
     assert "Unknown model" in capsys.readouterr().err
+
+
+def test_download_model_network_failure(monkeypatch, capsys):
+    """A download/extract failure (anything but ValueError) is reported, not raised."""
+    import whisper_aloud.stt.model_download as md
+    def _raise(name):
+        raise ConnectionError("huggingface.co unreachable")
+    monkeypatch.setattr(md, "ensure_model", _raise)
+    rc = main(["download-model", "parakeet-tdt-0.6b-v3"])
+    assert rc == 1
+    assert "download failed" in capsys.readouterr().err
 
 
 # ─── models command ────────────────────────────────────────────────────────────
