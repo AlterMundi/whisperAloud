@@ -14,13 +14,14 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+from . import catalog
+
 logger = logging.getLogger(__name__)
 
+# Derived from stt.catalog, the single source of truth for model metadata (WHISP-50).
+# Kept as a module-level dict (not a function) for backward compat with existing callers.
 MODEL_SOURCES: dict[str, str] = {
-    "parakeet-tdt-0.6b-v3": (
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
-        "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
-    ),
+    entry.name: entry.download_url for entry in catalog.entries() if entry.download_url
 }
 
 

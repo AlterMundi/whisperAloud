@@ -406,6 +406,34 @@ def cmd_download_model(args) -> int:
     return 0
 
 
+def cmd_models(args) -> int:
+    """List the STT model catalog as a table (engine, name, size, languages, license)."""
+    from .stt import catalog
+
+    rows = []
+    for entry in catalog.entries():
+        size = f"{entry.size_mb} MB" if entry.size_mb is not None else "—"
+        langs = "multilingual" if entry.languages is None else f"{len(entry.languages)} langs"
+        rec = "yes" if entry.recommended else ""
+        rows.append((entry.engine, entry.name, size, langs, entry.license, rec))
+
+    headers = ("engine", "name", "size", "languages", "license", "recommended")
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i])
+        for i in range(len(headers))
+    ]
+
+    def _fmt(row) -> str:
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
+
+    print(_fmt(headers))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print(_fmt(row))
+
+    return 0
+
+
 def handle_daemon_command(args) -> int:
     """Start the daemon service."""
     try:
@@ -436,6 +464,7 @@ examples:
   %(prog)s config show              Show configuration
   %(prog)s history                  Recent transcriptions
   %(prog)s download-model parakeet-tdt-0.6b-v3
+  %(prog)s models                   List available STT models
   %(prog)s --daemon                 Start the daemon
 """,
     )
@@ -471,6 +500,13 @@ examples:
         description="Download a named speech model to the local cache. No daemon required.",
     )
     p_download.add_argument("name", help="model name, e.g. parakeet-tdt-0.6b-v3")
+
+    # ── Model catalog ─────────────────────────────────────────────────────
+    sub.add_parser(
+        "models",
+        help="list the STT model catalog",
+        description="List all engines and models in the STT catalog with their metadata.",
+    )
 
     # ── Transcribe ────────────────────────────────────────────────────────
     p_transcribe = sub.add_parser(
@@ -535,6 +571,7 @@ COMMAND_MAP = {
     "config": cmd_config,
     "history": cmd_history,
     "download-model": cmd_download_model,
+    "models": cmd_models,
 }
 
 

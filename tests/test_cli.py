@@ -289,3 +289,25 @@ def test_download_model_unknown(monkeypatch, capsys):
     rc = main(["download-model", "nope"])
     assert rc == 1
     assert "Unknown model" in capsys.readouterr().err
+
+
+# ─── models command ────────────────────────────────────────────────────────────
+
+
+def test_models_lists_all_catalog_engines_and_names(capsys):
+    """`whisper-aloud models` prints every catalog entry's engine and name."""
+    from whisper_aloud.stt import catalog
+    rc = main(["models"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    for entry in catalog.entries():
+        assert entry.engine in out
+        assert entry.name in out
+
+
+def test_models_marks_recommended_entries(capsys):
+    rc = main(["models"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "recommended" in out
+    assert "yes" in out
