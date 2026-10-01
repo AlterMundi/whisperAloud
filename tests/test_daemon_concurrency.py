@@ -239,34 +239,22 @@ class TestCancelWhileTranscribing:
     `self._transcribing = False` and emits StatusChanged("idle")
     *synchronously*, on the calling thread, regardless of whether the
     executor-thread job backing that transcription has actually stopped.
-    `self.transcriber.cancel_transcription()` is fire-and-forget: nothing
-    checks whether the engine honoured it before the daemon considers
-    itself idle again. If the in-flight job's `transcribe_numpy()` call
-    was already past its cancellation check (or the engine just ignores
-    cancellation, which the production `Transcriber.cancel_transcription()`
-    docstring itself says is best-effort -- "may ... return a partial
-    result"), the job still runs `_emit_transcription_success()` to
-    completion and emits `TranscriptionReady` well after CancelRecording()
-    already told the world the daemon is idle again.
+    `self.transcriber.cancel_transcription()` is best-effort/cooperative
+    (see `Transcriber.cancel_transcription()`'s own docstring -- "may ...
+    return a partial result"), so a still-in-flight job can finish and try
+    to run `_emit_transcription_success()`/`_emit_transcription_error()`
+    well after CancelRecording() already told the world the daemon is idle
+    again.
+
+    WHISP-73 fix: CancelRecording() bumps a monotonic `self._job_id` token
+    before anything else. The job submitted by the StopRecording() call
+    captured the previous token at submission time; `_emit_transcription_
+    success`/`_emit_transcription_error` check the token (once before doing
+    any work, again inside the `GLib.idle_add` closure) and silently drop a
+    stale result -- no `TranscriptionReady`, no clipboard/paste, no history
+    row.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG (WHISP-67): CancelRecording() while transcribing flips "
-            "_transcribing=False and emits StatusChanged('idle') "
-            "synchronously, without any way to suppress the executor "
-            "thread's own _emit_transcription_success()/_emit_transcription_error() "
-            "closure once it finally runs. A cancelled-but-still-in-flight "
-            "batch job (cancel_transcription() is best-effort/cooperative; "
-            "see Transcriber.cancel_transcription()'s own docstring) still "
-            "emits TranscriptionReady after the daemon already reported "
-            "'idle', and also re-arms StartRecording() before the stale job "
-            "is actually done touching shared state (history_manager, "
-            "clipboard, notifications) -- the same class of race WHISP-57 "
-            "closed for Stop->Start, left open for Cancel->(anything)."
-        ),
-    )
     def test_cancel_during_transcription_suppresses_late_transcription_ready(self, daemon):
         gate = threading.Event()
         engine = _BatchEngineDouble(text="should not surface", gate=gate)
@@ -292,8 +280,65 @@ class TestCancelWhileTranscribing:
         daemon.executor.shutdown(wait=True)
         daemon._main_thread.drain()
 
-        # Documented/expected contract: a cancel means no transcript surfaces.
+        # Documented/expected contract: a cancel means no transcript surfaces,
+        # and the stale job never touches history or the clipboard either.
         daemon.TranscriptionReady.assert_not_called()
+        daemon.history_manager.add_transcription.assert_not_called()
+        daemon.clipboard_manager.copy.assert_not_called()
+
+        # A fresh Start works right away -- CancelRecording() already put the
+        # daemon back in a clean idle state, independent of the stale job.
+        daemon.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-wa")
+        assert daemon.StartRecording() is True
+        daemon.executor.shutdown(wait=True)
+
+
+class TestCancelDuringStreamingFinalize:
+    """WHISP-73: CancelRecording() while a streaming engine's finalize() is
+    still in flight on the executor thread suppresses the late
+    TranscriptionReady the same way as the batch path above."""
+
+    def test_cancel_during_streaming_finalize_suppresses_late_transcription_ready(self, daemon):
+        gate = threading.Event()
+        engine = MagicMock()
+        engine.is_streaming = True
+        engine.load_model = MagicMock()
+        engine.unload_model = MagicMock()
+        engine.cancel_transcription = MagicMock()
+        engine.cancel_session = MagicMock()
+        engine.start_session = MagicMock()
+        entered = threading.Event()
+
+        def _finalize():
+            entered.set()
+            if not gate.wait(timeout=10):
+                raise TimeoutError("finalize gate never released")
+            return _result(text="should not surface")
+
+        engine.finalize.side_effect = _finalize
+
+        _arm_for_recording(daemon, engine)
+        daemon.recorder.on_processed_chunk = None
+
+        assert daemon.StartRecording() is True
+        assert daemon._streaming_session is True
+        daemon.recorder.is_recording = True
+        assert daemon.StopRecording() == "transcribing"
+        daemon.recorder.is_recording = False
+        assert entered.wait(timeout=10)
+
+        assert daemon.CancelRecording() is True
+        engine.cancel_transcription.assert_called_once()
+        assert daemon._transcribing is False
+        daemon.StatusChanged.assert_called_with("idle")
+        daemon.TranscriptionReady.assert_not_called()
+
+        gate.set()
+        daemon.executor.shutdown(wait=True)
+        daemon._main_thread.drain()
+
+        daemon.TranscriptionReady.assert_not_called()
+        daemon.history_manager.add_transcription.assert_not_called()
 
 
 class TestBatchTranscriptionErrorRecovery:
@@ -331,7 +376,12 @@ class TestBatchTranscriptionErrorRecovery:
 
 class TestQuitWhileTranscribing:
     """WHISP-67 (4): Quit while transcribing: shutdown is clean,
-    `executor.shutdown` completes, and nothing is emitted after cleanup."""
+    `executor.shutdown` completes, and nothing is emitted after cleanup.
+
+    WHISP-73: Quit() also bumps the job token, so the in-flight job's
+    eventual result is dropped as stale -- the assertions below pin that
+    exact zero-emissions outcome (not just "the count didn't change further
+    after settling", which the original WHISP-67 regression test checked)."""
 
     def test_quit_during_transcription_shuts_down_cleanly(self, daemon):
         gate = threading.Event()
@@ -368,6 +418,13 @@ class TestQuitWhileTranscribing:
         cleanup_thread.join(timeout=5)
 
         daemon._main_thread.drain()
+
+        # WHISP-73: Quit()'s job-token bump means this in-flight job's result
+        # is dropped as stale -- not just "no further change after settling",
+        # but genuinely zero emissions and no history/clipboard side effects.
+        daemon.TranscriptionReady.assert_not_called()
+        daemon.Error.assert_not_called()
+        daemon.history_manager.add_transcription.assert_not_called()
         ready_calls = daemon.TranscriptionReady.call_count
         error_calls = daemon.Error.call_count
 
@@ -481,23 +538,23 @@ class TestConfigReloadDuringTranscription:
 
     This test pins that exact window with a gate inserted via an
     instance-level wrapper around `_ensure_model_loaded` (test
-    instrumentation only -- daemon.py is not modified) and asserts the
-    documented "current operation finishes on the engine it started with"
-    behaviour, which is expected to fail against the current implementation.
+    instrumentation only) to confirm the fix holds even if a reload call
+    landed in the narrowest possible window.
+
+    WHISP-74 fix (two independent, overlapping guards):
+
+    - (a) The executor-thread job is handed a *snapshot* of `self.transcriber`
+      at submission time (`StopRecording`/`_on_recorder_auto_stop`), and
+      `_transcribe_audio()`/`_finalize_streaming_and_emit()` always use that
+      snapshot, never a fresh read of `self.transcriber`.
+    - (b) `_apply_config_changes()` additionally defers the engine swap
+      itself (storing the new config in `self._pending_reload_config`)
+      whenever `self._transcribing` or `self.recorder.is_recording` is true,
+      applying it only once the daemon returns to idle (see
+      `TestDeferredModelReload` below). So even without (a), the swap this
+      test's gate used to catch a race for no longer happens mid-job at all.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG (WHISP-67): _apply_config_changes() reassigns "
-            "self.transcriber immediately, with no guard against "
-            "self._transcribing and no lock shared with the executor "
-            "thread, so a model-reloading SetConfig() during transcription "
-            "can run the OLD audio through the NEW engine instance -- "
-            "contradicting docs/dbus-api.md's SetConfig contract ('takes "
-            "effect ... once the current operation completes')."
-        ),
-    )
     def test_set_config_model_reload_does_not_swap_engine_under_inflight_job(self, daemon):
         old_engine = _BatchEngineDouble(text="old engine result")
         _arm_for_recording(daemon, old_engine)
@@ -537,3 +594,136 @@ class TestConfigReloadDuringTranscription:
         assert emitted_text == "old engine result"
         assert old_engine.transcribe_numpy_calls == 1
         assert new_engine.transcribe_numpy_calls == 0
+
+
+class TestDeferredModelReload:
+    """WHISP-74: a model-reload SetConfig()/ReloadConfig() landing while the
+    daemon is busy (recording or transcribing) stores the new config in
+    `self._pending_reload_config` instead of swapping `self.transcriber`
+    immediately, and applies it once the daemon returns to idle -- via a
+    successful transcription, a failed one, or CancelRecording()."""
+
+    def test_deferred_reload_applied_after_success(self, daemon):
+        gate = threading.Event()
+        old_engine = _BatchEngineDouble(text="old engine result", gate=gate)
+        _arm_for_recording(daemon, old_engine)
+        daemon._model_loaded = True
+
+        assert daemon.StartRecording() is True
+        daemon.recorder.is_recording = True
+        assert daemon.StopRecording() == "transcribing"
+        daemon.recorder.is_recording = False
+        assert old_engine.entered.wait(timeout=10)
+
+        new_engine = _BatchEngineDouble(text="new engine result")
+        with patch.object(daemon._daemon_module, "create_engine", return_value=new_engine) as mock_ce:
+            assert daemon.SetConfig({"model.name": "small"}) is True
+            # Not swapped yet -- the in-flight job is still using old_engine.
+            assert daemon.transcriber is old_engine
+            assert daemon._pending_reload_config is not None
+            mock_ce.assert_not_called()
+
+            gate.set()
+            daemon.executor.shutdown(wait=True)
+            daemon._main_thread.drain()
+
+            mock_ce.assert_called_once()
+
+        daemon.TranscriptionReady.assert_called_once()
+        emitted_text, _meta = daemon.TranscriptionReady.call_args[0]
+        assert emitted_text == "old engine result"
+        assert daemon.transcriber is new_engine
+        new_engine.load_model.assert_called_once()
+        assert daemon._pending_reload_config is None
+        assert daemon._model_loaded is True
+
+    def test_deferred_reload_applied_after_error(self, daemon):
+        gate = threading.Event()
+        old_engine = _BatchEngineDouble(error=RuntimeError("boom"), gate=gate)
+        _arm_for_recording(daemon, old_engine)
+        daemon._model_loaded = True
+
+        assert daemon.StartRecording() is True
+        daemon.recorder.is_recording = True
+        assert daemon.StopRecording() == "transcribing"
+        daemon.recorder.is_recording = False
+        assert old_engine.entered.wait(timeout=10)
+
+        new_engine = _BatchEngineDouble(text="new engine result")
+        with patch.object(daemon._daemon_module, "create_engine", return_value=new_engine) as mock_ce:
+            assert daemon.SetConfig({"model.name": "small"}) is True
+            assert daemon.transcriber is old_engine
+            mock_ce.assert_not_called()
+
+            gate.set()
+            daemon.executor.shutdown(wait=True)
+            daemon._main_thread.drain()
+
+        daemon.Error.assert_called_once_with("transcription_failed", "boom")
+        daemon.TranscriptionReady.assert_not_called()
+        assert daemon.transcriber is new_engine
+        new_engine.load_model.assert_called_once()
+        assert daemon._pending_reload_config is None
+
+    def test_deferred_reload_applied_after_cancel(self, daemon):
+        gate = threading.Event()
+        old_engine = _BatchEngineDouble(text="should not surface", gate=gate)
+        _arm_for_recording(daemon, old_engine)
+        daemon._model_loaded = True
+
+        assert daemon.StartRecording() is True
+        daemon.recorder.is_recording = True
+        assert daemon.StopRecording() == "transcribing"
+        daemon.recorder.is_recording = False
+        assert old_engine.entered.wait(timeout=10)
+
+        new_engine = _BatchEngineDouble(text="new engine result")
+        with patch.object(daemon._daemon_module, "create_engine", return_value=new_engine) as mock_ce:
+            assert daemon.SetConfig({"model.name": "small"}) is True
+            mock_ce.assert_not_called()
+
+            # CancelRecording() is synchronous: it applies the deferred
+            # reload right away, before the stale job even finishes.
+            assert daemon.CancelRecording() is True
+            mock_ce.assert_called_once()
+
+        assert daemon.transcriber is new_engine
+        assert daemon._pending_reload_config is None
+
+        gate.set()
+        daemon.executor.shutdown(wait=True)
+        daemon._main_thread.drain()
+        daemon.TranscriptionReady.assert_not_called()
+
+    def test_two_set_config_calls_during_one_job_last_one_wins(self, daemon):
+        gate = threading.Event()
+        old_engine = _BatchEngineDouble(text="old engine result", gate=gate)
+        _arm_for_recording(daemon, old_engine)
+        daemon._model_loaded = True
+
+        assert daemon.StartRecording() is True
+        daemon.recorder.is_recording = True
+        assert daemon.StopRecording() == "transcribing"
+        daemon.recorder.is_recording = False
+        assert old_engine.entered.wait(timeout=10)
+
+        final_engine = _BatchEngineDouble(text="final engine result")
+        with patch.object(daemon._daemon_module, "create_engine", return_value=final_engine) as mock_ce:
+            assert daemon.SetConfig({"model.name": "small"}) is True
+            first_pending = daemon._pending_reload_config
+            assert first_pending is not None and first_pending.model.name == "small"
+
+            assert daemon.SetConfig({"model.name": "medium"}) is True
+            second_pending = daemon._pending_reload_config
+            assert second_pending is not None and second_pending.model.name == "medium"
+            assert second_pending is not first_pending
+
+            gate.set()
+            daemon.executor.shutdown(wait=True)
+            daemon._main_thread.drain()
+
+            # create_engine runs exactly once, with the LAST pending config.
+            mock_ce.assert_called_once_with(second_pending)
+
+        assert daemon.transcriber is final_engine
+        assert daemon._pending_reload_config is None

@@ -154,8 +154,18 @@ and emits no signal when called while **idle**.
 - From **recording**: stops capture, discards audio, restores mic
   gain/media, emits `StatusChanged("idle")`, returns `true`.
 - From **transcribing**: requests transcription cancellation on the active
-  engine, emits `StatusChanged("idle")`, returns `true`.
+  engine (best-effort -- the engine may finish anyway, or return a partial
+  result, before noticing the request), emits `StatusChanged("idle")`,
+  returns `true`.
 - From **idle**: returns `false`, no side effects.
+
+A cancel means no transcript surfaces, full stop: if the in-flight
+transcription job (batch `transcribe_numpy()` or a streaming engine's
+`finalize()`) finishes anyway after `CancelRecording()` already returned,
+its result is dropped internally. No `TranscriptionReady` (or `Error`) is
+emitted for it, it is not copied to the clipboard, it is not pasted, and no
+history row is written for it. This holds regardless of whether the
+engine's own cancellation was honoured.
 
 ### GetStatus
 
@@ -264,15 +274,32 @@ SetConfig(a{sv} changes) → (b success)
 
 Valid in any state. Applies a partial set of `"<section>.<field>"` changes
 (same flattened keys as `GetConfig`), validates the resulting config, and
-persists it to disk. Components whose config changed (model, audio
-pipeline, hotkey) are re-initialized in place; a model or audio change
-takes effect immediately, including mid-way through a session once the
-current operation completes.
+persists it to disk **immediately**, regardless of daemon state. `ConfigChanged`
+is also emitted immediately. The config returned by a subsequent `GetConfig()`
+always reflects the new values right away, even mid-recording or
+mid-transcription.
 
 - Returns `true` and emits `ConfigChanged(changes)` on success.
 - Returns `false` and emits `Error("config_invalid", <message>)` if the
   resulting config fails validation (e.g. unknown field, bad value) or an
   unexpected key/value shape is passed.
+
+Re-initializing the *components themselves* is not always immediate, though:
+
+- An audio-pipeline change recreates the `AudioRecorder` right away.
+- A hotkey change re-registers the hotkey right away.
+- A **model-reload change** (engine/name/device/compute_type, or a
+  transcription field such as `language` that also forces a reload) is
+  deferred when the daemon is **recording** or **transcribing**: the new
+  engine is *not* built yet, and the in-flight job keeps running against the
+  engine instance it started with, uninterrupted and uncorrupted. The
+  deferred reload is applied automatically the next time the daemon returns
+  to **idle** -- whether that is via a completed transcription
+  (`TranscriptionReady`), a failed one (`Error`), or `CancelRecording()`. If
+  more than one model-reload `SetConfig()`/`ReloadConfig()` call lands while
+  busy, only the last one's config is kept and applied; the earlier one(s)
+  are superseded, not queued. When the daemon is already idle, the reload
+  happens synchronously inside this call, same as before.
 
 ### ReloadConfig
 
@@ -282,7 +309,8 @@ ReloadConfig() → (b success)
 
 Valid in any state. Re-reads `~/.config/whisper_aloud/config.json` from
 disk (picking up external edits) and applies it the same way `SetConfig`
-does.
+does, including the same deferred-reload behavior when the daemon is busy
+(see `SetConfig` above).
 
 - Returns `true` and emits `ConfigChanged({})` (empty changes dict — this
   is a full reload, not a diff) on success.
@@ -658,6 +686,41 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.1.1 — 2026-10-01
+
+Patch (documentation/behavior clarification, no wire-format change),
+WHISP-73/WHISP-74:
+
+- **CancelRecording** (WHISP-73): clarified that "without producing a
+  transcript" is an absolute guarantee, not best-effort -- a transcription
+  job already in flight when `CancelRecording()` is called can no longer
+  leak a late `TranscriptionReady`/`Error`, clipboard copy/paste, or history
+  row after the daemon has already reported `StatusChanged("idle")`. Fixed
+  a real bug: previously, a cooperative-but-slow (or non-cooperative, since
+  `cancel_transcription()` is explicitly best-effort) engine could finish
+  after `CancelRecording()` returned and still emit `TranscriptionReady` for
+  the cancelled session. No method/signal/argument shape changed -- this is
+  the method doing what its own opening sentence already promised.
+- **SetConfig/ReloadConfig** (WHISP-74): clarified and fixed the "mid-way
+  through a session once the current operation completes" language already
+  present in 1.0.0/1.1.0's `SetConfig` docs: a model-reload config change
+  landing while the daemon is recording or transcribing now genuinely defers
+  the engine swap until the daemon is idle again (applied on success, error,
+  or cancel; the last of several such changes wins), instead of swapping
+  `self.transcriber` immediately underneath an in-flight job. `SetConfig`
+  still persists the config and emits `ConfigChanged` immediately in all
+  cases -- only the engine object swap itself is deferred.
+
+Considered and rejected a minor (1.2.0) bump for the `SetConfig`/
+`ReloadConfig` change: no method signature, argument shape, or return value
+changed, and the previously-published 1.0.0/1.1.0 documentation already
+stated this exact ordering ("once the current operation completes") --
+the implementation was simply not honouring its own documented contract.
+Treating a bug fix that brings behavior in line with already-published
+documentation as a patch, not a minor feature bump, is consistent with this
+section's own definition of a patch bump above ("corrected documentation of
+existing behaviour with no change to the wire format").
 
 ### 1.1.0 — 2026-10-01
 

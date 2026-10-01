@@ -130,6 +130,13 @@ class TestDaemonReloadConfig:
     def test_reload_config_recreates_engine_on_model_change(self, monkeypatch, tmp_path):
         daemon = make_daemon()
         try:
+            # WHISP-74: an idle daemon reloads the engine immediately; a busy
+            # one (recording or transcribing) defers it -- see
+            # tests/test_daemon_concurrency.py's TestDeferredModelReload for
+            # that path. This test is specifically about the idle case.
+            daemon.recorder.is_recording = False
+            daemon._transcribing = False
+
             new_config = WhisperAloudConfig()
             new_config.model.name = "large-v3"
             monkeypatch.setattr(WhisperAloudConfig, "load", staticmethod(lambda **kwargs: new_config))

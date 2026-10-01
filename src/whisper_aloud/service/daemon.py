@@ -47,7 +47,7 @@ EXIT_ALREADY_RUNNING = 3
 # (additive = minor, breaking = major + a new Control2 interface) and
 # record the change in that document's Changelog section, in the same
 # commit as the interface change.
-API_VERSION = "1.1.0"
+API_VERSION = "1.1.1"
 
 # Polling cadence for PartialTranscript while a streaming engine is recording
 # (WHISP-57): docs/dbus-api.md's "Planned" entry says 3-10Hz; 5Hz is a
@@ -269,6 +269,22 @@ class WhisperAloudService:
         self._shutdown = False
         self._transcribing = False
         self._loop = None
+
+        # WHISP-73: monotonically increasing token identifying the
+        # currently-live transcription job. Captured by the executor-thread
+        # job at submission time; CancelRecording()/Quit() bump it to
+        # invalidate whatever job is in flight so its eventual (possibly
+        # late) success/error emission can recognize itself as stale and
+        # drop silently -- no signal, no clipboard/paste, no history write.
+        self._job_id = 0
+
+        # WHISP-74: a model-reload SetConfig()/ReloadConfig() that lands
+        # while a recording or transcription is in flight stores the new
+        # config here instead of swapping self.transcriber immediately; it
+        # is applied once the daemon returns to idle (success, error, or
+        # cancel). A later deferred reload while one is already pending
+        # overwrites it -- the last SetConfig() during a job wins.
+        self._pending_reload_config: Optional["WhisperAloudConfig"] = None
 
         # Level tracking (throttled at 10Hz)
         self._peak_level = 0.0
@@ -637,15 +653,25 @@ class WhisperAloudService:
             # never races a still-in-flight accept_chunk().
             self._transcribing = True
             recording_session_id = self._current_session_id or ""
+            # WHISP-73/74: a fresh job token, and a snapshot of the engine
+            # instance to use for this job -- captured now, synchronously,
+            # so a SetConfig() landing after this point can never change
+            # which engine instance this job's executor thread calls (see
+            # _transcribe_audio/_finalize_streaming_and_emit).
+            self._job_id += 1
+            token = self._job_id
+            engine = self.transcriber
             if self._streaming_session:
                 self.executor.submit(
                     self._finalize_streaming_and_emit,
                     audio_data, job_id, recording_session_id, dropped_chunks,
+                    token, engine,
                 )
             else:
                 self.executor.submit(
                     self._transcribe_and_emit,
                     audio_data, job_id, recording_session_id, dropped_chunks,
+                    token, engine,
                 )
 
             # Return immediately - result will be emitted via signal
@@ -669,6 +695,12 @@ class WhisperAloudService:
 
     def CancelRecording(self) -> bool:
         """Cancel active recording without transcribing."""
+        # WHISP-73: invalidate whatever job token is currently live *before*
+        # touching any other state, so a transcription job already in flight
+        # (if any) can never again be mistaken for the current one, however
+        # late its success/error emission eventually runs.
+        self._job_id += 1
+
         if self.recorder and self.recorder.is_recording:
             self._stop_level_timer()
             self._stop_partial_timer()
@@ -699,12 +731,23 @@ class WhisperAloudService:
             return True
 
         if self._transcribing and self.transcriber:
-            self.transcriber.cancel_transcription()
+            # Best-effort: the engine's own cancel_transcription() docstring
+            # says this may only yield a partial result (or be ignored
+            # entirely) -- the job token bump above is what actually
+            # guarantees no stale TranscriptionReady/Error surfaces, this is
+            # just a cooperative nudge to stop sooner.
+            try:
+                self.transcriber.cancel_transcription()
+            except Exception as e:
+                logger.warning(f"engine cancel_transcription on cancel failed: {e}")
             self._transcribing = False
             self._streaming_session = False
             self.StatusChanged("idle")
             if self.indicator:
                 self.indicator.set_state("idle")
+            # WHISP-74: the daemon is idle again now -- apply any model
+            # reload that was deferred while this job was in flight.
+            self._apply_pending_config_reload()
             logger.info("Transcription cancellation requested via D-Bus")
             return True
 
@@ -845,13 +888,30 @@ class WhisperAloudService:
             return False
 
     def _apply_config_changes(self, new_config: 'WhisperAloudConfig') -> None:
-        """Re-initialize components whose config has changed."""
+        """Re-initialize components whose config has changed.
+
+        WHISP-74: config is always persisted/applied immediately (`self.config
+        = new_config` below still runs unconditionally, and SetConfig/
+        ReloadConfig still emit ConfigChanged right away) -- only the engine
+        *swap* is deferred when a recording or transcription is in flight, to
+        avoid running an in-flight job's audio through a different engine
+        instance mid-operation. See docs/dbus-api.md's SetConfig/ReloadConfig
+        sections.
+        """
         # Reload when any model-reload field changed (engine/name/device/compute_type).
         if detect_config_changes(self.config, new_config).requires_model_reload:
-            logger.info("Model config changed, reloading...")
-            self.transcriber = create_engine(new_config)
-            self.transcriber.load_model()
-            self._model_loaded = True
+            busy = self._transcribing or (self.recorder is not None and self.recorder.is_recording)
+            if busy:
+                logger.info(
+                    "Model config changed while recording/transcribing; "
+                    "deferring engine reload until the daemon is idle"
+                )
+                self._pending_reload_config = new_config
+            else:
+                logger.info("Model config changed, reloading...")
+                self.transcriber = create_engine(new_config)
+                self.transcriber.load_model()
+                self._model_loaded = True
 
         # Check if audio config changed
         if (new_config.audio != self.config.audio or
@@ -879,10 +939,39 @@ class WhisperAloudService:
 
         self.config = new_config
 
+    def _apply_pending_config_reload(self) -> None:
+        """Apply a model reload deferred by `_apply_config_changes()` while the
+        daemon was busy (WHISP-74). Called once the daemon is back to idle --
+        from `_emit_transcription_success`/`_emit_transcription_error`'s
+        main-loop closures, and from `CancelRecording`'s transcribing branch.
+        A no-op when nothing is pending. If two SetConfig()/ReloadConfig()
+        calls requiring a reload landed while busy, `self._pending_reload_config`
+        already holds only the latest one (each overwrites the previous), so
+        the last one wins.
+        """
+        pending = self._pending_reload_config
+        if pending is None:
+            return
+        self._pending_reload_config = None
+        logger.info("Applying deferred model reload now that the daemon is idle")
+        try:
+            self.transcriber = create_engine(pending)
+            self.transcriber.load_model()
+            self._model_loaded = True
+        except Exception as e:
+            logger.error(f"Deferred model reload failed: {e}")
+            self.Error("model_reload_failed", str(e))
+
     def Quit(self) -> bool:
         """Quit the service."""
         logger.info("Quit requested via D-Bus")
         self._shutdown = True
+        # WHISP-73: invalidate any in-flight transcription job's token so its
+        # success/error emission (if it still runs during/after _cleanup()'s
+        # executor.shutdown(wait=True)) drops silently instead of emitting
+        # TranscriptionReady/Error, touching the clipboard, or writing
+        # history after the daemon has already announced shutdown.
+        self._job_id += 1
 
         if self._loop:
             self._loop.quit()
@@ -1025,15 +1114,21 @@ class WhisperAloudService:
             # read it -- a known gap, not fixable from here without changing
             # AudioRecorder's auto-stop callback contract (WHISP-65).
             dropped_chunks = 0
+            # WHISP-73/74: same job token + engine snapshot as StopRecording.
+            self._job_id += 1
+            token = self._job_id
+            engine = self.transcriber
             if self._streaming_session:
                 self.executor.submit(
                     self._finalize_streaming_and_emit,
                     audio_data, job_id, recording_session_id, dropped_chunks,
+                    token, engine,
                 )
             else:
                 self.executor.submit(
                     self._transcribe_and_emit,
                     audio_data, job_id, recording_session_id, dropped_chunks,
+                    token, engine,
                 )
             return GLib.SOURCE_REMOVE
 
@@ -1062,10 +1157,21 @@ class WhisperAloudService:
 
     # ─── Internal helpers ────────────────────────────────────────────────
 
-    def _transcribe_audio(self, audio_data):
-        """Transcribe audio data (runs in thread)."""
+    def _transcribe_audio(self, audio_data, engine: Optional[SpeechEngine] = None):
+        """Transcribe audio data (runs in thread).
+
+        WHISP-74: `engine` is a snapshot of `self.transcriber` taken at job
+        submission time (see StopRecording/_on_recorder_auto_stop), not a
+        fresh read of `self.transcriber` here -- a SetConfig() that reloads
+        the model while this job is in flight must never redirect this call
+        to a different engine instance mid-operation. `_ensure_model_loaded()`
+        still operates on `self.transcriber`, which cannot differ from
+        `engine` for the duration of this job: `_apply_config_changes()`
+        defers any engine swap until the daemon is idle again.
+        """
+        engine = engine if engine is not None else self.transcriber
         self._ensure_model_loaded()
-        return self.transcriber.transcribe_numpy(audio_data)
+        return engine.transcribe_numpy(audio_data)
 
     def _transcribe_and_emit(
         self,
@@ -1073,16 +1179,19 @@ class WhisperAloudService:
         job_id: str = "",
         recording_session_id: str = "",
         dropped_chunks: int = 0,
+        token: Optional[int] = None,
+        engine: Optional[SpeechEngine] = None,
     ) -> None:
         """Batch (non-streaming) path: transcribe audio and emit completion
         signal (runs in thread)."""
+        engine = engine if engine is not None else self.transcriber
         try:
-            result = self._transcribe_audio(audio_data)
+            result = self._transcribe_audio(audio_data, engine)
         except Exception as e:
-            self._emit_transcription_error(e)
+            self._emit_transcription_error(e, token)
             return
         self._emit_transcription_success(
-            result, audio_data, job_id, recording_session_id, dropped_chunks
+            result, audio_data, job_id, recording_session_id, dropped_chunks, token
         )
 
     def _finalize_streaming_and_emit(
@@ -1091,6 +1200,8 @@ class WhisperAloudService:
         job_id: str = "",
         recording_session_id: str = "",
         dropped_chunks: int = 0,
+        token: Optional[int] = None,
+        engine: Optional[SpeechEngine] = None,
     ) -> None:
         """Streaming path: `engine.finalize()` then the same post-processing as
         the batch path (runs in thread, submitted to the executor only after
@@ -1099,25 +1210,49 @@ class WhisperAloudService:
         mandatory order, so finalize() never races an in-flight accept_chunk()).
         `audio_data` is the full recorded buffer from recorder.stop() (collected
         independently of the streaming hook), used for history exactly like the
-        batch path.
+        batch path. `engine` is the snapshot captured at submission time
+        (WHISP-74), the same engine instance that handled this session's
+        start_session()/accept_chunk() calls.
         """
+        engine = engine if engine is not None else self.transcriber
         try:
-            result = self.transcriber.finalize()
+            result = engine.finalize()
         except Exception as e:
-            self._emit_transcription_error(e)
+            self._emit_transcription_error(e, token)
             return
         self._emit_transcription_success(
-            result, audio_data, job_id, recording_session_id, dropped_chunks
+            result, audio_data, job_id, recording_session_id, dropped_chunks, token
         )
 
-    def _emit_transcription_error(self, exc: Exception) -> None:
+    def _is_job_stale(self, token: Optional[int]) -> bool:
+        """True when `token` no longer matches the current job (WHISP-73):
+        CancelRecording()/Quit() bump `self._job_id`, so a job submitted
+        before that point recognizes itself as superseded. `token=None`
+        (not supplied) is never considered stale, for callers outside the
+        job-submission path."""
+        return token is not None and token != self._job_id
+
+    def _emit_transcription_error(self, exc: Exception, token: Optional[int] = None) -> None:
         """Shared failure path for both the batch and streaming transcription
         routes. All D-Bus signal emissions are marshalled to the GLib main
-        loop via idle_add for thread safety."""
+        loop via idle_add for thread safety.
+
+        WHISP-73: if `token` is stale (the job was cancelled, or the daemon
+        is quitting) by the time this runs, the error is logged and dropped:
+        no `Error` signal, no notification. The daemon already declared
+        itself idle synchronously when it invalidated the token, so nothing
+        here should contradict that.
+        """
         error_message = str(exc)
         logger.error(f"Transcription failed: {error_message}")
 
         def _emit_error():
+            if self._is_job_stale(token):
+                logger.debug(
+                    f"Dropping stale transcription error for job token {token} "
+                    f"(current {self._job_id})"
+                )
+                return False
             self._transcribing = False
             self._streaming_session = False
             self.StatusChanged("idle")
@@ -1126,6 +1261,9 @@ class WhisperAloudService:
             self.Error("transcription_failed", error_message)
             if self.notifications:
                 self.notifications.show_error(error_message)
+            # WHISP-74: a model reload deferred while this job was in flight
+            # can now be applied.
+            self._apply_pending_config_reload()
             return False
 
         GLib.idle_add(_emit_error)
@@ -1137,6 +1275,7 @@ class WhisperAloudService:
         job_id: str,
         recording_session_id: str,
         dropped_chunks: int = 0,
+        token: Optional[int] = None,
     ) -> None:
         """Shared success path for both the batch and streaming transcription
         routes: save history, emit TranscriptionReady (with `session_id` in
@@ -1144,7 +1283,23 @@ class WhisperAloudService:
         and `dropped_chunks`, the chunk-hook queue's drop count for this
         session, 0 when no hook was registered), then clipboard copy/paste and
         notifications. All D-Bus signal emissions and indicator updates are
-        marshalled to the GLib main loop via idle_add for thread safety."""
+        marshalled to the GLib main loop via idle_add for thread safety.
+
+        WHISP-73: checked twice -- once here (on the executor thread, before
+        the history write) and again inside the idle_add closure (on the main
+        loop, right before any signal/clipboard/paste) -- because `token` can
+        go stale in the gap between the two (CancelRecording()/Quit() run on
+        whatever thread calls them, not marshalled through idle_add). A stale
+        job emits nothing: no TranscriptionReady, no clipboard copy/paste, no
+        history row.
+        """
+        if self._is_job_stale(token):
+            logger.debug(
+                f"Dropping stale transcription result for job token {token} "
+                f"(current {self._job_id}); no history will be written"
+            )
+            return
+
         try:
             entry_id = self.history_manager.add_transcription(
                 result=result,
@@ -1167,6 +1322,12 @@ class WhisperAloudService:
         }
 
         def _emit_success():
+            if self._is_job_stale(token):
+                logger.debug(
+                    f"Dropping stale transcription result for job token {token} "
+                    f"(current {self._job_id}); already dropped before history write"
+                )
+                return False
             self._transcribing = False
             self._streaming_session = False
             self.StatusChanged("idle")
@@ -1209,6 +1370,9 @@ class WhisperAloudService:
                     logger.warning(f"Failed to trigger auto-paste: {e}")
             if self.notifications:
                 self.notifications.show_transcription_completed(result.text)
+            # WHISP-74: a model reload deferred while this job was in flight
+            # can now be applied.
+            self._apply_pending_config_reload()
             logger.info("Transcription completed and signals emitted")
             return False
 
