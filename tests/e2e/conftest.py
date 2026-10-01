@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import signal as signal_module
 import subprocess
 import sys
 import time
@@ -22,6 +23,71 @@ import pytest
 
 from tests._private_bus import private_bus_address
 from tests.e2e.env_builder import build_daemon_env
+
+
+# ─── Orphan-proofing: PR_SET_PDEATHSIG (Linux only) ────────────────────────
+#
+# Incident: a pytest run killed by an external `timeout` (SIGKILL/SIGTERM on
+# the pytest process itself) never runs fixture teardown, so a daemon
+# subprocess spawned by `daemon()` can outlive both pytest and the private
+# bus it was talking to -- reparented to init/systemd, holding
+# WHISPER_ALOUD_TEST_MODE=1 and a dead DBUS_SESSION_BUS_ADDRESS forever. This
+# makes the daemon ask the kernel to SIGTERM *it* the moment its parent
+# (pytest) exits for any reason, including an external kill -- no polling,
+# no reliance on fixture teardown ever running.
+def _death_pact_with_parent():
+    """preexec_fn for subprocess.Popen: calls prctl(PR_SET_PDEATHSIG, SIGTERM)
+    in the child after fork(), before exec(). Linux-only; a no-op import
+    failure (e.g. non-glibc libc) degrades silently -- fixture teardown via
+    Quit()/terminate()/kill() remains the primary mechanism, this is defense
+    in depth only."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+
+        pr_set_pdeathsig = 1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(pr_set_pdeathsig, signal_module.SIGTERM)
+    except Exception:
+        pass
+
+
+_DEATH_PACT = _death_pact_with_parent if sys.platform.startswith("linux") else None
+
+
+# ─── Per-test hard watchdog (pytest-timeout is not an installed dependency) ─
+#
+# Bounds the wall-clock time of each e2e test's body independent of any
+# individual SignalCapture.wait(timeout=...) call, so a bug that makes a
+# test spin forever (e.g. a wait() that never raises) can't hang the whole
+# suite -- and, combined with the PDEATHSIG above, can't leak an orphaned
+# daemon either, since raising here unwinds normally through the test
+# function and still runs every fixture's finalizer (including
+# DaemonHandle.stop()) exactly as a normal assertion failure would.
+_HARD_TEST_TIMEOUT_S = 20.0
+
+
+@pytest.fixture(autouse=True)
+def _hard_test_timeout():
+    if not hasattr(signal_module, "SIGALRM"):
+        yield
+        return
+
+    def _on_alarm(signum, frame):
+        raise AssertionError(
+            f"test exceeded the e2e harness's hard per-test watchdog "
+            f"({_HARD_TEST_TIMEOUT_S}s) -- likely a hung wait(); see WHISP-47"
+        )
+
+    previous_handler = signal_module.signal(signal_module.SIGALRM, _on_alarm)
+    signal_module.setitimer(signal_module.ITIMER_REAL, _HARD_TEST_TIMEOUT_S)
+    try:
+        yield
+    finally:
+        signal_module.setitimer(signal_module.ITIMER_REAL, 0)
+        signal_module.signal(signal_module.SIGALRM, previous_handler)
+
 
 # ─── Session guard: refuse to run anywhere but a private dbus-run-session bus ──
 #
@@ -163,6 +229,7 @@ def daemon(tmp_path, request) -> Callable[..., DaemonHandle]:
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
+            preexec_fn=_DEATH_PACT,
         )
         handle = DaemonHandle(proc=proc, xdg_home=xdg_home, log_path=log_path)
         spawned.append(handle)

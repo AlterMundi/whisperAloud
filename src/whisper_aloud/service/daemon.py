@@ -444,6 +444,21 @@ class WhisperAloudService:
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal_module.SIGTERM, self._signal_handler_glib)
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal_module.SIGINT, self._signal_handler_glib)
 
+            # WHISP-47 e2e harness hardening: under WHISPER_ALOUD_TEST_MODE=1
+            # only, quit the main loop the moment the session bus connection
+            # itself closes (e.g. the private dbus-run-session bus tears
+            # down while this daemon is still up). Without this, a daemon
+            # whose bus just vanished keeps running with nothing left to
+            # talk to -- an orphan that outlives the test run that spawned
+            # it. Production (no TEST_MODE) relies on the real session bus
+            # staying up for the process lifetime, so this is never wired
+            # outside test mode.
+            if self._test_mode:
+                try:
+                    bus.con.connect("closed", lambda *a: loop.quit())
+                except Exception as e:
+                    logger.warning(f"WHISPER_ALOUD_TEST_MODE: failed to hook bus-closed shutdown: {e}")
+
             loop.run()
 
         except Exception as e:
