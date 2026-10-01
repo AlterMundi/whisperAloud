@@ -97,7 +97,7 @@ class TestStreamingStartRecording:
         assert daemon._current_session_id
 
     def test_start_recording_loads_model_before_session(self, daemon):
-        engine = _install_streaming_engine(daemon)
+        _install_streaming_engine(daemon)
         daemon._model_loaded = False
         daemon.recorder.is_recording = False
 
