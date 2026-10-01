@@ -9,6 +9,7 @@ Categories=AudioVideo;Audio;Utility;GTK;
 Keywords=voice;transcription;whisper;speech;audio;
 StartupNotify=true
 SingleMainWindow=true
+Actions=Toggle;Cancel;
 
 [Desktop Action Toggle]
 Name=Toggle Recording
