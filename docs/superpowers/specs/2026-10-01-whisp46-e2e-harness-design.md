@@ -572,3 +572,10 @@ is WHISP-49's concern, not re-verified here.
    checked against whichever binary `clipboard.py`'s `PasteSimulator` actually shells out to by
    name for the session type the harness presents (no `DISPLAY`/`WAYLAND_DISPLAY` → confirm which
    code path `_session_type` resolves to and that the stub matches that binary name).
+
+## Orchestrator amendments (2026-10-01)
+
+1. **Refuse to run against the real session bus.** `tests/e2e/conftest.py` must abort the whole e2e session (pytest.exit, not skip) unless *all* of these hold: `DBUS_SESSION_BUS_ADDRESS` is set, differs from `unix:path=$XDG_RUNTIME_DIR/bus`, and `org.freedesktop.systemd1` is NOT owned on that bus (a `dbus-run-session` bus never has it; the user's real bus always does). The e2e entry point is a wrapper (`scripts/test_e2e.sh` → `timeout <budget> dbus-run-session -- python -m pytest -m e2e tests/e2e`), never a bare `pytest -m e2e`.
+2. **WHISPER_ALOUD_TEST_MODE is a hard prerequisite** (Task 2 of the plan) and must also: skip `GainController.restore_from_crash_file()` and any `wpctl` call, disable the indicator, hotkeys (no portal contact at all), media control, notifications and paste simulation regardless of config — defence in depth on top of the env overrides. A unit test asserts that, with TEST_MODE=1, constructing the service performs no subprocess call and opens no portal proxy.
+3. **Second instance:** WHISP-63 now lands `EXIT_ALREADY_RUNNING = 3` (daemon.py) and claims the bus name before building the service. Scenario "second daemon on the same bus" must assert exit code 3, a one-line stderr message, and that the first daemon keeps serving.
+4. Daemon processes are stopped via `Quit()` then `proc.terminate()` / `proc.kill()` **on the Popen object only**; no name/pattern-based kills anywhere in the harness (enforced by a test that greps `tests/e2e/` for `pkill|killall|os.kill(` outside the Popen helper).
