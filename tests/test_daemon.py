@@ -248,6 +248,35 @@ class TestDaemonMethods:
         # What matters is that SetConfig handles it without crashing.
         assert isinstance(result, bool)
 
+    def test_set_config_emits_config_changed_with_wrapped_variants(self, daemon):
+        """ConfigChanged's D-Bus signature is a{sv}, same as GetConfig's
+        return value -- every value must be a GLib.Variant, not a bare
+        Python value, or a real pydbus proxy rejects the signal emission
+        the same way it used to reject SetConfig's own un-wrapped input
+        (WHISP-70). The fixture's default GLib.Variant stub (bound into the
+        module's globals at import time) is an identity passthrough, so a
+        bare value reaching ConfigChanged would look identical to a
+        correctly-typed-but-unwrapped one; this patches the module's live
+        GLib name directly with a spy that records (type, value) pairs, to
+        prove GLib.Variant was actually invoked for this value."""
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
+            mock_glib.Variant = MagicMock(side_effect=lambda t, v: (t, v))
+            result = daemon.SetConfig({"transcription.language": "en"})
+
+        assert result is True
+        daemon.ConfigChanged.assert_called_once()
+        (changes,), _ = daemon.ConfigChanged.call_args
+        assert changes == {"transcription.language": ("s", "en")}
+
+    def test_reload_config_emits_config_changed_with_wrapped_empty_dict(self, daemon):
+        """ReloadConfig's ConfigChanged({}) must go through the same
+        wrapping helper as SetConfig, not a bare literal {} -- harmless for
+        an empty dict today, but keeps both call sites consistent."""
+        result = daemon.ReloadConfig()
+
+        assert result is True
+        daemon.ConfigChanged.assert_called_once_with({})
+
     def test_quit_returns_true(self, daemon):
         """Quit should return True."""
         daemon._loop = MagicMock()

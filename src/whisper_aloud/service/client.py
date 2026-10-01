@@ -1,11 +1,52 @@
 """D-Bus client for WhisperAloud daemon."""
 
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from pydbus import SessionBus
 
 logger = logging.getLogger(__name__)
+
+
+def _variant_for_value(value: Any):
+    """Wrap a plain Python value as a GLib.Variant for a D-Bus a{sv} argument.
+
+    pydbus validates outgoing a{sv} arguments against the real introspected
+    signature and rejects plain Python values with "Expected GLib.Variant,
+    but got <type>" -- every value must be wrapped before being handed to
+    the proxy. Matches the type choices the daemon itself uses when it
+    flattens config to variants (see WhisperAloudService.GetConfig):
+    bool -> 'b', int -> 'i', float -> 'd', str -> 's'.
+
+    bool is checked before int because bool is an int subclass in Python.
+    A value that is already a GLib.Variant is returned unchanged. Any other
+    type raises TypeError with a clear message.
+    """
+    from gi.repository import GLib
+
+    # Duck-typed rather than isinstance(value, GLib.Variant): in unit tests
+    # that stub out gi.repository entirely, GLib.Variant is a MagicMock, not
+    # a class, and isinstance() rejects a non-type second argument outright.
+    if hasattr(value, "get_type_string") and hasattr(value, "unpack"):
+        return value
+    if isinstance(value, bool):
+        return GLib.Variant("b", value)
+    if isinstance(value, str):
+        return GLib.Variant("s", value)
+    if isinstance(value, int):
+        return GLib.Variant("i", value)
+    if isinstance(value, float):
+        return GLib.Variant("d", value)
+    raise TypeError(
+        f"Unsupported type for D-Bus a{{sv}} value: {type(value).__name__!r} "
+        f"(value={value!r}). Supported: GLib.Variant, bool, str, int, float."
+    )
+
+
+def _wrap_config_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
+    """Wrap every value of a config-changes dict as a GLib.Variant, ready
+    for a D-Bus a{sv} method call such as SetConfig."""
+    return {key: _variant_for_value(value) for key, value in changes.items()}
 
 
 class WhisperAloudClient:
@@ -230,11 +271,16 @@ class WhisperAloudClient:
             return {}
 
     def set_config(self, changes: dict) -> bool:
-        """Apply configuration changes."""
+        """Apply configuration changes.
+
+        Wraps each value as a GLib.Variant before calling the daemon --
+        SetConfig's D-Bus signature is a{sv}, and pydbus rejects plain
+        Python values outright.
+        """
         if not self._connected or not self._proxy:
             return False
         try:
-            return self._proxy.SetConfig(changes)
+            return self._proxy.SetConfig(_wrap_config_changes(changes))
         except Exception as e:
             logger.warning(f"set_config failed: {e}")
             return False
