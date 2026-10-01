@@ -246,18 +246,23 @@ class SettingsDialog(Gtk.Window):
         self.model_row.set_title("Model")
         self._model_entries: list = []  # populated by _refresh_model_row()
         self._suppress_model_sync = False
-        self._refresh_model_row()
-        self._model_list_box.append(self.model_row)
-        page.append(self._model_list_box)
 
+        # Notice widgets must exist *before* the first _refresh_model_row() call below:
+        # it calls _update_notices(), which reads these (WHISP-42 audit BLOCKER #1 —
+        # previously built after _refresh_model_row(), causing an AttributeError on
+        # every dialog open).
         self._download_notice = Gtk.Label(wrap=True, xalign=0)
         self._download_notice.add_css_class("dim-label")
         self._download_notice.set_visible(False)
-        page.append(self._download_notice)
 
         self._license_notice = Gtk.Label(wrap=True, xalign=0)
         self._license_notice.add_css_class("dim-label")
         self._license_notice.set_visible(False)
+
+        self._refresh_model_row()
+        self._model_list_box.append(self.model_row)
+        page.append(self._model_list_box)
+        page.append(self._download_notice)
         page.append(self._license_notice)
 
         self.model_row.connect("notify::selected", self._on_model_row_changed)
