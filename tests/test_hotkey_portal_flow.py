@@ -17,8 +17,13 @@ org.freedesktop.portal.Desktop (GlobalShortcuts + host Registry) on a
 private, test-only bus started via `dbus-run-session`, and is marked
 `dbus_private` so it only runs when explicitly requested, e.g.:
 
-    timeout 60 dbus-run-session -- python -m pytest -m dbus_private \\
-        tests/test_hotkey_portal_flow.py -q
+    scripts/test_private_bus.sh -m dbus_private tests/test_hotkey_portal_flow.py -q
+
+Its skip guard (tests._private_bus.private_bus_address) never connects to
+any bus -- it only inspects env vars conftest.py already captured -- so a
+plain `pytest -q` run can never dial a real D-Bus connection from this
+file; only the body of that one test (once the guard has already let it
+run) ever points DBUS_SESSION_BUS_ADDRESS at the private bus.
 """
 
 import os
@@ -34,6 +39,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from tests._private_bus import private_bus_address  # noqa: E402
 from whisper_aloud.service.hotkey_portal import PortalHotkeys  # noqa: E402
 
 
@@ -195,6 +201,90 @@ class TestRegisterCalledBeforeCreateSession:
         ]
 
 
+class TestCallRequestTimeout:
+    """_call_request's synchronous leg (the method call that hands back the
+    request object path) must not use GDBus's ~25s default timeout (-1):
+    a slow/unresponsive portal would otherwise stall daemon startup well
+    past the Response-wait timeout it already respects."""
+
+    def test_call_sync_uses_bounded_timeout_not_minus_one(self):
+        mock_bus = MagicMock(name="bus")
+        mock_bus.get_unique_name.return_value = ":1.7"
+        captured = {}
+
+        def _signal_subscribe(sender, iface, signal, path, arg0, flags, callback):
+            captured["callback"] = callback
+            return 1
+
+        mock_bus.signal_subscribe.side_effect = _signal_subscribe
+
+        mock_proxy = MagicMock(name="proxy")
+
+        def _call_sync(method_name, args, flags, timeout, cancellable):
+            captured["timeout"] = timeout
+            # The real portal answers asynchronously via the Request/Response
+            # signal, processed once the main loop is actually iterating;
+            # GLib.idle_add schedules our fake Response the same way.
+            fake_params = GLib.Variant("(ua{sv})", (0, {}))
+            GLib.idle_add(captured["callback"], None, None, None, None, None, fake_params)
+            return None
+
+        mock_proxy.call_sync.side_effect = _call_sync
+
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=mock_proxy),
+        ):
+            portal = PortalHotkeys(app_id="org.fede.whisperaloud")
+
+        portal._pending_handle_token = "wa_req_test"
+        response, results = portal._call_request(
+            "CreateSession",
+            GLib.Variant.new_tuple(GLib.Variant("a{sv}", {})),
+        )
+
+        assert response == 0
+        assert results == {}
+        assert captured["timeout"] == 5000
+        assert captured["timeout"] != -1
+
+    def test_custom_timeout_ms_is_passed_through_to_call_sync(self):
+        mock_bus = MagicMock(name="bus")
+        mock_bus.get_unique_name.return_value = ":1.7"
+        captured = {}
+
+        def _signal_subscribe(sender, iface, signal, path, arg0, flags, callback):
+            captured["callback"] = callback
+            return 1
+
+        mock_bus.signal_subscribe.side_effect = _signal_subscribe
+
+        mock_proxy = MagicMock(name="proxy")
+
+        def _call_sync(method_name, args, flags, timeout, cancellable):
+            captured["timeout"] = timeout
+            fake_params = GLib.Variant("(ua{sv})", (0, {}))
+            GLib.idle_add(captured["callback"], None, None, None, None, None, fake_params)
+            return None
+
+        mock_proxy.call_sync.side_effect = _call_sync
+
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=mock_proxy),
+        ):
+            portal = PortalHotkeys(app_id="org.fede.whisperaloud")
+
+        portal._pending_handle_token = "wa_req_test"
+        portal._call_request(
+            "ListShortcuts",
+            GLib.Variant.new_tuple(GLib.Variant("a{sv}", {})),
+            timeout_ms=1234,
+        )
+
+        assert captured["timeout"] == 1234
+
+
 class TestListShortcutsParsing:
     def test_list_shortcuts_returns_empty_set_on_failure_response(self):
         harness = _FakePortalHarness()
@@ -221,69 +311,27 @@ class TestListShortcutsParsing:
 # ---------------------------------------------------------------------------
 
 
-def _candidate_private_bus_address() -> str:
-    """The bus address this process actually started with (e.g. the
-    throwaway bus from `dbus-run-session`), stashed by conftest.py before
-    it clobbers DBUS_SESSION_BUS_ADDRESS for every other test. Empty string
-    if conftest.py didn't run (e.g. this module imported standalone)."""
-    return os.environ.get("_WHISPER_ALOUD_TEST_ORIGINAL_DBUS_ADDR", "")
-
-
-def _private_bus_is_safe() -> bool:
-    """True only when the bus this process actually started on is clearly
-    NOT the real user desktop session bus, per the WHISP-64 brief's
-    self-skip guard. Never looks at DBUS_SESSION_BUS_ADDRESS directly --
-    conftest.py has already overwritten that to a nonexistent path for
-    every test in this suite; this test is the one sanctioned exception
-    that reads the original value conftest.py stashed."""
-    addr = _candidate_private_bus_address()
-    if not addr:
-        return False
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
-    real_addr = f"unix:path={runtime_dir}/bus" if runtime_dir else None
-    if real_addr and addr == real_addr:
-        return False
-    try:
-        from gi.repository import Gio
-
-        with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": addr}):
-            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-            bus.call_sync(
-                "org.freedesktop.DBus",
-                "/org/freedesktop/DBus",
-                "org.freedesktop.DBus",
-                "GetNameOwner",
-                GLib.Variant.new_tuple(GLib.Variant("s", "org.freedesktop.systemd1")),
-                None,
-                Gio.DBusCallFlags.NONE,
-                500,
-                None,
-            )
-        # A reply means systemd1 IS owned on this bus -> looks like a real
-        # user session bus, not a scratch dbus-run-session bus.
-        return False
-    except Exception:
-        return True
-
-
 @pytest.mark.dbus_private
 @pytest.mark.skipif(
-    not _private_bus_is_safe(), reason="refusing to run against what looks like a real session bus"
+    private_bus_address() is None,
+    reason="no private bus: run via scripts/test_private_bus.sh",
 )
 class TestPortalIntegrationOnPrivateBus:
     """End-to-end check against a fake portal service on a private bus.
 
     Must only be invoked via:
-        timeout 60 dbus-run-session -- python -m pytest -m dbus_private ...
+        scripts/test_private_bus.sh -m dbus_private tests/test_hotkey_portal_flow.py
     so the bus `dbus-run-session` created -- never the real desktop session
-    bus -- is what gets exercised. conftest.py overwrites
-    DBUS_SESSION_BUS_ADDRESS for every other test; this test (and only this
-    test) restores it to the real-for-this-process value for the duration
-    of each D-Bus call it makes.
+    bus -- is what gets exercised. ``private_bus_address()`` never connects
+    to anything; it only inspects env vars conftest.py already captured
+    (see tests/_private_bus.py), so the skip decision itself can never dial
+    a real bus. conftest.py overwrites DBUS_SESSION_BUS_ADDRESS for every
+    other test; this test (and only this test) points it at the private
+    address for the duration of each D-Bus call it makes.
     """
 
     def test_bind_once_then_skipped_on_second_run(self, tmp_path):
-        bus_addr = _candidate_private_bus_address()
+        bus_addr = private_bus_address()
         fake_portal_script = tmp_path / "fake_portal.py"
         fake_portal_script.write_text(_FAKE_PORTAL_SERVICE_SRC)
 
