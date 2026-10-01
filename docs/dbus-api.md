@@ -287,7 +287,20 @@ does.
 - Returns `true` and emits `ConfigChanged({})` (empty changes dict — this
   is a full reload, not a diff) on success.
 - Returns `false` and emits `Error("reload_failed", <message>)` on failure
-  (e.g. malformed config file).
+  (e.g. malformed config file). The live (in-memory) config is left exactly
+  as it was before the call -- a failed reload never partially applies.
+
+Note the asymmetry with daemon *startup*: `WhisperAloudConfig.load()` is
+used both at startup and here, but only `ReloadConfig()` passes
+`strict=True`. At startup, a malformed `config.json` logs an error and
+falls back to in-memory defaults without ever rewriting the file (nothing
+in the startup path calls `save()`) — the daemon still comes up, using
+defaults, rather than refusing to start over a config problem the user may
+not even be aware of yet. An explicit `ReloadConfig()` call is different:
+the caller is deliberately asking to pick up the file as it is *right
+now*, so silently substituting defaults for a broken file would look like
+a successful reload while actually discarding whatever the user meant to
+load — hence the strict failure instead (WHISP-71).
 
 ### Quit
 
