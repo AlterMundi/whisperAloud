@@ -177,7 +177,37 @@ _ENTRIES: tuple[ModelEntry, ...] = (
             "see docs/research/2026-10-01-sota-stt-offline/report.md)."
         ),
     ),
+    ModelEntry(
+        engine="nemotron-streaming",
+        name="nemotron-3.5-streaming-560ms",
+        label="Nemotron 3.5 ASR Streaming 0.6B (560ms)",
+        size_mb=682,
+        languages=("es", "en"),
+        streaming=True,
+        license="OpenMDW-1.1",
+        devices=("cpu",),
+        tier="balanced",
+        recommended=False,
+        download_url=(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+            "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2"
+        ),
+        notes=(
+            "WHISP-56: genuinely cache-aware streaming (560 ms chunks), int8-only "
+            "export, greedy_search decoding only (no hotwords/beam search for "
+            "model_type='nemotron' yet). NEEDS-HUMAN: OpenMDW-1.1 license is pending "
+            "legal review against the project's existing CC-BY-4.0/MIT STT "
+            "dependencies (see docs/superpowers/specs/"
+            "2026-10-01-whisp55-nemotron-sherpa-findings.md) -- not recommended "
+            "until that review completes."
+        ),
+    ),
 )
+
+# Intentionally NOT added to `ENGINES` (the UI/CLI engine-picker list): this model is
+# wired end-to-end (catalog, config validation, create_engine) for development and
+# testing, but kept out of the picker until the OpenMDW-1.1 license review above
+# completes. `models_for`/`get`/`engine_models` all still find it via `_ENTRIES`.
 
 
 def entries() -> tuple[ModelEntry, ...]:

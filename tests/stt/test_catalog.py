@@ -12,6 +12,7 @@ LEGACY_ENGINE_MODELS = {
         "large-v3-turbo", "turbo",
     ],
     "parakeet": ["parakeet-tdt-0.6b-v3"],
+    "nemotron-streaming": ["nemotron-3.5-streaming-560ms"],
 }
 
 
@@ -153,3 +154,38 @@ def test_model_entry_is_frozen():
     entry = catalog.get("faster-whisper", "base")
     with pytest.raises(Exception):
         entry.name = "renamed"  # type: ignore[misc]
+
+
+# ── WHISP-56: nemotron-streaming catalog entry ──────────────────────────────
+
+
+def test_nemotron_streaming_entry_exists_and_is_streaming():
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    assert entry is not None
+    assert entry.streaming is True
+    assert entry.license == "OpenMDW-1.1"
+    assert entry.devices == ("cpu",)
+    assert entry.download_url is not None
+
+
+def test_nemotron_streaming_is_not_recommended():
+    """Pending legal review (WHISP-56): must never be auto-selected as a default."""
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    assert entry.recommended is False
+
+
+def test_nemotron_streaming_supports_es_and_en():
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    assert "es" in entry.languages
+    assert "en" in entry.languages
+
+
+def test_nemotron_streaming_engine_is_wired_into_engine_models():
+    """config.validate() derives its valid engines from this, so it must be present
+    even though the entry is kept out of the `ENGINES` UI picker (pending legal review)."""
+    assert "nemotron-streaming" in catalog.engine_models()
+    assert "nemotron-3.5-streaming-560ms" in catalog.engine_models()["nemotron-streaming"]
+
+
+def test_nemotron_streaming_not_in_engines_picker_pending_license_review():
+    assert "nemotron-streaming" not in catalog.ENGINES
