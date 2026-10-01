@@ -166,6 +166,37 @@ class TestMprisController:
         assert "org.mpris.MediaPlayer2.good" in ctrl._paused_by_us
 
 
+class TestMprisControllerTestMode:
+    """WHISPER_ALOUD_TEST_MODE=1 must disable media control entirely --
+    set_bus() refuses to store a real bus, so pause_all_playing()/
+    resume_ours() stay inert for the daemon's whole lifetime regardless of
+    recording_flow.pause_media (WHISP-46 defense in depth)."""
+
+    def test_set_bus_is_a_noop_in_test_mode(self, monkeypatch):
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+        ctrl = MprisController()
+        ctrl.set_bus(MagicMock(name="real-bus"))
+        assert ctrl._bus is None
+
+    def test_pause_all_playing_is_inert_in_test_mode(self, monkeypatch):
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+        ctrl = MprisController()
+        bus = _make_bus({"org.mpris.MediaPlayer2.foo": _make_player()})
+        ctrl.set_bus(bus)  # no-op under test mode
+
+        ctrl.pause_all_playing()  # should not raise, must not touch the bus
+
+        bus.get.assert_not_called()
+        assert ctrl._paused_by_us == set()
+
+    def test_set_bus_stores_the_bus_without_test_mode(self, monkeypatch):
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        ctrl = MprisController()
+        bus = MagicMock(name="real-bus")
+        ctrl.set_bus(bus)
+        assert ctrl._bus is bus
+
+
 # =============================================================================
 # GainController tests
 # =============================================================================
