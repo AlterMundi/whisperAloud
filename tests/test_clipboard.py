@@ -328,6 +328,76 @@ class TestPasteSimulation:
         # Verify sleep was called with correct delay (250ms = 0.25s)
         mock_sleep.assert_called_once_with(0.25)
 
+    @patch('subprocess.run')
+    def test_paste_wayland_nonzero_exit(self, mock_run):
+        """ydotool exiting non-zero (check=True) is reported as a failed paste."""
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, 'ydotool', stderr=b'device busy'
+        )
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        result = simulator.simulate_paste()
+
+        assert result is False
+
+    @patch('subprocess.run')
+    def test_paste_wayland_unexpected_exception(self, mock_run):
+        """Any other ydotool failure is caught and reported rather than propagating."""
+        mock_run.side_effect = OSError("unexpected failure")
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        result = simulator.simulate_paste()
+
+        assert result is False
+
+    @patch('subprocess.run')
+    def test_paste_x11_tool_not_found(self, mock_run):
+        """Test X11 paste fails gracefully when xdotool is missing."""
+        mock_run.side_effect = FileNotFoundError("xdotool not found")
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('x11', config)
+        result = simulator.simulate_paste()
+
+        assert result is False
+
+    @patch('subprocess.run')
+    def test_paste_x11_timeout(self, mock_run):
+        """Test X11 paste timeout handling."""
+        mock_run.side_effect = subprocess.TimeoutExpired('xdotool', 5)
+
+        config = ClipboardConfig(timeout_seconds=1.0)
+        simulator = PasteSimulator('x11', config)
+        result = simulator.simulate_paste()
+
+        assert result is False
+
+    @patch('subprocess.run')
+    def test_paste_x11_nonzero_exit(self, mock_run):
+        """xdotool exiting non-zero (check=True) is reported as a failed paste."""
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, 'xdotool', stderr=b'no window focused'
+        )
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('x11', config)
+        result = simulator.simulate_paste()
+
+        assert result is False
+
+    @patch('subprocess.run')
+    def test_paste_x11_unexpected_exception(self, mock_run):
+        """Any other xdotool failure is caught and reported rather than propagating."""
+        mock_run.side_effect = OSError("unexpected failure")
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('x11', config)
+        result = simulator.simulate_paste()
+
+        assert result is False
+
 
 class TestPermissionChecks:
     """Test permission checking logic."""
@@ -369,6 +439,119 @@ class TestPermissionChecks:
 
         assert status['available'] is False
         assert 'Timeout' in status['reason']
+
+    @patch('subprocess.run')
+    def test_check_tool_lookup_raises(self, mock_run):
+        """An unexpected error from `which` is reported, not propagated."""
+        mock_run.side_effect = OSError("which is broken")
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('x11', config)
+        status = simulator.check_availability()
+
+        assert status['available'] is False
+        assert 'Error checking xdotool' in status['reason']
+
+    @patch('subprocess.run')
+    def test_check_x11_available_skips_ydotool_permission_check(self, mock_run):
+        """X11 availability is reported as soon as xdotool is found; no service/group check."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('x11', config)
+        status = simulator.check_availability()
+
+        assert status == {'available': True, 'reason': '', 'fix': ''}
+        mock_run.assert_called_once()  # only the `which xdotool` call
+
+    @patch('subprocess.run')
+    def test_check_wayland_available_runs_ydotool_permission_check(self, mock_run):
+        """Wayland availability also requires the ydotool service + group checks to pass."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        with patch('os.getgroups', return_value=[0]), \
+             patch('grp.getgrgid') as mock_getgrgid:
+            mock_getgrgid.return_value.gr_name = 'input'
+            status = simulator.check_availability()
+
+        assert status == {'available': True, 'reason': '', 'fix': ''}
+
+    @patch('subprocess.run')
+    def test_ydotool_service_not_running_user_and_system(self, mock_run):
+        """Neither the user nor system ydotool.service is active -> not available."""
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # `which ydotool`
+            MagicMock(returncode=1),  # systemctl --user is-active
+            MagicMock(returncode=1),  # systemctl is-active (system)
+        ]
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        status = simulator.check_availability()
+
+        assert status['available'] is False
+        assert 'service not running' in status['reason']
+
+    @patch('subprocess.run')
+    def test_ydotool_system_service_running_is_enough(self, mock_run):
+        """The user-service check can fail as long as the system service is active."""
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # `which ydotool`
+            MagicMock(returncode=1),  # systemctl --user is-active
+            MagicMock(returncode=0),  # systemctl is-active (system) succeeds
+        ]
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        with patch('os.getgroups', return_value=[0]), \
+             patch('grp.getgrgid') as mock_getgrgid:
+            mock_getgrgid.return_value.gr_name = 'input'
+            status = simulator._check_ydotool_permissions()
+
+        assert status == {'available': True, 'reason': '', 'fix': ''}
+
+    @patch('subprocess.run')
+    def test_ydotool_user_not_in_input_group(self, mock_run):
+        """Service is active but the user lacks the `input` group -> not available."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        with patch('os.getgroups', return_value=[0]), \
+             patch('grp.getgrgid') as mock_getgrgid:
+            mock_getgrgid.return_value.gr_name = 'users'
+            status = simulator._check_ydotool_permissions()
+
+        assert status['available'] is False
+        assert 'input group' in status['reason']
+
+    @patch('subprocess.run')
+    def test_ydotool_service_check_timeout_is_non_fatal(self, mock_run):
+        """A timeout checking the service falls through to the group check instead of failing."""
+        mock_run.side_effect = subprocess.TimeoutExpired('systemctl', 2)
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        with patch('os.getgroups', return_value=[0]), \
+             patch('grp.getgrgid') as mock_getgrgid:
+            mock_getgrgid.return_value.gr_name = 'input'
+            status = simulator._check_ydotool_permissions()
+
+        assert status == {'available': True, 'reason': '', 'fix': ''}
+
+    @patch('subprocess.run')
+    def test_ydotool_group_check_error_is_non_fatal(self, mock_run):
+        """An error reading group membership degrades gracefully to 'available'."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        config = ClipboardConfig()
+        simulator = PasteSimulator('wayland', config)
+        with patch('os.getgroups', side_effect=OSError("no groups")):
+            status = simulator._check_ydotool_permissions()
+
+        assert status == {'available': True, 'reason': '', 'fix': ''}
 
 
 class TestConfiguration:
