@@ -61,6 +61,122 @@ jobs:
           PYTHONPATH: src
         run: ./scripts/test_full_deps.sh -q
 
+  # e2e and gui both need real system GObject-Introspection bindings
+  # (PyGObject built against the system libgirepository/GTK) to import
+  # `gi.repository.Gtk`/`Adw`. Those bindings are installed via apt
+  # (python3-gi) against the distro's own python3, not pip -- there is no
+  # PyPI wheel. actions/setup-python installs a *different*, independently
+  # built CPython that apt's python3-gi was never compiled for, so its
+  # `gi` module (if any) won't import there. We therefore skip
+  # actions/setup-python entirely in these two jobs and build a venv with
+  # `--system-site-packages` from the distro's own `python3` (ubuntu-latest
+  # is 24.04 "noble", whose system python3 is 3.12), so the venv can see
+  # the apt-installed `gi` bindings while everything else comes from pip.
+  e2e:
+    needs: fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dbus \
+            dbus-x11 \
+            python3-gi \
+            gir1.2-gtk-4.0 \
+            gir1.2-adw-1 \
+            libportaudio2 \
+            libsndfile1
+
+      - name: Create venv (system site-packages, for apt-installed PyGObject)
+        run: python3 -m venv --system-site-packages .venv-ci
+
+      - name: Install package + test dependencies
+        run: |
+          .venv-ci/bin/python -m pip install --upgrade pip
+          .venv-ci/bin/python -m pip install -e .[dev]
+
+      - name: Run e2e suite (private dbus-run-session bus)
+        env:
+          PYTHONPATH: src
+          PYTHON: ${{ github.workspace }}/.venv-ci/bin/python
+        run: |
+          mkdir -p /tmp/e2e-artifacts
+          ./scripts/test_e2e.sh --basetemp=/tmp/e2e-artifacts -q \
+            2>&1 | tee /tmp/e2e-artifacts/pytest-e2e.log
+
+      - name: Run dbus_private hotkey-portal test (private dbus-run-session bus)
+        env:
+          PYTHONPATH: src
+          PYTHON: ${{ github.workspace }}/.venv-ci/bin/python
+        run: |
+          ./scripts/test_private_bus.sh -m dbus_private \
+            tests/test_hotkey_portal_flow.py -q \
+            2>&1 | tee -a /tmp/e2e-artifacts/pytest-e2e.log
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts
+          path: |
+            /tmp/e2e-artifacts
+          retention-days: 7
+          if-no-files-found: ignore
+
+  gui:
+    needs: fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dbus \
+            dbus-x11 \
+            xvfb \
+            python3-gi \
+            gir1.2-gtk-4.0 \
+            gir1.2-adw-1 \
+            libportaudio2 \
+            libsndfile1
+
+      - name: Create venv (system site-packages, for apt-installed PyGObject)
+        run: python3 -m venv --system-site-packages .venv-ci
+
+      - name: Install package + test dependencies
+        run: |
+          .venv-ci/bin/python -m pip install --upgrade pip
+          .venv-ci/bin/python -m pip install -e .[dev]
+
+      - name: Run GUI smoke suite (private Xvfb display + dbus session)
+        env:
+          PYTHONPATH: src
+          WHISPER_ALOUD_VENV_PYTHON: ${{ github.workspace }}/.venv-ci/bin/python
+        run: |
+          mkdir -p /tmp/gui-artifacts
+          ./scripts/test_gui.sh 2>&1 | tee /tmp/gui-artifacts/pytest-gui.log
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-failure-artifacts
+          path: |
+            /tmp/gui-artifacts
+          retention-days: 7
+          if-no-files-found: ignore
+
   packaging-smoke:
     needs: fast
     runs-on: ubuntu-latest
