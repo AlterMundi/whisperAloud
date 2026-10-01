@@ -1,5 +1,6 @@
 """Pure logic for the catalog-driven model picker (WHISP-42). No GTK/Adw import —
 testable without a display, per this codebase's *_logic.py convention."""
+
 from __future__ import annotations
 
 import os

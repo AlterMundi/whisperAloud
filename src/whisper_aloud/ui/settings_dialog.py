@@ -37,6 +37,7 @@ def _fmt_size(size_mb: Optional[int]) -> str:
     """Human-facing size string for a catalog entry, or "—" when unknown."""
     return f"{size_mb} MB" if size_mb is not None else "—"
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -618,9 +619,7 @@ class SettingsDialog(Gtk.Window):
             return
 
         if preferred_name is not None:
-            index = next(
-                (i for i, e in enumerate(entries) if e.name == preferred_name), 0
-            )
+            index = next((i for i, e in enumerate(entries) if e.name == preferred_name), 0)
         else:
             index = default_index(
                 entries,
@@ -704,7 +703,9 @@ class SettingsDialog(Gtk.Window):
         for entry in catalog.entries():
             row = Adw.ActionRow()
             row.set_title(entry.label)
-            langs = "multilingual" if entry.languages is None else f"{len(entry.languages)} languages"
+            langs = (
+                "multilingual" if entry.languages is None else f"{len(entry.languages)} languages"
+            )
             size = _fmt_size(entry.size_mb)
             state = download_state_for(entry)
             downloaded = "downloaded" if state.downloaded else "not downloaded"
@@ -761,7 +762,8 @@ class SettingsDialog(Gtk.Window):
             "model_engine": self._engine_keys[self.engine_row.get_selected()],
             "model_name": (
                 self._model_entries[self.model_row.get_selected()].name
-                if self._model_entries and self.model_row.get_selected() != Gtk.INVALID_LIST_POSITION
+                if self._model_entries
+                and self.model_row.get_selected() != Gtk.INVALID_LIST_POSITION
                 else ""
             ),
             "model_device": self.device_row.get_selected(),
