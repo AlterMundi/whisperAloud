@@ -14,7 +14,12 @@ from pydbus import SessionBus
 from pydbus.generic import signal
 
 from ..audio.recorder import AudioRecorder
-from ..clipboard import ClipboardManager, TestClipboardStub, WindowManager
+from ..clipboard import (  # noqa: F401 -- ClipboardManager/TestClipboardStub kept importable
+    ClipboardManager,       # here only so existing tests can still patch daemon_module.ClipboardManager;
+    TestClipboardStub,      # actual construction always goes through build_clipboard_manager() below.
+    WindowManager,
+    build_clipboard_manager,
+)
 from ..config import WhisperAloudConfig, detect_config_changes
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
@@ -203,6 +208,17 @@ class WhisperAloudService:
         self._bus = bus
         self._name_owner = name_owner
 
+        # WHISP-46 e2e harness: under WHISPER_ALOUD_TEST_MODE=1, skip the tray
+        # indicator, hotkey manager, notifications, and media control
+        # (MPRIS/GainController) entirely -- defense in depth on top of each
+        # component's own env-driven degradation, so a test that happens to
+        # set DISPLAY/WAYLAND_DISPLAY/XDG_SESSION_TYPE (or a bad config) can
+        # never make the daemon open a real indicator, contact the real
+        # hotkey portal, pause a real media player, or construct real
+        # notifications. Computed first, before _init_components(), since
+        # that method also needs it (MprisController).
+        self._test_mode = os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1"
+
         # Core components
         self.recorder: Optional[AudioRecorder] = None
         self.transcriber: Optional[SpeechEngine] = None
@@ -230,14 +246,6 @@ class WhisperAloudService:
         # GLib.idle_add ensures D-Bus signal emissions happen on the main loop.
         self._safe_toggle = lambda: GLib.idle_add(self.ToggleRecording)
         self._safe_quit = lambda: GLib.idle_add(self.Quit)
-
-        # WHISP-46 e2e harness: under WHISPER_ALOUD_TEST_MODE=1, skip the tray
-        # indicator, hotkey manager, and notifications entirely -- defense in
-        # depth on top of each component's own env-driven degradation, so a
-        # test that happens to set DISPLAY/WAYLAND_DISPLAY/XDG_SESSION_TYPE
-        # (or a bad config) can never make the daemon open a real indicator,
-        # contact the real hotkey portal, or construct real notifications.
-        self._test_mode = os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1"
 
         # Initialize system tray indicator only when a GUI session is available.
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
@@ -313,21 +321,19 @@ class WhisperAloudService:
         self._start_time = time.monotonic()
         logger.info(f"Daemon session ID: {self.session_id}")
 
-        # Initialize clipboard manager. Under test mode, use a stub that never
-        # shells out to wl-copy/xclip/xsel/gio -- a real ClipboardManager was
-        # found (WHISP-46 incident) to overwrite the operator's real Wayland
-        # clipboard even with WAYLAND_DISPLAY unset, because
-        # detect_session_type() falls back to scanning $XDG_RUNTIME_DIR for a
-        # real wayland-* socket, and wl-copy itself defaults to the real
-        # compositor when not told otherwise.
-        if self._test_mode:
-            self.clipboard_manager = TestClipboardStub(self.config.clipboard)
-        else:
-            try:
-                self.clipboard_manager = ClipboardManager(self.config.clipboard)
-            except Exception as e:
-                logger.warning(f"Failed to initialize clipboard: {e}")
-                self.clipboard_manager = None
+        # Initialize clipboard manager via the single tested factory
+        # (build_clipboard_manager), which returns a TestClipboardStub under
+        # WHISPER_ALOUD_TEST_MODE=1 and a real ClipboardManager otherwise --
+        # branching here directly, instead of delegating to the factory
+        # tests/test_clipboard.py exercises, previously let the real
+        # ClipboardManager through in test mode (WHISP-46 incident: it
+        # overwrote the operator's real Wayland clipboard even with
+        # WAYLAND_DISPLAY unset).
+        try:
+            self.clipboard_manager = build_clipboard_manager(self.config.clipboard)
+        except Exception as e:
+            logger.warning(f"Failed to initialize clipboard: {e}")
+            self.clipboard_manager = None
 
         # WindowManager._detect_backend() probes a real `xdotool` subprocess
         # at construction time -- skip it entirely in test mode (WHISP-46).

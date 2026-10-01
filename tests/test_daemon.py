@@ -102,6 +102,7 @@ def _make_daemon(indicator_fails=False, hotkey_fails=False):
          patch.object(daemon_module, "HistoryManager"), \
          patch.object(daemon_module, "ClipboardManager"), \
          patch.object(daemon_module, "WindowManager"), \
+         patch.object(daemon_module, "build_clipboard_manager"), \
          patch.object(daemon_module, "WhisperAloudIndicator") as mock_ind_cls, \
          patch.object(daemon_module, "HotkeyManager") as mock_hk_cls, \
          patch.object(daemon_module, "GLib") as mock_glib:
@@ -655,6 +656,7 @@ class TestRecorderInitialization:
             patch.object(daemon_module, "HistoryManager"),
             patch.object(daemon_module, "ClipboardManager"),
             patch.object(daemon_module, "WindowManager"),
+            patch.object(daemon_module, "build_clipboard_manager"),
             patch.object(daemon_module, "WhisperAloudIndicator"),
             patch.object(daemon_module, "HotkeyManager") as mock_hk_cls,
             patch.object(daemon_module, "GLib") as mock_glib,
@@ -812,6 +814,7 @@ class TestPortalTouchedOnlyAfterBusNameOwned:
              patch.object(daemon_module, "HistoryManager"), \
              patch.object(daemon_module, "ClipboardManager"), \
              patch.object(daemon_module, "WindowManager"), \
+             patch.object(daemon_module, "build_clipboard_manager"), \
              patch.object(daemon_module, "WhisperAloudIndicator"), \
              patch.object(daemon_module, "HotkeyManager", side_effect=_hotkey_manager_ctor), \
              patch.object(daemon_module, "GLib") as mock_glib:
