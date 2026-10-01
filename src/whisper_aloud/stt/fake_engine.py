@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from ..exceptions import ConfigurationError, TranscriptionError
 from .streaming import PartialResult
@@ -111,7 +111,24 @@ class FakeStreamingSpeechEngine:
 
     is_streaming = True
 
-    def __init__(self, config: "WhisperAloudConfig") -> None:
+    def __init__(
+        self,
+        config: "WhisperAloudConfig",
+        finalize_latency_s: float = 0.0,
+        finalize_gate: Optional["threading.Event"] = None,
+    ) -> None:
+        """
+        Args:
+            config: Loaded config (only `transcription.language` is read).
+            finalize_latency_s: Used only if WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S
+                is unset -- a fixed delay inside `finalize()`'s unlocked section,
+                for tests that want to provoke a real (non-`_SyncExecutor`)
+                Stop->Start race deterministically-ish.
+            finalize_gate: If given, `finalize()` blocks on `.wait()` on this
+                instead of sleeping, so a test can hold it open and release it
+                at an exact point (WHISP-57 audit: a real-concurrency
+                regression test needs this instead of a sleep-based race).
+        """
         self._config = config
         self._loaded = False
         self._cancelling = False
@@ -120,6 +137,18 @@ class FakeStreamingSpeechEngine:
         self._revealed = 0
         self._seq = 0
         self._session_started = False
+        # WHISP-57 audit (HIGH), defense in depth: incremented by every
+        # start_session() call. finalize() snapshots it at entry and, after its
+        # unlocked section (where a concurrent start_session() for a NEW
+        # session could run -- the daemon's _transcribing guard should prevent
+        # this in practice, but this engine does not rely on that), only
+        # mutates shared session state if the generation is still the one it
+        # started with. Without this, a slow finalize() racing a fresh
+        # start_session() could reset the new session's _session_started flag
+        # out from under it.
+        self._generation = 0
+        self._finalize_latency_s = finalize_latency_s
+        self._finalize_gate = finalize_gate
 
     @property
     def is_loaded(self) -> bool:
@@ -155,6 +184,7 @@ class FakeStreamingSpeechEngine:
             self._seq = 0
             self._cancelling = False
             self._session_started = True
+            self._generation += 1
 
     def accept_chunk(self, samples: "np.ndarray") -> None:
         with self._lock:
@@ -177,15 +207,34 @@ class FakeStreamingSpeechEngine:
     def finalize(self) -> "TranscriptionResult":
         from ..transcriber import TranscriptionResult  # local import, avoid cycle
 
-        latency = os.environ.get("WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S")
-        if latency:
-            time.sleep(float(latency))
+        # Snapshot everything this finalize() needs BEFORE the unlocked
+        # section below -- a concurrent start_session() for a new session can
+        # run while we're "decoding" (sleeping/blocked on finalize_gate) and
+        # must never change the text *this* finalize() reports.
+        with self._lock:
+            generation = self._generation
+            cancelling = self._cancelling
+            words_snapshot = list(self._words)
+
+        # Unlocked "decode" section, mirroring NemotronStreamingEngine's
+        # finalize() (which runs real sherpa-onnx calls outside the lock) --
+        # a real ThreadPoolExecutor can interleave a new start_session() here.
+        if self._finalize_gate is not None:
+            self._finalize_gate.wait()
+        else:
+            env_latency = os.environ.get("WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S")
+            latency = float(env_latency) if env_latency else self._finalize_latency_s
+            if latency:
+                time.sleep(latency)
+
+        text = "" if cancelling else " ".join(words_snapshot)
 
         with self._lock:
-            cancelling = self._cancelling
-            self._cancelling = False
-            self._session_started = False
-            text = "" if cancelling else " ".join(self._words)
+            if self._generation == generation:
+                self._cancelling = False
+                self._session_started = False
+            # else: a newer session has already started -- leave its
+            # _session_started/_cancelling alone, this finalize() is stale.
 
         return TranscriptionResult(
             text=text,
@@ -193,7 +242,7 @@ class FakeStreamingSpeechEngine:
             segments=[],
             confidence=1.0,
             duration=0.0,
-            processing_time=float(latency) if latency else 0.0,
+            processing_time=0.0,
         )
 
     def cancel_session(self) -> None:

@@ -471,6 +471,83 @@ class TestConcurrency:
         assert errors == []
 
 
+class TestFinalizeGenerationGuard:
+    """WHISP-57 audit (HIGH), defense in depth: finalize()'s unlocked decode
+    section (stream.accept_waveform/input_finished/decode_stream/get_result,
+    mirroring real sherpa-onnx calls) must not let a stale flush() corrupt a
+    NEW session's tracker/last_partial if a start_session() races it while
+    finalize() is still "decoding". The daemon's own `_transcribing` guard
+    (WHISP-57 audit, in daemon.py) should prevent this from ever happening in
+    practice, but the engine must not rely on that."""
+
+    def test_finalize_skips_stale_flush_if_newer_session_started(self, tmp_path):
+        engine = NemotronStreamingEngine(_cfg())
+        _write_fake_model_files(tmp_path)
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingStream(FakeStream):
+            def input_finished(self) -> None:
+                super().input_finished()
+                entered.set()
+                assert release.wait(timeout=5), "test did not release finalize() in time"
+
+        class BlockingRecognizer:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            @classmethod
+            def from_transducer(cls, **kwargs):
+                return cls(**kwargs)
+
+            def create_stream(self) -> BlockingStream:
+                return BlockingStream()
+
+            def is_ready(self, stream) -> bool:
+                return False
+
+            def decode_stream(self, stream) -> None:
+                pass  # pragma: no cover - never reached, is_ready() is always False
+
+            def get_result(self, stream) -> str:
+                return "session A final"
+
+        fake_module = types.ModuleType("sherpa_onnx")
+        fake_module.OnlineRecognizer = BlockingRecognizer
+        _load_with_fake(engine, tmp_path, fake_module)
+
+        engine.start_session("es")
+        generation_a = engine._generation
+
+        result_holder: dict = {}
+
+        def run_finalize() -> None:
+            result_holder["result"] = engine.finalize()
+
+        t = threading.Thread(target=run_finalize)
+        t.start()
+        assert entered.wait(timeout=5), "finalize() never reached input_finished()"
+
+        # Session A's finalize() is blocked inside input_finished() (its
+        # unlocked decode section). Start a NEW session (B) concurrently.
+        engine.start_session("es")
+        generation_b = engine._generation
+        assert generation_b != generation_a
+
+        release.set()
+        t.join(timeout=5)
+        assert not t.is_alive()
+
+        # finalize() still reports session A's real decoded text...
+        assert result_holder["result"].text == "session A final"
+        # ...but must not have clobbered session B's live partial view with a
+        # stale flush() of A's (empty, since B's start_session() just reset it).
+        partial_b = engine.get_partial()
+        assert partial_b.committed == ""
+        assert partial_b.tentative == ""
+
+
 class TestFactoryWiring:
     def test_create_engine_returns_nemotron_streaming_engine(self):
         from whisper_aloud.stt.engine import create_engine
