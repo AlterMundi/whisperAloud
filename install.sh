@@ -667,7 +667,10 @@ RestartSec=3
 TimeoutStartSec=120
 # EXIT_ALREADY_RUNNING (see service/daemon.py): another instance already
 # owns org.fede.whisperaloud. Restarting would just repeat the race
-# forever, so treat this exit code as a clean stop, not a failure to retry.
+# forever, so treat this exit code as a clean stop, not a failure to retry
+# -- SuccessExitStatus keeps the unit from being left in "failed" state,
+# RestartPreventExitStatus stops systemd from restarting it.
+SuccessExitStatus=3
 RestartPreventExitStatus=3
 # Forward graphical session env from user manager to this service.
 # GNOME imports these at login; PassEnvironment passes them to the service process.
