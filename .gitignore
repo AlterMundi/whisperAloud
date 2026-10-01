@@ -72,3 +72,5 @@ test_audio_*.wav
 sample_*.wav
 recording_*.wav
 .worktrees/
+.spike-venv/
+.spike-models/
