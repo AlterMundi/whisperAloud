@@ -311,3 +311,64 @@ def test_models_marks_recommended_entries(capsys):
     out = capsys.readouterr().out
     assert "recommended" in out
     assert "yes" in out
+
+
+# ─── WHISP-63: daemon-start bus-name race ──────────────────────────────────
+
+
+class TestHandleDaemonCommandBusRace:
+    """handle_daemon_command must check/claim the D-Bus name *before*
+    constructing WhisperAloudService, so a losing start never pays for
+    audio/tray/model init just to die on `bus.publish()`."""
+
+    def test_already_running_exits_with_dedicated_code_and_skips_service(self):
+        from whisper_aloud import __main__ as cli
+        from whisper_aloud.service.daemon import AlreadyRunningError, EXIT_ALREADY_RUNNING
+
+        fake_bus = MagicMock()
+        err = AlreadyRunningError(
+            "another instance owns org.fede.whisperaloud (pid 123)", pid=123
+        )
+        with patch("pydbus.SessionBus", return_value=fake_bus), \
+             patch(
+                 "whisper_aloud.service.daemon.acquire_bus_name", side_effect=err
+             ) as mock_acquire, \
+             patch("whisper_aloud.service.WhisperAloudService") as mock_service_cls:
+            rc = cli.handle_daemon_command(MagicMock())
+
+        assert rc == EXIT_ALREADY_RUNNING
+        mock_acquire.assert_called_once_with(fake_bus)
+        mock_service_cls.assert_not_called()
+
+    def test_already_running_message_has_no_traceback(self, capsys):
+        from whisper_aloud import __main__ as cli
+        from whisper_aloud.service.daemon import AlreadyRunningError
+
+        fake_bus = MagicMock()
+        err = AlreadyRunningError("another instance owns org.fede.whisperaloud (pid 123)", pid=123)
+        with patch("pydbus.SessionBus", return_value=fake_bus), \
+             patch("whisper_aloud.service.daemon.acquire_bus_name", side_effect=err), \
+             patch("whisper_aloud.service.WhisperAloudService"):
+            cli.handle_daemon_command(MagicMock())
+
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.err
+        assert "org.fede.whisperaloud" in captured.err
+
+    def test_name_acquired_then_service_constructed_with_bus_and_owner(self):
+        from whisper_aloud import __main__ as cli
+
+        fake_bus = MagicMock()
+        fake_owner = MagicMock()
+        with patch("pydbus.SessionBus", return_value=fake_bus), \
+             patch(
+                 "whisper_aloud.service.daemon.acquire_bus_name", return_value=fake_owner
+             ) as mock_acquire, \
+             patch("whisper_aloud.service.WhisperAloudService") as mock_service_cls:
+            mock_service_cls.return_value.run.return_value = None
+            rc = cli.handle_daemon_command(MagicMock())
+
+        assert rc == 0
+        mock_acquire.assert_called_once_with(fake_bus)
+        mock_service_cls.assert_called_once_with(bus=fake_bus, name_owner=fake_owner)
+        mock_service_cls.return_value.run.assert_called_once()

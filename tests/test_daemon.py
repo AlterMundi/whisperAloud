@@ -669,3 +669,114 @@ def test_no_model_change_does_not_reload():
     with patch.object(daemon._daemon_module, "create_engine") as mock_ce:
         daemon._apply_config_changes(new)
     mock_ce.assert_not_called()
+
+
+# ─── WHISP-63: single-owner bus-name acquisition ───────────────────────────
+
+
+class TestAcquireBusName:
+    """Unit tests for the early, cheap bus-name check.
+
+    This check must run (and fail fast) *before* any audio/tray/model
+    initialization happens, so a losing daemon start never does that heavy
+    work for nothing — see TestHandleDaemonCommandBusRace in test_cli.py for
+    where it is wired into the CLI entrypoint.
+    """
+
+    def test_success_returns_the_name_owner(self):
+        daemon_module = _import_daemon_module(_build_stub_modules())
+        fake_bus = MagicMock()
+        fake_owner = MagicMock()
+        fake_bus.request_name.return_value = fake_owner
+
+        result = daemon_module.acquire_bus_name(fake_bus)
+
+        assert result is fake_owner
+        fake_bus.request_name.assert_called_once_with(
+            daemon_module.BUS_NAME, allow_replacement=False, replace=False
+        )
+
+    def test_already_owned_raises_already_running_error_with_pid(self):
+        daemon_module = _import_daemon_module(_build_stub_modules())
+        fake_bus = MagicMock()
+        fake_bus.request_name.side_effect = RuntimeError("name already exists on the bus")
+        fake_bus.dbus.GetNameOwner.return_value = ":1.42"
+        fake_bus.dbus.GetConnectionUnixProcessID.return_value = 4242
+
+        with pytest.raises(daemon_module.AlreadyRunningError) as excinfo:
+            daemon_module.acquire_bus_name(fake_bus)
+
+        assert excinfo.value.pid == 4242
+        assert "4242" in str(excinfo.value)
+        assert daemon_module.BUS_NAME in str(excinfo.value)
+
+    def test_already_owned_without_pid_when_lookup_fails(self):
+        """PID lookup is best-effort: failure must not crash the clean check."""
+        daemon_module = _import_daemon_module(_build_stub_modules())
+        fake_bus = MagicMock()
+        fake_bus.request_name.side_effect = RuntimeError("name already exists on the bus")
+        fake_bus.dbus.GetNameOwner.side_effect = Exception("no reply")
+
+        with pytest.raises(daemon_module.AlreadyRunningError) as excinfo:
+            daemon_module.acquire_bus_name(fake_bus)
+
+        assert excinfo.value.pid is None
+        assert daemon_module.BUS_NAME in str(excinfo.value)
+
+    def test_other_runtime_errors_are_not_wrapped(self):
+        """Only the 'already exists' case is the race; anything else should
+        surface as-is rather than being misreported as already-running."""
+        daemon_module = _import_daemon_module(_build_stub_modules())
+        fake_bus = MagicMock()
+        fake_bus.request_name.side_effect = RuntimeError("you're already the owner of this name")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            daemon_module.acquire_bus_name(fake_bus)
+
+        assert not isinstance(excinfo.value, daemon_module.AlreadyRunningError)
+
+    def test_exit_already_running_constant_is_3(self):
+        daemon_module = _import_daemon_module(_build_stub_modules())
+        assert daemon_module.EXIT_ALREADY_RUNNING == 3
+
+
+class TestServiceRunBusHandoff:
+    """The daemon's run() must accept an already-acquired bus/name and must
+    not re-request the name in that case (the CLI entrypoint acquires it
+    before constructing the heavy WhisperAloudService in the first place)."""
+
+    def test_run_uses_preacquired_bus_and_name_without_reacquiring(self):
+        daemon = _make_daemon()
+        fake_bus = MagicMock()
+        fake_owner = MagicMock()
+        daemon._bus = fake_bus
+        daemon._name_owner = fake_owner
+
+        with patch.object(daemon._daemon_module, "acquire_bus_name") as mock_acquire:
+            daemon.run()
+
+        mock_acquire.assert_not_called()
+        fake_bus.register_object.assert_called_once()
+        args, _ = fake_bus.register_object.call_args
+        assert args[0] == daemon._daemon_module.OBJECT_PATH
+        assert args[1] is daemon
+
+    def test_run_propagates_already_running_cleanly_without_cleanup(self):
+        """When no bus/name was pre-supplied, run() still performs the check
+        itself (defensive fallback for direct callers/tests), and on failure
+        must not run the normal teardown path or swallow the exception type.
+        """
+        daemon = _make_daemon()
+        daemon._bus = None
+        daemon._name_owner = None
+        err = daemon._daemon_module.AlreadyRunningError(
+            "another instance owns org.fede.whisperaloud (pid 99)", pid=99
+        )
+
+        with patch.object(daemon._daemon_module, "SessionBus", return_value=MagicMock()), \
+             patch.object(daemon._daemon_module, "acquire_bus_name", side_effect=err), \
+             patch.object(daemon, "_cleanup") as mock_cleanup:
+            with pytest.raises(daemon._daemon_module.AlreadyRunningError):
+                daemon.run()
+
+        mock_cleanup.assert_not_called()
