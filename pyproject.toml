@@ -95,6 +95,7 @@ markers = [
     "requires_audio_hw: Tests that need real audio input hardware.",
     "requires_display: Tests that need a GUI display/GTK environment.",
     "requires_dbus: Tests that need a live user D-Bus session.",
+    "dbus_private: Tests that must run under `dbus-run-session` on a private bus (see WHISP-64).",
 ]
 
 [tool.coverage.run]
