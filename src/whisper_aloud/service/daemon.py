@@ -101,6 +101,30 @@ def acquire_bus_name(bus):
         raise
 
 
+def _wrap_flat_config_as_variants(flat: dict) -> dict:
+    """Wrap each value of a flat {"section.field": value} dict as a
+    GLib.Variant, for any a{sv} payload built from config values (GetConfig's
+    return value, and the ConfigChanged signal's `changes` argument).
+
+    pydbus requires every value of an outgoing a{sv} argument to already be
+    a GLib.Variant -- a signal emission is just as strict about this as a
+    method call's return value, so this must be applied before
+    self.ConfigChanged(...) is called, not just before returning from
+    GetConfig().
+    """
+    result = {}
+    for key, value in flat.items():
+        if isinstance(value, bool):
+            result[key] = GLib.Variant("b", value)
+        elif isinstance(value, int):
+            result[key] = GLib.Variant("i", value)
+        elif isinstance(value, float):
+            result[key] = GLib.Variant("d", value)
+        elif value is not None:
+            result[key] = GLib.Variant("s", str(value))
+    return result
+
+
 class WhisperAloudService:
     """
     <node>
@@ -762,37 +786,36 @@ class WhisperAloudService:
     def GetConfig(self) -> dict:
         """Return current configuration flattened to GLib variants."""
         d = self.config.to_dict()
-        result = {}
+        flat = {}
         for section, values in d.items():
             if not isinstance(values, dict):
                 continue
             for key, value in values.items():
-                flat_key = f"{section}.{key}"
-                if isinstance(value, bool):
-                    result[flat_key] = GLib.Variant("b", value)
-                elif isinstance(value, int):
-                    result[flat_key] = GLib.Variant("i", value)
-                elif isinstance(value, float):
-                    result[flat_key] = GLib.Variant("d", value)
-                elif value is not None:
-                    result[flat_key] = GLib.Variant("s", str(value))
-        return result
+                flat[f"{section}.{key}"] = value
+        return _wrap_flat_config_as_variants(flat)
 
     def SetConfig(self, changes: dict) -> bool:
         """Apply configuration changes."""
         try:
             config_dict = self.config.to_dict()
+            unpacked_changes = {}
             for key, variant in changes.items():
+                # Unpack GLib.Variant to native Python value
+                value = variant.unpack() if hasattr(variant, 'unpack') else variant
+                unpacked_changes[key] = value
                 section, field = key.split(".", 1)
                 if section in config_dict and field in config_dict[section]:
-                    # Unpack GLib.Variant to native Python value
-                    value = variant.unpack() if hasattr(variant, 'unpack') else variant
                     config_dict[section][field] = value
             new_config = WhisperAloudConfig.from_dict(config_dict)
             new_config.validate()
             self._apply_config_changes(new_config)
             self.config.save()
-            self.ConfigChanged(changes)
+            # ConfigChanged's D-Bus signature is a{sv} too -- a signal
+            # emission is just as strict about GLib.Variant-wrapped values
+            # as any other outgoing a{sv} argument (see
+            # _wrap_flat_config_as_variants), so the unpacked native values
+            # must be re-wrapped before emitting, not passed through as-is.
+            self.ConfigChanged(_wrap_flat_config_as_variants(unpacked_changes))
             return True
         except Exception as e:
             self.Error("config_invalid", str(e))
@@ -812,7 +835,7 @@ class WhisperAloudService:
             logger.info("Reloading configuration...")
             new_config = WhisperAloudConfig.load(strict=True)
             self._apply_config_changes(new_config)
-            self.ConfigChanged({})
+            self.ConfigChanged(_wrap_flat_config_as_variants({}))
             logger.info("Configuration reloaded successfully")
             return True
 
