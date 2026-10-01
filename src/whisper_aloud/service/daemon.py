@@ -469,6 +469,19 @@ class WhisperAloudService:
             self.Error("recorder_error", "Recorder not initialized")
             return False
 
+        # A previous recording's transcription (batch transcribe_numpy, or a
+        # streaming engine's finalize()) is still running on the executor.
+        # Starting a new session now would call engine.start_session() (or
+        # wire a fresh on_processed_chunk hook) while that in-flight job is
+        # still touching the SAME engine instance's shared state -- for a
+        # streaming engine this corrupts the session (a stale finalize() can
+        # overwrite the new session's committed/tentative text, and a
+        # straggler accept_chunk can raise against a session that's already
+        # moved on). No new state is created here, so nothing needs undoing.
+        if self._transcribing:
+            logger.info("StartRecording: a transcription is still in flight, ignoring")
+            return False
+
         try:
             rf = self.config.recording_flow
 

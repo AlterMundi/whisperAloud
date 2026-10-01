@@ -91,9 +91,15 @@ synchronously before capture starts.
 - Returns `false` and emits `Error("recording_failed", <message>)` if
   starting the audio stream raises (e.g. no capture device). Any mic-gain
   change already applied is rolled back.
-- Calling it while already **recording** or **transcribing** restarts
-  capture via the underlying recorder rather than raising; prefer checking
-  `GetStatus()` first.
+- Returns `false` and emits **no** signal while **transcribing** (WHISP-57):
+  the previous recording's transcription (batch or a streaming engine's
+  `finalize()`) is still running in the background, and starting a new
+  session now would touch the same engine instance's shared state while
+  that job is still using it. Call `GetStatus()` or wait for
+  `TranscriptionReady`/`Error` before retrying.
+- Calling it while already **recording** restarts capture via the
+  underlying recorder rather than raising; prefer checking `GetStatus()`
+  first.
 
 ### StopRecording
 
@@ -658,6 +664,13 @@ Additive (minor) change, WHISP-57:
   queue was full (`AudioRecorder.dropped_chunks`, WHISP-65); 0 when no
   streaming hook was registered for the recording (i.e. a non-streaming
   engine, or a streaming engine whose chunk queue never filled up).
+- Documented semantic clarification (no wire-format change, so no bump by
+  itself — folded into this 1.1.0 entry): `StartRecording` now returns
+  `false` and emits no signal while **transcribing**, instead of the
+  previously-undocumented behavior of restarting capture via the recorder
+  while a previous recording's transcription was still in flight. That
+  undocumented behavior could corrupt a streaming engine's session state
+  (WHISP-57 audit finding); see `StartRecording`'s own section above.
 
 ### 1.0.0 — 2026-10-01
 
