@@ -212,20 +212,30 @@ def test_transcription_error_path_returns_to_idle(daemon):
     client.disconnect()
 
 
-def test_toggle_during_transcribing_starts_a_new_recording(daemon):
+def test_toggle_during_transcribing_is_refused_then_succeeds_after(daemon, audio_fixture):
     """Scenario: ToggleRecording() while the daemon is "transcribing" (the
-    recorder itself is already idle) dispatches to StartRecording() rather
-    than CancelRecording/StopRecording, per docs/dbus-api.md's documented
-    "valid in any state" semantics for ToggleRecording. A long
-    WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S keeps the first transcription
-    in flight long enough to toggle during it deterministically."""
+    recorder itself is already idle) dispatches to StartRecording(), which
+    now refuses to start a new session while a previous transcription is
+    still in flight (WHISP-67/WHISP-57: starting a new session while the
+    executor still touches the same engine instance can corrupt a streaming
+    session). ToggleRecording()'s return value doesn't reflect this --
+    it unconditionally returns the literal "recording" without checking
+    StartRecording()'s result (a pre-existing, documented caveat in
+    docs/dbus-api.md) -- so this test asserts the real observable effect
+    instead: no RecordingStarted fires and the state stays "transcribing"
+    while the refusal is in force, and a fresh toggle after TranscriptionReady
+    succeeds normally. WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S keeps the first
+    transcription in flight long enough to toggle during it deterministically.
+    """
+    fixture = audio_fixture("tone")
     handle = daemon(
-        config_overrides={"FAKE_ENGINE_LATENCY_S": "2.0"},
+        config_overrides={"FAKE_ENGINE_LATENCY_S": "1.0"},
         fake_audio="tone",
     )
     client = handle.client()
     started = SignalCapture(client, "RecordingStarted")
     status = SignalCapture(client, "StatusChanged")
+    ready = SignalCapture(client, "TranscriptionReady")
 
     assert client.start_recording() is True
     started.wait(timeout=5.0)
@@ -233,8 +243,19 @@ def test_toggle_during_transcribing_starts_a_new_recording(daemon):
     (state,) = status.wait(timeout=5.0, predicate=lambda s: s == "transcribing")
     assert state == "transcribing"
 
-    # The first transcription is now sleeping for 2s. Toggling now must
-    # start a second recording (recorder.is_recording is False).
+    # The first transcription is now sleeping for ~1s. ToggleRecording()
+    # dispatches to StartRecording(), which must refuse (no new recording
+    # starts, no RecordingStarted signal) while that job is still in flight.
+    client.toggle_recording()
+    with pytest.raises(AssertionError):
+        started.wait(timeout=0.3)
+    assert client.get_status()["state"] == "transcribing"
+
+    text, _meta = ready.wait(timeout=10.0)
+    assert text == fixture.expected_text
+
+    # Now that the prior transcription has completed, toggling actually
+    # starts a new recording.
     assert client.toggle_recording() == "recording"
     started.wait(timeout=5.0)
     (state,) = status.wait(timeout=5.0, predicate=lambda s: s == "recording")
