@@ -199,7 +199,7 @@ class TestChunkInvariance:
                     "branch (audio_processor.py AGC.process ~lines 182-183) and is recomputed "
                     "from scratch every chunk with zero memory of prior audio. Observed max "
                     "abs diff vs one-shot ~0.86 on this signal.",
-                    strict=False,
+                    strict=True,
                 ),
             ),
             pytest.param(
@@ -207,7 +207,7 @@ class TestChunkInvariance:
                 marks=pytest.mark.xfail(
                     reason="Same cause as the 80ms case (chunk < window_ms=300). Observed max "
                     "abs diff vs one-shot ~0.83.",
-                    strict=False,
+                    strict=True,
                 ),
             ),
             pytest.param(
@@ -219,7 +219,7 @@ class TestChunkInvariance:
                     "error at the boundary. Observed max abs diff vs one-shot ~1.15 (worse than "
                     "80/160ms here -- boundary alignment with the loud-tone transient matters "
                     "more than raw chunk/window ratio).",
-                    strict=False,
+                    strict=True,
                 ),
             ),
             pytest.param(
@@ -228,7 +228,7 @@ class TestChunkInvariance:
                     reason="Best case tested (chunk >> window_ms): still not invariant, "
                     "observed max abs diff vs one-shot ~0.045 (vs <1e-6 tolerance asserted "
                     "here) because the RMS window still resets at the top of every chunk.",
-                    strict=False,
+                    strict=True,
                 ),
             ),
         ],
@@ -252,10 +252,10 @@ class TestChunkInvariance:
     @pytest.mark.parametrize(
         "chunk_ms",
         [
-            pytest.param(80, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=False)),
-            pytest.param(160, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=False)),
-            pytest.param(560, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=False)),
-            pytest.param(1120, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=False)),
+            pytest.param(80, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
+            pytest.param(160, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
+            pytest.param(560, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
+            pytest.param(1120, marks=pytest.mark.xfail(reason="AGC stage dominates; see test_agc_is_not_chunk_invariant.", strict=True)),
         ],
     )
     def test_full_pipeline_is_not_chunk_invariant(self, chunk_ms):
