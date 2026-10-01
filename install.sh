@@ -631,6 +631,11 @@ install_user_service() {
 Description=WhisperAloud Transcription Service
 After=graphical-session.target
 PartOf=graphical-session.target
+# Bound the restart storm if something keeps losing the bus-name race or
+# crashing on start: at most 5 (re)starts per minute, then systemd stops
+# trying until the interval resets.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=dbus
@@ -639,6 +644,10 @@ ExecStart=$VENV_PATH/bin/whisper-aloud-daemon
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=120
+# EXIT_ALREADY_RUNNING (see service/daemon.py): another instance already
+# owns org.fede.whisperaloud. Restarting would just repeat the race
+# forever, so treat this exit code as a clean stop, not a failure to retry.
+RestartPreventExitStatus=3
 # Forward graphical session env from user manager to this service.
 # GNOME imports these at login; PassEnvironment passes them to the service process.
 PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP
