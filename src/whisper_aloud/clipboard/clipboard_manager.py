@@ -199,3 +199,53 @@ class ClipboardManager:
         from .paste_simulator import PasteSimulator
         simulator = PasteSimulator(self._session_type, self.config)
         return simulator.check_availability()
+
+
+class TestClipboardStub:
+    """Test-only replacement for ClipboardManager under WHISPER_ALOUD_TEST_MODE=1.
+
+    Incident (WHISP-46): a real e2e run copied text via a real ClipboardManager
+    and overwrote the operator's real Wayland clipboard, because unsetting
+    WAYLAND_DISPLAY alone does not stop detect_session_type()'s XDG_RUNTIME_DIR
+    fallback scan from finding a real wayland-* socket, nor stop wl-copy itself
+    from connecting to the real compositor. This stub never imports or calls
+    `subprocess` at all -- it only appends the copied text to an in-memory list
+    and, if $WHISPER_ALOUD_TEST_CLIPBOARD_FILE is set, to that file, so e2e
+    tests can assert on copy behavior without ever touching a real clipboard,
+    wl-copy, xclip, xsel, xdotool, ydotool, or gio.
+    """
+
+    def __init__(self, config: ClipboardConfig):
+        self.config = config
+        self._session_type = "test"
+        self.copied: list[str] = []
+
+    def copy(self, text: str) -> bool:
+        if not text:
+            logger.warning("Empty text provided to clipboard copy")
+            return False
+        self.copied.append(text)
+        target = os.environ.get("WHISPER_ALOUD_TEST_CLIPBOARD_FILE")
+        if target:
+            try:
+                with open(target, "a", encoding="utf-8") as f:
+                    f.write(text + "\n")
+            except Exception as e:
+                logger.warning(f"TestClipboardStub: failed to write {target}: {e}")
+        return True
+
+    def check_paste_permissions(self) -> Dict[str, Any]:
+        return {
+            "available": False,
+            "reason": "WHISPER_ALOUD_TEST_MODE=1: paste simulation is never available",
+            "fix": "",
+        }
+
+
+def build_clipboard_manager(config: ClipboardConfig):
+    """Factory: returns a TestClipboardStub under WHISPER_ALOUD_TEST_MODE=1,
+    a real ClipboardManager otherwise. The daemon must always go through this
+    rather than constructing ClipboardManager directly (WHISP-46)."""
+    if os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1":
+        return TestClipboardStub(config)
+    return ClipboardManager(config)

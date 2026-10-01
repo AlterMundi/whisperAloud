@@ -226,3 +226,40 @@ def test_recommended_never_returns_a_needs_review_entry(monkeypatch):
     monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (fake_entry,))
     with pytest.raises(LookupError):
         catalog.recommended(engine="fake-pending-engine")
+
+
+class TestFakeEngineTestModeGating:
+    """The "fake" catalog entry (WHISP-46 e2e harness) must only exist when
+    WHISPER_ALOUD_TEST_MODE=1 -- registration is a module-import-time
+    decision, so a production install (env var never set) never has it,
+    even if an attacker-controlled config.json sets model.engine="fake"."""
+
+    def test_fake_engine_absent_by_default(self, monkeypatch):
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        # Re-import catalog fresh to re-run its module-level conditional.
+        import importlib
+
+        from whisper_aloud.stt import catalog as catalog_module
+
+        importlib.reload(catalog_module)
+        try:
+            assert "fake" not in catalog_module.engines()
+            assert catalog_module.models_for("fake") == []
+            assert "fake" not in catalog_module.engine_models()
+        finally:
+            importlib.reload(catalog_module)
+
+    def test_fake_engine_present_in_test_mode(self, monkeypatch):
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+        import importlib
+
+        from whisper_aloud.stt import catalog as catalog_module
+
+        importlib.reload(catalog_module)
+        try:
+            assert "fake" in catalog_module.engines()
+            assert catalog_module.get("fake", "fake") is not None
+            assert "fake" in catalog_module.engine_models()
+        finally:
+            monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+            importlib.reload(catalog_module)  # restore module state for later tests

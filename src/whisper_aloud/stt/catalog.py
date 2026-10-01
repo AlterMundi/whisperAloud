@@ -9,6 +9,7 @@ imports *this* module to build `ENGINE_MODELS`, and a cycle would break at impor
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -216,6 +217,32 @@ _ENTRIES: tuple[ModelEntry, ...] = (
 # wired end-to-end (catalog, config validation, create_engine) for development and
 # testing, but kept out of the picker until the OpenMDW-1.1 license review above
 # completes. `models_for`/`get`/`engine_models` all still find it via `_ENTRIES`.
+
+# WHISP-46 e2e harness: a hidden "fake" engine/model entry, registered only
+# when WHISPER_ALOUD_TEST_MODE=1 is set at *import time* (module-import-time
+# decision, not a `hidden` flag filtered by entries()/engines()/models_for()
+# -- see design doc rationale). This means a production install -- where the
+# env var is never set -- never has "fake" in ENGINE_MODELS at all, so
+# config.validate() rejects it exactly like any other unknown engine, even
+# if an attacker-controlled config.json sets model.engine="fake".
+if os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1":
+    _ENTRIES = _ENTRIES + (
+        ModelEntry(
+            engine="fake",
+            name="fake",
+            label="Fake (test only)",
+            size_mb=0,
+            languages=None,
+            streaming=False,
+            license="N/A",
+            devices=("cpu",),
+            tier="fast",
+            recommended=False,
+            notes="Deterministic test double — reads a sidecar .txt next to a "
+            "fixture WAV. Never shown to real users.",
+        ),
+    )
+    ENGINES["fake"] = "Fake (test only)"
 
 
 def entries() -> tuple[ModelEntry, ...]:

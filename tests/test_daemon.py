@@ -102,6 +102,7 @@ def _make_daemon(indicator_fails=False, hotkey_fails=False):
          patch.object(daemon_module, "HistoryManager"), \
          patch.object(daemon_module, "ClipboardManager"), \
          patch.object(daemon_module, "WindowManager"), \
+         patch.object(daemon_module, "build_clipboard_manager"), \
          patch.object(daemon_module, "WhisperAloudIndicator") as mock_ind_cls, \
          patch.object(daemon_module, "HotkeyManager") as mock_hk_cls, \
          patch.object(daemon_module, "GLib") as mock_glib:
@@ -655,6 +656,7 @@ class TestRecorderInitialization:
             patch.object(daemon_module, "HistoryManager"),
             patch.object(daemon_module, "ClipboardManager"),
             patch.object(daemon_module, "WindowManager"),
+            patch.object(daemon_module, "build_clipboard_manager"),
             patch.object(daemon_module, "WhisperAloudIndicator"),
             patch.object(daemon_module, "HotkeyManager") as mock_hk_cls,
             patch.object(daemon_module, "GLib") as mock_glib,
@@ -812,6 +814,7 @@ class TestPortalTouchedOnlyAfterBusNameOwned:
              patch.object(daemon_module, "HistoryManager"), \
              patch.object(daemon_module, "ClipboardManager"), \
              patch.object(daemon_module, "WindowManager"), \
+             patch.object(daemon_module, "build_clipboard_manager"), \
              patch.object(daemon_module, "WhisperAloudIndicator"), \
              patch.object(daemon_module, "HotkeyManager", side_effect=_hotkey_manager_ctor), \
              patch.object(daemon_module, "GLib") as mock_glib:
@@ -871,3 +874,97 @@ class TestServiceRunBusHandoff:
                 daemon.run()
 
         mock_cleanup.assert_not_called()
+
+
+class TestWhisperAloudTestMode:
+    """WHISP-46 orchestrator amendment 2: WHISPER_ALOUD_TEST_MODE=1 must be a
+    hard prerequisite for the e2e harness -- constructing the service under
+    it must perform no subprocess call and open no portal proxy, regardless
+    of DISPLAY/WAYLAND_DISPLAY/config, by skipping the indicator, hotkey
+    manager, and notifications entirely (defense in depth on top of each
+    component's own env-var-driven degradation)."""
+
+    def _build(self, monkeypatch, **env):
+        """Construct a WhisperAloudService with WHISPER_ALOUD_TEST_MODE=1 and
+        every external dependency mocked, returning (service, mocks)."""
+        stub_modules = _build_stub_modules()
+        daemon_module = _import_daemon_module(stub_modules)
+        env.setdefault("DISPLAY", ":0")
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+        env.setdefault("XDG_SESSION_TYPE", "wayland")
+        env["WHISPER_ALOUD_TEST_MODE"] = "1"
+        with patch.dict(sys.modules, stub_modules), \
+             patch.dict("os.environ", env, clear=False), \
+             patch.object(daemon_module, "SessionBus"), \
+             patch.object(daemon_module, "AudioRecorder"), \
+             patch.object(daemon_module, "create_engine"), \
+             patch.object(daemon_module, "NotificationManager") as mock_notify_cls, \
+             patch.object(daemon_module, "HistoryManager"), \
+             patch.object(daemon_module, "ClipboardManager"), \
+             patch.object(daemon_module, "WhisperAloudIndicator") as mock_ind_cls, \
+             patch.object(daemon_module, "HotkeyManager") as mock_hk_cls, \
+             patch("subprocess.Popen") as mock_popen, \
+             patch("subprocess.run") as mock_run, \
+             patch.object(daemon_module, "GLib") as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            mock_glib.idle_add = lambda fn, *args: fn(*args)
+            mock_glib.SOURCE_REMOVE = False
+
+            config = WhisperAloudConfig()
+            service = daemon_module.WhisperAloudService(config=config)
+            mocks = {
+                "indicator_cls": mock_ind_cls,
+                "hotkey_cls": mock_hk_cls,
+                "notify_cls": mock_notify_cls,
+                "popen": mock_popen,
+                "run": mock_run,
+            }
+            return service, mocks
+
+    def test_no_indicator_hotkey_or_notifications_under_test_mode(self, monkeypatch):
+        """Defense in depth: even with a full GUI-looking env (DISPLAY,
+        WAYLAND_DISPLAY, XDG_SESSION_TYPE=wayland, which would otherwise let
+        the indicator/portal paths run), TEST_MODE must skip all three."""
+        service, mocks = self._build(monkeypatch)
+
+        assert service.indicator is None
+        assert service.hotkey_manager is None
+        assert service.notifications is None
+        assert service.window_manager is None
+        mocks["indicator_cls"].assert_not_called()
+        mocks["hotkey_cls"].assert_not_called()
+        mocks["notify_cls"].assert_not_called()
+
+    def test_no_subprocess_call_under_test_mode(self, monkeypatch):
+        """Constructing the service must perform no subprocess call at all --
+        this is the exact unit test the orchestrator amendment requires."""
+        service, mocks = self._build(monkeypatch)
+
+        mocks["popen"].assert_not_called()
+        mocks["run"].assert_not_called()
+        # GainController's own wpctl probe must also be skipped (WHISP-46 Task 2).
+        assert service._gain._wpctl is None
+
+    def test_get_status_reports_hotkey_backend_none_under_test_mode(self, monkeypatch):
+        service, _ = self._build(monkeypatch)
+        status = service.GetStatus()
+        assert status["hotkey_backend"] == "none"
+
+    def test_clipboard_manager_is_test_stub_and_copy_makes_no_subprocess_call(self, monkeypatch):
+        """WHISP-46 incident: a real e2e run overwrote the operator's real
+        Wayland clipboard via a real ClipboardManager. Under TEST_MODE, the
+        daemon's clipboard_manager must be the subprocess-free stub, and
+        copying text through it (as _transcribe_and_emit does on success)
+        must make zero subprocess calls even with subprocess.run/Popen
+        patched to raise."""
+        from whisper_aloud.clipboard import TestClipboardStub
+
+        service, _ = self._build(monkeypatch)
+        assert isinstance(service.clipboard_manager, TestClipboardStub)
+
+        def _boom(*a, **k):
+            raise AssertionError("must not call subprocess under TEST_MODE")
+
+        with patch("subprocess.run", side_effect=_boom), \
+             patch("subprocess.Popen", side_effect=_boom):
+            assert service.clipboard_manager.copy("the quick brown fox") is True

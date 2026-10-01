@@ -129,7 +129,12 @@ def make_daemon(
     stack.enter_context(patch.object(daemon_module, "create_engine"))
     stack.enter_context(patch.object(daemon_module, "NotificationManager"))
     stack.enter_context(patch.object(daemon_module, "HistoryManager"))
+    # daemon.py constructs the clipboard through build_clipboard_manager()
+    # (WHISP-46), not ClipboardManager directly -- patch both names so a
+    # real ClipboardManager is never constructed, and importantly never
+    # *called*, regardless of which one daemon.py currently references.
     stack.enter_context(patch.object(daemon_module, "ClipboardManager"))
+    stack.enter_context(patch.object(daemon_module, "build_clipboard_manager"))
     stack.enter_context(patch.object(daemon_module, "WindowManager"))
     mock_ind_cls = stack.enter_context(patch.object(daemon_module, "WhisperAloudIndicator"))
     mock_hk_cls = stack.enter_context(patch.object(daemon_module, "HotkeyManager"))

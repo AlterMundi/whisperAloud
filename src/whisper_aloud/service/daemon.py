@@ -14,7 +14,12 @@ from pydbus import SessionBus
 from pydbus.generic import signal
 
 from ..audio.recorder import AudioRecorder
-from ..clipboard import ClipboardManager, WindowManager
+from ..clipboard import (  # noqa: F401 -- ClipboardManager/TestClipboardStub kept importable
+    ClipboardManager,       # here only so existing tests can still patch daemon_module.ClipboardManager;
+    TestClipboardStub,      # actual construction always goes through build_clipboard_manager() below.
+    WindowManager,
+    build_clipboard_manager,
+)
 from ..config import WhisperAloudConfig, detect_config_changes
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
@@ -203,6 +208,17 @@ class WhisperAloudService:
         self._bus = bus
         self._name_owner = name_owner
 
+        # WHISP-46 e2e harness: under WHISPER_ALOUD_TEST_MODE=1, skip the tray
+        # indicator, hotkey manager, notifications, and media control
+        # (MPRIS/GainController) entirely -- defense in depth on top of each
+        # component's own env-driven degradation, so a test that happens to
+        # set DISPLAY/WAYLAND_DISPLAY/XDG_SESSION_TYPE (or a bad config) can
+        # never make the daemon open a real indicator, contact the real
+        # hotkey portal, pause a real media player, or construct real
+        # notifications. Computed first, before _init_components(), since
+        # that method also needs it (MprisController).
+        self._test_mode = os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1"
+
         # Core components
         self.recorder: Optional[AudioRecorder] = None
         self.transcriber: Optional[SpeechEngine] = None
@@ -233,7 +249,10 @@ class WhisperAloudService:
 
         # Initialize system tray indicator only when a GUI session is available.
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-        if has_display:
+        if self._test_mode:
+            logger.info("WHISPER_ALOUD_TEST_MODE=1: tray indicator disabled")
+            self.indicator = None
+        elif has_display:
             try:
                 gtk_ready = True
                 # AyatanaAppIndicator3 needs GTK3 initialized for menu rendering.
@@ -267,26 +286,34 @@ class WhisperAloudService:
             logger.info("No DISPLAY/WAYLAND_DISPLAY; skipping tray indicator")
             self.indicator = None
 
-        # Initialize hotkey manager
-        try:
-            self.hotkey_manager = HotkeyManager()
-            if self.hotkey_manager.available:
-                self.hotkey_manager.register(
-                    self.config.hotkey.toggle_recording,
-                    self._safe_toggle,
-                )
-                logger.info(f"Hotkey registered: {self.config.hotkey.toggle_recording} (backend: {self.hotkey_manager.backend})")
-            else:
-                logger.info("No hotkey backend available, D-Bus methods only")
-        except Exception as e:
-            logger.warning(f"Failed to initialize hotkey manager: {e}")
+        # Initialize hotkey manager (skipped entirely in test mode -- no
+        # portal contact at all, not even a check, per WHISP-46).
+        if self._test_mode:
+            logger.info("WHISPER_ALOUD_TEST_MODE=1: hotkeys disabled, D-Bus methods only")
             self.hotkey_manager = None
+        else:
+            try:
+                self.hotkey_manager = HotkeyManager()
+                if self.hotkey_manager.available:
+                    self.hotkey_manager.register(
+                        self.config.hotkey.toggle_recording,
+                        self._safe_toggle,
+                    )
+                    logger.info(f"Hotkey registered: {self.config.hotkey.toggle_recording} (backend: {self.hotkey_manager.backend})")
+                else:
+                    logger.info("No hotkey backend available, D-Bus methods only")
+            except Exception as e:
+                logger.warning(f"Failed to initialize hotkey manager: {e}")
+                self.hotkey_manager = None
 
-        # Initialize notifications
-        try:
-            self.notifications = NotificationManager(self.config)
-        except Exception as e:
-            logger.warning(f"Failed to initialize notifications: {e}")
+        # Initialize notifications (skipped entirely in test mode).
+        if self._test_mode:
+            logger.info("WHISPER_ALOUD_TEST_MODE=1: notifications disabled")
+        else:
+            try:
+                self.notifications = NotificationManager(self.config)
+            except Exception as e:
+                logger.warning(f"Failed to initialize notifications: {e}")
 
         # Initialize history manager for persistence
         self.history_manager = HistoryManager(self.config.persistence)
@@ -294,14 +321,26 @@ class WhisperAloudService:
         self._start_time = time.monotonic()
         logger.info(f"Daemon session ID: {self.session_id}")
 
-        # Initialize clipboard manager
+        # Initialize clipboard manager via the single tested factory
+        # (build_clipboard_manager), which returns a TestClipboardStub under
+        # WHISPER_ALOUD_TEST_MODE=1 and a real ClipboardManager otherwise --
+        # branching here directly, instead of delegating to the factory
+        # tests/test_clipboard.py exercises, previously let the real
+        # ClipboardManager through in test mode (WHISP-46 incident: it
+        # overwrote the operator's real Wayland clipboard even with
+        # WAYLAND_DISPLAY unset).
         try:
-            self.clipboard_manager = ClipboardManager(self.config.clipboard)
+            self.clipboard_manager = build_clipboard_manager(self.config.clipboard)
         except Exception as e:
             logger.warning(f"Failed to initialize clipboard: {e}")
             self.clipboard_manager = None
 
-        self.window_manager = WindowManager()
+        # WindowManager._detect_backend() probes a real `xdotool` subprocess
+        # at construction time -- skip it entirely in test mode (WHISP-46).
+        if self._test_mode:
+            self.window_manager = None
+        else:
+            self.window_manager = WindowManager()
         self._captured_by_job: dict = {}  # job_id → WindowInfo
 
         logger.info("WhisperAloudService initialized")
@@ -448,7 +487,7 @@ class WhisperAloudService:
             job_id = uuid.uuid4().hex
 
             # Capture active window for targeted paste
-            if self.config.clipboard.paste_to_captured_window:
+            if self.window_manager and self.config.clipboard.paste_to_captured_window:
                 try:
                     captured = self.window_manager.get_active_window()
                     if captured:
@@ -766,7 +805,7 @@ class WhisperAloudService:
         """
         # Capture window immediately (before marshalling to main thread)
         job_id = uuid.uuid4().hex
-        if self.config.clipboard.paste_to_captured_window:
+        if self.window_manager and self.config.clipboard.paste_to_captured_window:
             try:
                 captured = self.window_manager.get_active_window()
                 if captured:
@@ -876,6 +915,7 @@ class WhisperAloudService:
                         logger.warning(f"Failed to copy to clipboard: {e}")
                 if (self.config.clipboard.auto_copy
                         and self.config.clipboard.auto_paste
+                        and not self._test_mode
                         and self.clipboard_manager
                         and result.text):
                     try:

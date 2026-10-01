@@ -40,3 +40,13 @@ def test_create_engine_returns_parakeet_for_parakeet():
     engine = create_engine(config)
     assert isinstance(engine, ParakeetSpeechEngine)
     assert isinstance(engine, SpeechEngine)
+
+
+def test_create_engine_dispatches_fake(monkeypatch):
+    """engine="fake" dispatches to FakeSpeechEngine (WHISP-46 e2e harness)."""
+    config = WhisperAloudConfig()
+    config.model.engine = "fake"
+    config.model.name = "fake"
+    from whisper_aloud.stt.fake_engine import FakeSpeechEngine
+
+    assert isinstance(create_engine(config), FakeSpeechEngine)
