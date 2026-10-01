@@ -24,6 +24,7 @@ from .main_window_logic import (
     should_enter_transcribing,
     should_restore_transcribing_after_cancel,
 )
+from .partial_view_logic import PartialViewState
 from .settings_dialog import SettingsDialog
 from .shortcuts_window import ShortcutsWindow
 from .sound_feedback import SoundFeedback
@@ -55,6 +56,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._current_entry_id: Optional[int] = None
         self._edit_save_timer_id: int = 0
         self._buffer_changed_handler_id: int = 0
+
+        # Live partial-transcript view state (WHISP-58); only advanced by a
+        # streaming engine's PartialTranscript signal, see partial_view_logic.py
+        self._partial_view = PartialViewState()
 
         # D-Bus client (replaces direct component access)
         from ..service.client import WhisperAloudClient
@@ -378,6 +383,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.client.on_transcription_ready(self._on_daemon_transcription_ready)
         self.client.on_level_update(self._on_daemon_level_update)
         self.client.on_error(self._on_daemon_error)
+        self.client.on_partial_transcript(self._on_daemon_partial_transcript)
 
         # Watch for daemon restart (auto-reconnect)
         self.client.watch_name(
@@ -667,6 +673,10 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         logger.info(f"Transcription received: {len(text)} characters")
 
+        # Final text supersedes any partial view for this session (or clears
+        # tracking entirely for a batch engine that never streamed partials).
+        self._partial_view.on_transcription_ready(text, meta)
+
         # Display transcription text — block "changed" signal while loading to
         # avoid arming the debounce timer against the outgoing entry_id.
         buffer = self.text_view.get_buffer()
@@ -696,6 +706,50 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return False
 
+    def _on_daemon_partial_transcript(
+        self, session_id: str, committed: str, tentative: str, seq: int
+    ) -> None:
+        """Handle PartialTranscript signal from daemon (streaming engines only)."""
+        GLib.idle_add(self._handle_partial_transcript, session_id, committed, tentative, seq)
+
+    def _handle_partial_transcript(
+        self, session_id: str, committed: str, tentative: str, seq: int
+    ) -> bool:
+        """
+        Process a live partial transcript update on the main thread.
+
+        Args:
+            session_id: Recording session this partial belongs to.
+            committed: Stable prefix text.
+            tentative: Unstable in-flight tail text.
+            seq: Monotonically increasing sequence number for this session.
+
+        Returns:
+            False to remove this idle callback.
+        """
+        self._partial_view.on_partial_transcript(session_id, committed, tentative, seq)
+        self._render_partial_transcript()
+        return False
+
+    def _render_partial_transcript(self) -> None:
+        """Render the tracked (committed, tentative) partial text into the
+        transcription view: committed text normal, tentative text dimmed.
+
+        Uses Gtk.TextBuffer.insert_markup with GLib.markup_escape_text on both
+        pieces of text first, so engine output is never interpreted as markup.
+        """
+        committed, tentative = self._partial_view.render()
+        buffer = self.text_view.get_buffer()
+
+        markup = GLib.markup_escape_text(committed)
+        if tentative:
+            markup += f'<span alpha="55%">{GLib.markup_escape_text(tentative)}</span>'
+
+        buffer.handler_block(self._buffer_changed_handler_id)
+        buffer.set_text("")
+        buffer.insert_markup(buffer.get_end_iter(), markup, -1)
+        buffer.handler_unblock(self._buffer_changed_handler_id)
+
     def _on_daemon_level_update(self, level: float) -> None:
         """Handle LevelUpdate signal from daemon."""
         GLib.idle_add(self.level_meter.update_level, level, level, 0.0)
@@ -717,6 +771,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         logger.error(f"Daemon error [{code}]: {message}")
         self.status_bar.set_status(f"Error: {message}")
+        self._partial_view.reset()
         self.set_state(AppState.ERROR)
         return False
 
@@ -845,8 +900,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.set_state(AppState.ERROR)
                 return
 
-            # Reset level meter
+            # Reset level meter and any leftover partial-transcript tracking from
+            # a previous session before starting a new one.
             self.level_meter.reset()
+            self._partial_view.reset()
 
             success = self.client.start_recording()
             if success:
@@ -936,6 +993,10 @@ class MainWindow(Gtk.ApplicationWindow):
             logger.warning("CancelRecording rejected while transcribing")
             self.status_bar.set_status("Cancel not available")
             self.set_state(AppState.TRANSCRIBING)
+        else:
+            # No TranscriptionReady will follow for this session; drop any
+            # leftover partial-transcript tracking so it can't leak into the next.
+            self._partial_view.reset()
 
     # ─── Clipboard ────────────────────────────────────────────────────────
 
