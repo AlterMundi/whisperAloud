@@ -189,3 +189,40 @@ def test_nemotron_streaming_engine_is_wired_into_engine_models():
 
 def test_nemotron_streaming_not_in_engines_picker_pending_license_review():
     assert "nemotron-streaming" not in catalog.ENGINES
+
+
+# ── WHISP-56 CHANGES_REQUIRED item 4: ModelEntry.needs_review ───────────────
+
+
+def test_needs_review_defaults_to_false():
+    for entry in catalog.entries():
+        if entry.engine != "nemotron-streaming":
+            assert entry.needs_review is False, entry
+
+
+def test_nemotron_streaming_needs_review_is_true():
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    assert entry.needs_review is True
+
+
+def test_recommended_never_returns_a_needs_review_entry(monkeypatch):
+    """Defensive invariant: even if an entry were both recommended and
+    needs_review, recommended() must skip it (WHISP-56 audit item 4)."""
+    from whisper_aloud.stt.catalog import ModelEntry
+
+    fake_entry = ModelEntry(
+        engine="fake-pending-engine",
+        name="fake-model",
+        label="Fake pending-review model",
+        size_mb=1,
+        languages=None,
+        streaming=False,
+        license="Fake",
+        devices=("cpu",),
+        tier="fast",
+        recommended=True,
+        needs_review=True,
+    )
+    monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (fake_entry,))
+    with pytest.raises(LookupError):
+        catalog.recommended(engine="fake-pending-engine")
