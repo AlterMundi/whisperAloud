@@ -240,6 +240,14 @@ class SignalCapture:
 
     def __init__(self, client: WhisperAloudClient, signal_name: str):
         self._received: list[tuple] = []
+        # Cursor into _received, persisted ACROSS wait() calls (bugfix: this
+        # used to be a local reset to 0 on every call, which made a second
+        # wait() on the same capture always re-match the first signal ever
+        # seen instead of advancing to the next one -- harmless for a single
+        # wait() per capture, but an effectively infinite busy-loop for any
+        # test polling "no further matching signal arrives", since a
+        # matching predicate against stale data returns instantly, forever).
+        self._checked = 0
         subscribe = getattr(client, f"on_{_to_snake(signal_name)}", None)
         if subscribe is None:
             raise AttributeError(f"WhisperAloudClient has no subscriber for {signal_name!r}")
@@ -250,13 +258,12 @@ class SignalCapture:
 
         deadline = time.monotonic() + timeout
         context = GLib.MainContext.default()
-        checked = 0
         while time.monotonic() < deadline:
             while context.pending():
                 context.iteration(False)
-            while checked < len(self._received):
-                args = self._received[checked]
-                checked += 1
+            while self._checked < len(self._received):
+                args = self._received[self._checked]
+                self._checked += 1
                 if predicate is None or predicate(*args):
                     return args
             time.sleep(0.01)
