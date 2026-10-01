@@ -65,14 +65,16 @@ class PartialViewState:
         self._committed = committed
         self._tentative = tentative
 
-    def on_transcription_ready(self, text: str, meta: Optional[Mapping[str, Any]]) -> None:
+    def on_transcription_ready(self, text: str, meta: Optional[Mapping[str, Any]]) -> bool:
         """Process a TranscriptionReady(text, meta) signal.
 
         When `meta["session_id"]` matches the session currently being tracked (or
         there is nothing being tracked yet, e.g. a batch engine that never streamed
         partials), replaces the view with the final `text` and clears partial
-        tracking. When it mismatches an actively tracked session, the event is
-        ignored for the partial view (a stale signal from a superseded session).
+        tracking, returning True. When it mismatches an actively tracked session,
+        the event is ignored for the partial view (a stale signal from a superseded
+        session, e.g. a cancel-then-restart race) and this returns False — callers
+        should not render that stale text over the session now being tracked.
         """
         meta_session_id = meta.get("session_id") if isinstance(meta, Mapping) else None
 
@@ -81,9 +83,10 @@ class PartialViewState:
             and meta_session_id is not None
             and meta_session_id != self._session_id
         ):
-            return  # stale TranscriptionReady for a session we've moved on from
+            return False  # stale TranscriptionReady for a session we've moved on from
 
         self._session_id = None
         self._last_seq = None
         self._committed = text
         self._tentative = ""
+        return True

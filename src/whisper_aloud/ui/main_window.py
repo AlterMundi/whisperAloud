@@ -674,8 +674,17 @@ class MainWindow(Gtk.ApplicationWindow):
         logger.info(f"Transcription received: {len(text)} characters")
 
         # Final text supersedes any partial view for this session (or clears
-        # tracking entirely for a batch engine that never streamed partials).
-        self._partial_view.on_transcription_ready(text, meta)
+        # tracking entirely for a batch engine that never streamed partials). A
+        # mismatching session_id means this is a stale signal from a session we've
+        # moved on from (e.g. a cancel-then-restart race) — don't let it clobber
+        # whatever newer session is now being displayed/recorded.
+        if not self._partial_view.on_transcription_ready(text, meta):
+            logger.info(
+                "Ignoring stale TranscriptionReady for a superseded session: %r", meta
+            )
+            if hasattr(self, "history_panel"):
+                self.history_panel.refresh_recent()
+            return False
 
         # Display transcription text — block "changed" signal while loading to
         # avoid arming the debounce timer against the outgoing entry_id.
@@ -743,7 +752,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         markup = GLib.markup_escape_text(committed)
         if tentative:
-            markup += f'<span alpha="55%">{GLib.markup_escape_text(tentative)}</span>'
+            # GTK's TextBuffer.insert_markup only converts a handful of Pango
+            # attributes into GtkTextTags; "alpha" alone is dropped, so dim via a
+            # muted foreground color (GNOME's standard "dim-label" gray) instead.
+            markup += (
+                '<span foreground="#9a9996">'
+                f"{GLib.markup_escape_text(tentative)}</span>"
+            )
 
         buffer.handler_block(self._buffer_changed_handler_id)
         buffer.set_text("")

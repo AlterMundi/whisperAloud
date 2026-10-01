@@ -52,7 +52,8 @@ def test_ignores_duplicate_seq():
 def test_transcription_ready_matching_session_replaces_and_clears():
     state = PartialViewState()
     state.on_partial_transcript("sess-1", "Hello ", "wor", 1)
-    state.on_transcription_ready("Hello world.", {"session_id": "sess-1"})
+    applied = state.on_transcription_ready("Hello world.", {"session_id": "sess-1"})
+    assert applied is True
     assert state.render() == ("Hello world.", "")
     # Partial state fully cleared: there is no tracked session any more, so the
     # very next partial observed (whatever its session_id) is adopted fresh rather
@@ -64,7 +65,10 @@ def test_transcription_ready_matching_session_replaces_and_clears():
 def test_transcription_ready_mismatching_session_ignored_for_partial_view():
     state = PartialViewState()
     state.on_partial_transcript("sess-1", "Hello ", "wor", 1)
-    state.on_transcription_ready("Unrelated final text", {"session_id": "sess-other"})
+    applied = state.on_transcription_ready(
+        "Unrelated final text", {"session_id": "sess-other"}
+    )
+    assert applied is False
     # Must not touch the partial view at all.
     assert state.render() == ("Hello ", "wor")
 
@@ -73,20 +77,23 @@ def test_transcription_ready_without_prior_partial_still_applies():
     """Batch (non-streaming) engines never emit PartialTranscript; TranscriptionReady
     must still populate the view with the final text."""
     state = PartialViewState()
-    state.on_transcription_ready("Final text from batch engine.", {"session_id": "sess-1"})
+    applied = state.on_transcription_ready(
+        "Final text from batch engine.", {"session_id": "sess-1"}
+    )
+    assert applied is True
     assert state.render() == ("Final text from batch engine.", "")
 
 
 def test_transcription_ready_with_missing_meta_session_id_still_applies():
     state = PartialViewState()
     state.on_partial_transcript("sess-1", "Hello ", "wor", 1)
-    state.on_transcription_ready("Final text", {})
+    assert state.on_transcription_ready("Final text", {}) is True
     assert state.render() == ("Final text", "")
 
 
 def test_transcription_ready_with_non_dict_meta_still_applies():
     state = PartialViewState()
-    state.on_transcription_ready("Final text", None)
+    assert state.on_transcription_ready("Final text", None) is True
     assert state.render() == ("Final text", "")
 
 
