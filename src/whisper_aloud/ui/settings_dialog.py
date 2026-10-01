@@ -296,8 +296,12 @@ class SettingsDialog(Gtk.Window):
 
         self.device_row = Adw.ComboRow()
         self.device_row.set_title("Device")
-        self.device_row.set_model(Gtk.StringList.new(["CPU", "CUDA (GPU)"]))
-        self.device_row.set_selected(1 if self._config.model.device == "cuda" else 0)
+        # Order must match model_picker_logic._DEVICE_OPTIONS = ("auto", "cpu", "cuda").
+        # "auto" previously had no row option and was silently coerced to "cpu" on
+        # Save (WHISP-42 audit MEDIUM #5) — it's now a first-class, round-trippable
+        # choice.
+        self.device_row.set_model(Gtk.StringList.new(["Auto", "CPU", "CUDA (GPU)"]))
+        self.device_row.set_selected(device_row_index(self._config.model.device))
         self.advanced_row.add_row(self.device_row)
 
         self.compute_type_row = Adw.ComboRow()
@@ -1290,10 +1294,7 @@ class SettingsDialog(Gtk.Window):
                 self._config.model.engine = engine
                 self._config.model.name = name
 
-            devices = ["cpu", "cuda"]
-            selected_compute_idx = self.device_row.get_selected()
-            if selected_compute_idx != -1 and selected_compute_idx < len(devices):
-                self._config.model.device = devices[selected_compute_idx]
+            self._config.model.device = device_for_index(self.device_row.get_selected())
 
             compute_types = ["int8", "float16", "float32"]
             selected_compute_type_idx = self.compute_type_row.get_selected()
