@@ -181,12 +181,23 @@ class TestWhisperAloudClient:
         assert isinstance(result, dict)
 
     def test_set_config_calls_daemon(self):
-        """set_config should call proxy.SetConfig with changes dict."""
-        _, client, _, mock_proxy = self._make_client()
+        """set_config should call proxy.SetConfig with each value wrapped as
+        a GLib.Variant (a{sv}), not the raw Python value -- pydbus rejects a
+        plain dict for an a{sv} argument."""
+        client_module, client, _, mock_proxy = self._make_client()
         mock_proxy.SetConfig.return_value = True
         result = client.set_config({"model.name": "small"})
-        mock_proxy.SetConfig.assert_called_once_with({"model.name": "small"})
+        expected = client_module._wrap_config_changes({"model.name": "small"})
+        mock_proxy.SetConfig.assert_called_once_with(expected)
         assert result is True
+
+    def test_set_config_rejects_unsupported_value_type(self):
+        """An unsupported value type must not reach the proxy; set_config
+        should report the TypeError the same way as any other failure."""
+        _, client, _, mock_proxy = self._make_client()
+        result = client.set_config({"bad.key": ["not", "a", "scalar"]})
+        mock_proxy.SetConfig.assert_not_called()
+        assert result is False
 
     def test_reload_config_calls_daemon(self):
         """reload_config should call proxy.ReloadConfig."""
