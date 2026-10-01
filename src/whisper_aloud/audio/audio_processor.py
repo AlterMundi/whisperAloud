@@ -159,6 +159,14 @@ class AGC:
         self.release_ms = release_ms
         self.window_ms = window_ms
         self._current_gain = 1.0
+        # Rolling history of raw samples from the tail of the previous process()
+        # call, used to seed the RMS window so chunked processing matches
+        # one-shot processing (see WHISP-65 / WHISP-34 finding: AGC used to
+        # recompute its RMS window from scratch on every call, with no memory
+        # of prior audio, which made chunked output diverge sharply from
+        # one-shot output). Starts empty, so the very first call (or a
+        # single one-shot call) behaves exactly as before.
+        self._history = np.empty(0, dtype=np.float64)
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply AGC to audio chunk.
@@ -166,6 +174,12 @@ class AGC:
         Uses a sliding RMS window to estimate signal level, then smoothly
         adjusts gain toward the target level. Attack (gain decrease) is faster
         than release (gain increase) to prevent clipping on transients.
+
+        The RMS window is seeded with up to ``window_samples - 1`` trailing
+        samples from the previous call (``self._history``), so splitting a
+        signal into chunks and calling ``process()`` repeatedly reproduces the
+        same per-sample RMS values as a single one-shot call over the whole
+        signal — this is what makes the pipeline streaming-safe (WHISP-65).
         """
         if audio.size == 0:
             return audio
@@ -175,17 +189,30 @@ class AGC:
         attack_coeff = np.exp(-1.0 / max(1.0, self.attack_ms * sample_rate / 1000.0))
         release_coeff = np.exp(-1.0 / max(1.0, self.release_ms * sample_rate / 1000.0))
 
-        # Precompute per-sample RMS using cumulative sum (O(n))
-        sq = audio.astype(np.float64) ** 2
+        # Prepend rolling history so the windowed RMS at the start of this
+        # chunk sees the same trailing samples a one-shot call would have.
+        history = self._history
+        h = len(history)
+        combined = np.concatenate([history, audio.astype(np.float64)])
+        m = len(combined)
+
+        # Precompute per-sample RMS over (history + chunk) using cumulative sum (O(m))
+        sq = combined ** 2
         cumsum = np.cumsum(sq)
-        rms_arr = np.empty(n, dtype=np.float64)
-        if n <= window_samples:
-            rms_arr[:] = np.sqrt(cumsum / np.arange(1, n + 1))
+        rms_full = np.empty(m, dtype=np.float64)
+        if m <= window_samples:
+            rms_full[:] = np.sqrt(cumsum / np.arange(1, m + 1))
         else:
-            rms_arr[:window_samples] = np.sqrt(cumsum[:window_samples] / np.arange(1, window_samples + 1))
-            rms_arr[window_samples:] = np.sqrt(
+            rms_full[:window_samples] = np.sqrt(cumsum[:window_samples] / np.arange(1, window_samples + 1))
+            rms_full[window_samples:] = np.sqrt(
                 (cumsum[window_samples:] - cumsum[:-window_samples]) / window_samples
             )
+        # Only the portion covering this call's own samples is relevant below.
+        rms_arr = rms_full[h:]
+
+        # Keep up to window_samples-1 trailing raw samples for the next call.
+        keep = min(max(window_samples - 1, 0), m)
+        self._history = combined[m - keep:] if keep > 0 else np.empty(0, dtype=np.float64)
 
         # Compute desired gain per sample (vectorized)
         desired_gain = np.where(
