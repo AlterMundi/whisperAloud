@@ -599,3 +599,74 @@ class TestSmoke:
         assert result is True
         assert fallback_path.exists()
         assert "Integration test text" in fallback_path.read_text(encoding="utf-8")
+
+
+class TestClipboardManagerFactoryTestMode:
+    """WHISP-46 incident follow-up: a real e2e run overwrote the operator's
+    real Wayland clipboard because unsetting WAYLAND_DISPLAY alone does not
+    stop ClipboardManager.detect_session_type() from falling back to
+    scanning $XDG_RUNTIME_DIR for a real wayland-* socket, nor stop wl-copy
+    itself from connecting to the real compositor by default. Under
+    WHISPER_ALOUD_TEST_MODE=1, build_clipboard_manager() must return a
+    TestClipboardStub that makes zero subprocess calls, ever -- not a real
+    ClipboardManager with a session type that happens to resolve to
+    'unknown'."""
+
+    def test_build_clipboard_manager_returns_stub_in_test_mode(self, monkeypatch):
+        from whisper_aloud.clipboard import TestClipboardStub, build_clipboard_manager
+
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+        config = ClipboardConfig()
+        manager = build_clipboard_manager(config)
+        assert isinstance(manager, TestClipboardStub)
+
+    def test_build_clipboard_manager_returns_real_manager_without_test_mode(self, monkeypatch):
+        from whisper_aloud.clipboard import build_clipboard_manager
+
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        config = ClipboardConfig()
+        manager = build_clipboard_manager(config)
+        assert isinstance(manager, ClipboardManager)
+
+    def test_stub_copy_makes_zero_subprocess_calls(self, monkeypatch):
+        """Even with a real wayland-* socket present (simulating the exact
+        incident), the stub must never shell out."""
+        from whisper_aloud.clipboard import TestClipboardStub
+
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+
+        def _boom(*a, **k):
+            raise AssertionError("TestClipboardStub must never call subprocess.run/Popen")
+
+        monkeypatch.setattr(subprocess, "run", _boom)
+        monkeypatch.setattr(subprocess, "Popen", _boom)
+
+        stub = TestClipboardStub(ClipboardConfig())
+        assert stub.copy("hello") is True
+
+    def test_stub_records_copied_text_to_env_file(self, monkeypatch, tmp_path):
+        from whisper_aloud.clipboard import TestClipboardStub
+
+        target = tmp_path / "clipboard.txt"
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_CLIPBOARD_FILE", str(target))
+
+        stub = TestClipboardStub(ClipboardConfig())
+        stub.copy("the quick brown fox")
+
+        assert target.read_text(encoding="utf-8").strip() == "the quick brown fox"
+        assert stub.copied == ["the quick brown fox"]
+
+    def test_stub_without_env_file_still_records_in_memory(self):
+        from whisper_aloud.clipboard import TestClipboardStub
+
+        stub = TestClipboardStub(ClipboardConfig())
+        assert stub.copy("no file configured") is True
+        assert stub.copied == ["no file configured"]
+
+    def test_stub_rejects_empty_text(self):
+        from whisper_aloud.clipboard import TestClipboardStub
+
+        stub = TestClipboardStub(ClipboardConfig())
+        assert stub.copy("") is False
+        assert stub.copied == []

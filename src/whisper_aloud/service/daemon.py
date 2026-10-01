@@ -14,7 +14,7 @@ from pydbus import SessionBus
 from pydbus.generic import signal
 
 from ..audio.recorder import AudioRecorder
-from ..clipboard import ClipboardManager, WindowManager
+from ..clipboard import ClipboardManager, TestClipboardStub, WindowManager
 from ..config import WhisperAloudConfig, detect_config_changes
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
@@ -313,12 +313,21 @@ class WhisperAloudService:
         self._start_time = time.monotonic()
         logger.info(f"Daemon session ID: {self.session_id}")
 
-        # Initialize clipboard manager
-        try:
-            self.clipboard_manager = ClipboardManager(self.config.clipboard)
-        except Exception as e:
-            logger.warning(f"Failed to initialize clipboard: {e}")
-            self.clipboard_manager = None
+        # Initialize clipboard manager. Under test mode, use a stub that never
+        # shells out to wl-copy/xclip/xsel/gio -- a real ClipboardManager was
+        # found (WHISP-46 incident) to overwrite the operator's real Wayland
+        # clipboard even with WAYLAND_DISPLAY unset, because
+        # detect_session_type() falls back to scanning $XDG_RUNTIME_DIR for a
+        # real wayland-* socket, and wl-copy itself defaults to the real
+        # compositor when not told otherwise.
+        if self._test_mode:
+            self.clipboard_manager = TestClipboardStub(self.config.clipboard)
+        else:
+            try:
+                self.clipboard_manager = ClipboardManager(self.config.clipboard)
+            except Exception as e:
+                logger.warning(f"Failed to initialize clipboard: {e}")
+                self.clipboard_manager = None
 
         # WindowManager._detect_backend() probes a real `xdotool` subprocess
         # at construction time -- skip it entirely in test mode (WHISP-46).

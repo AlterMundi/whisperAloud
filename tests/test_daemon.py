@@ -946,3 +946,22 @@ class TestWhisperAloudTestMode:
         service, _ = self._build(monkeypatch)
         status = service.GetStatus()
         assert status["hotkey_backend"] == "none"
+
+    def test_clipboard_manager_is_test_stub_and_copy_makes_no_subprocess_call(self, monkeypatch):
+        """WHISP-46 incident: a real e2e run overwrote the operator's real
+        Wayland clipboard via a real ClipboardManager. Under TEST_MODE, the
+        daemon's clipboard_manager must be the subprocess-free stub, and
+        copying text through it (as _transcribe_and_emit does on success)
+        must make zero subprocess calls even with subprocess.run/Popen
+        patched to raise."""
+        from whisper_aloud.clipboard import TestClipboardStub
+
+        service, _ = self._build(monkeypatch)
+        assert isinstance(service.clipboard_manager, TestClipboardStub)
+
+        def _boom(*a, **k):
+            raise AssertionError("must not call subprocess under TEST_MODE")
+
+        with patch("subprocess.run", side_effect=_boom), \
+             patch("subprocess.Popen", side_effect=_boom):
+            assert service.clipboard_manager.copy("the quick brown fox") is True
