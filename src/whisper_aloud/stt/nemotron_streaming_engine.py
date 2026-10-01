@@ -213,11 +213,15 @@ class NemotronStreamingEngine:
         final_text = recognizer.get_result(stream).strip()
 
         with self._lock:
-            flushed = self._tracker.flush(final_text)
-            self._last_partial = flushed
+            # The live partial view stays append-only (flush never retracts),
+            # but the transcript that reaches history/clipboard is the decoder's
+            # final text: merging a diverged commit into it would duplicate
+            # words (e.g. "que tal." + "qué tal amigo"). Clients replace the
+            # partial view with this text on TranscriptionReady.
+            self._last_partial = self._tracker.flush(final_text)
 
         return TranscriptionResult(
-            text=flushed.committed,
+            text=final_text,
             language=language,
             segments=[],
             confidence=0.0,

@@ -272,7 +272,9 @@ class TestFinalizeReconciliation:
         result = engine.finalize()
         assert result.text == "hola dia bueno"
 
-    def test_finalize_on_divergence_keeps_committed_and_logs_a_warning(self, tmp_path, caplog):
+    def test_finalize_on_divergence_returns_decoder_text_and_logs_a_warning(
+        self, tmp_path, caplog
+    ):
         engine = NemotronStreamingEngine(_cfg())
         _write_fake_model_files(tmp_path)
         fake_module = make_fake_sherpa_module(
@@ -287,10 +289,10 @@ class TestFinalizeReconciliation:
         with caplog.at_level("WARNING"):
             result = engine.finalize()
 
-        # Committed ("hola dia") is never retracted even though the final decode
-        # revised its first word to "halo"; the remainder after the longest common
-        # word-prefix ("" here, since word 0 already diverges) is appended instead.
-        assert result.text == "hola dia halo dia bueno completo"
+        # The transcript is the decoder's final text (no duplicated words), while
+        # the live partial view keeps the committed prefix it already showed.
+        assert result.text == "halo dia bueno completo"
+        assert engine.get_partial().committed.startswith("hola dia")
         assert any("diverges" in r.message for r in caplog.records)
 
 
