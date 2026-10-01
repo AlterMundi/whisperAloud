@@ -1,3 +1,10 @@
+> **SUPERSEDED 2026-10-01** by `docs/superpowers/specs/2026-10-01-whisp42-selector-redesign.md`
+> (catalog-driven redesign, WHISP-50). This document is kept for history only; none of it should
+> be implemented as written — in particular, `settings_logic.py` no longer has the
+> `engine_options`/`resolve_model_selection`/`needs_download_note` helpers this spec describes
+> (they were never implemented, and `stt/catalog.py` replaces the design that would have produced
+> them).
+
 # WHISP-42 — Settings UI Engine Selector
 
 - **Lattice:** WHISP-42 (subtask of WHISP-32; related to WHISP-36)
