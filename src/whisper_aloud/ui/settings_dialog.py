@@ -696,7 +696,14 @@ class SettingsDialog(Gtk.Window):
     def _capture_ui_state(self) -> dict:
         """Capture current form state for unsaved-change detection."""
         return {
-            "model": self.model_dropdown.get_selected(),
+            "model_engine": self._engine_keys[self.engine_row.get_selected()],
+            "model_name": (
+                self._model_entries[self.model_row.get_selected()].name
+                if self._model_entries and self.model_row.get_selected() != Gtk.INVALID_LIST_POSITION
+                else ""
+            ),
+            "model_device": self.device_row.get_selected(),
+            "model_compute_type": self.compute_type_row.get_selected(),
             "language": self.language_entry.get_text(),
             "audio_device": self.audio_device_dropdown.get_selected(),
             "auto_copy": self.auto_copy_switch.get_active(),
@@ -708,7 +715,6 @@ class SettingsDialog(Gtk.Window):
             "notif_stop": self.notification_recording_stopped_switch.get_active(),
             "notif_done": self.notification_transcription_completed_switch.get_active(),
             "notif_error": self.notification_error_switch.get_active(),
-            "compute_device": self.compute_device_dropdown.get_selected(),
             "sample_rate": self.sample_rate_entry.get_text(),
             "vad_enabled": self.vad_switch.get_active(),
             "vad_threshold": self.vad_threshold_entry.get_text(),
@@ -736,7 +742,10 @@ class SettingsDialog(Gtk.Window):
     def _connect_dirty_tracking(self) -> None:
         """Connect form inputs to unsaved-change tracking."""
         tracked_widgets = [
-            self.model_dropdown,
+            self.model_row,
+            self.engine_row,
+            self.device_row,
+            self.compute_type_row,
             self.language_entry,
             self.audio_device_dropdown,
             self.auto_copy_switch,
@@ -748,7 +757,6 @@ class SettingsDialog(Gtk.Window):
             self.notification_recording_stopped_switch,
             self.notification_transcription_completed_switch,
             self.notification_error_switch,
-            self.compute_device_dropdown,
             self.sample_rate_entry,
             self.vad_switch,
             self.vad_threshold_entry,
@@ -768,7 +776,7 @@ class SettingsDialog(Gtk.Window):
         for widget in tracked_widgets:
             if isinstance(widget, Gtk.Switch):
                 widget.connect("notify::active", self._mark_dirty)
-            elif isinstance(widget, Gtk.DropDown):
+            elif isinstance(widget, (Gtk.DropDown, Adw.ComboRow)):
                 widget.connect("notify::selected", self._mark_dirty)
             elif isinstance(widget, Gtk.Entry):
                 widget.connect("changed", self._mark_dirty)
@@ -1169,9 +1177,23 @@ class SettingsDialog(Gtk.Window):
 
         try:
             logger.debug("Updating model config")
-            # Update model config
-            models = ["tiny", "base", "small", "medium", "large"]
-            self._config.model.name = models[self.model_dropdown.get_selected()]
+            # Update model config (catalog-driven — WHISP-42)
+            model_idx = self.model_row.get_selected()
+            if self._model_entries and model_idx != Gtk.INVALID_LIST_POSITION and model_idx >= 0:
+                selected_entry = self._model_entries[model_idx]
+                engine, name = save_selection(selected_entry.engine, selected_entry.name)
+                self._config.model.engine = engine
+                self._config.model.name = name
+
+            devices = ["cpu", "cuda"]
+            selected_compute_idx = self.device_row.get_selected()
+            if selected_compute_idx != -1 and selected_compute_idx < len(devices):
+                self._config.model.device = devices[selected_compute_idx]
+
+            compute_types = ["int8", "float16", "float32"]
+            selected_compute_type_idx = self.compute_type_row.get_selected()
+            if selected_compute_type_idx != -1 and selected_compute_type_idx < len(compute_types):
+                self._config.model.compute_type = compute_types[selected_compute_type_idx]
 
             # Validate language code
             lang = self.language_entry.get_text()
@@ -1179,11 +1201,6 @@ class SettingsDialog(Gtk.Window):
                 self._config.transcription.language = normalize_language_input(lang)
             except ValueError as e:
                 raise ValidationError(str(e)) from e
-
-            devices = ["cpu", "cuda"]
-            selected_compute_idx = self.compute_device_dropdown.get_selected()
-            if selected_compute_idx != -1 and selected_compute_idx < len(devices):
-                self._config.model.device = devices[selected_compute_idx]
 
             logger.debug("Updating audio config")
             # Update audio config
