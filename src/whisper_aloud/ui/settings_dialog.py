@@ -8,7 +8,8 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gdk, GLib, Gtk
+gi.require_version('Adw', '1')
+from gi.repository import Adw, Gdk, GLib, Gtk
 
 from ..config import (
     NotificationConfig,
@@ -16,11 +17,24 @@ from ..config import (
     WhisperAloudConfig,
 )
 from .error_handler import InputValidator, ValidationError
+from .model_picker_logic import (
+    badges_for,
+    default_index,
+    download_state_for,
+    needs_download_note,
+    save_selection,
+    selectable_entries,
+)
 from .settings_logic import (
     has_unsaved_changes,
     normalize_language_input,
     should_block_close,
 )
+
+
+def _fmt_size(size_mb: Optional[int]) -> str:
+    """Human-facing size string for a catalog entry, or "—" when unknown."""
+    return f"{size_mb} MB" if size_mb is not None else "—"
 
 logger = logging.getLogger(__name__)
 
@@ -221,22 +235,30 @@ class SettingsDialog(Gtk.Window):
         model_section.add_css_class("wa-section-title")
         page.append(model_section)
 
-        # Model selector
-        model_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        model_label = Gtk.Label(label="Model:")
-        model_label.set_halign(Gtk.Align.START)
-        model_label.set_hexpand(True)
+        # Model selector — catalog-driven boxed-list (WHISP-42)
+        self._model_list_box = Gtk.ListBox()
+        self._model_list_box.add_css_class("boxed-list")
+        self._model_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
 
-        self.model_dropdown = Gtk.DropDown.new_from_strings([
-            "tiny (fastest)", "base", "small", "medium", "large (most accurate)"
-        ])
-        models = ["tiny", "base", "small", "medium", "large"]
-        if self._config.model.name in models:
-            self.model_dropdown.set_selected(models.index(self._config.model.name))
+        self.model_row = Adw.ComboRow()
+        self.model_row.set_title("Model")
+        self._model_entries: list = []  # populated by _refresh_model_row()
+        self._suppress_model_sync = False
+        self._refresh_model_row()
+        self._model_list_box.append(self.model_row)
+        page.append(self._model_list_box)
 
-        model_box.append(model_label)
-        model_box.append(self.model_dropdown)
-        page.append(model_box)
+        self._download_notice = Gtk.Label(wrap=True, xalign=0)
+        self._download_notice.add_css_class("dim-label")
+        self._download_notice.set_visible(False)
+        page.append(self._download_notice)
+
+        self._license_notice = Gtk.Label(wrap=True, xalign=0)
+        self._license_notice.add_css_class("dim-label")
+        self._license_notice.set_visible(False)
+        page.append(self._license_notice)
+
+        self.model_row.connect("notify::selected", self._on_model_row_changed)
 
         # Language (hidden - managed by main window dropdown now)
         self.language_entry = Gtk.Entry()
@@ -503,6 +525,93 @@ class SettingsDialog(Gtk.Window):
         self._style_setting_rows_in_page(page)
 
         self.stack.add_titled(page, "general", "General")
+
+    def _refresh_model_row(
+        self,
+        preferred_engine: Optional[str] = None,
+        preferred_name: Optional[str] = None,
+    ) -> None:
+        """Repopulate the Model row's list from the catalog, filtered by the current
+        language/device, and (re)select an entry.
+
+        `preferred_engine` narrows the list to one engine's entries (used when the
+        Advanced→Engine row changes); `preferred_name` additionally pins the exact
+        entry to select (used when a catalog-view row is explicitly chosen), bypassing
+        the default_index() recommendation fallback since the user already made an
+        explicit choice.
+        """
+        entries = selectable_entries(
+            self._config.transcription.language, self._config.model.device
+        )
+        if preferred_engine is not None:
+            entries = [e for e in entries if e.engine == preferred_engine] or entries
+
+        self._model_entries = entries
+        labels = [f"{e.label} · {_fmt_size(e.size_mb)} · {e.tier}" for e in entries]
+        self.model_row.set_model(Gtk.StringList.new(labels))
+
+        if not entries:
+            self.model_row.set_selected(Gtk.INVALID_LIST_POSITION)
+            self._update_notices()
+            return
+
+        if preferred_name is not None:
+            index = next(
+                (i for i, e in enumerate(entries) if e.name == preferred_name), 0
+            )
+        else:
+            index = default_index(
+                entries,
+                self._config.model.engine,
+                self._config.model.name,
+                self._config.transcription.language,
+            )
+        self.model_row.set_selected(index)
+        self._update_notices()
+
+    def _update_notices(self) -> None:
+        """Refresh the not-downloaded and license notices for the currently selected
+        Model row entry."""
+        index = self.model_row.get_selected()
+        if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
+            self._download_notice.set_visible(False)
+            self._license_notice.set_visible(False)
+            return
+
+        entry = self._model_entries[index]
+        state = download_state_for(entry)
+        if needs_download_note(state.downloaded):
+            self._download_notice.set_text(
+                f"{entry.label} ({_fmt_size(entry.size_mb)}) downloads the first time you use it."
+            )
+            self._download_notice.set_visible(True)
+        else:
+            self._download_notice.set_visible(False)
+
+        badges = badges_for(entry)
+        if entry.license in badges:
+            self._license_notice.set_text(
+                f"This model's license ({entry.license}) differs from this app's MIT license."
+            )
+            self._license_notice.set_visible(True)
+        else:
+            self._license_notice.set_visible(False)
+
+    def _on_model_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
+        """Handle a (user- or programmatically-driven) Model row selection change."""
+        self._update_notices()
+        if self._suppress_model_sync:
+            return
+        index = row.get_selected()
+        if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
+            return
+        entry = self._model_entries[index]
+        if hasattr(self, "engine_row"):
+            self._suppress_model_sync = True
+            try:
+                self.engine_row.set_selected(self._engine_keys.index(entry.engine))
+            finally:
+                self._suppress_model_sync = False
 
     def _style_setting_rows_in_page(self, page: Gtk.Box) -> None:
         """Apply a shared style class to horizontal setting rows."""
