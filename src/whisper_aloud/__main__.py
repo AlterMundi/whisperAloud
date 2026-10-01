@@ -435,12 +435,38 @@ def cmd_models(args) -> int:
 
 
 def handle_daemon_command(args) -> int:
-    """Start the daemon service."""
+    """Start the daemon service.
+
+    Acquires the D-Bus name *before* constructing WhisperAloudService: three
+    things can try to start this daemon (the systemd unit, the XDG autostart
+    fallback, and a manual `whisper-aloud --daemon`), and only one can ever
+    own the name. Checking here, first, means a losing attempt fails fast
+    with a clean message instead of doing a full audio/tray/model init only
+    to crash inside bus.publish() (WHISP-63).
+    """
+    from pydbus import SessionBus
+
+    from .service.daemon import EXIT_ALREADY_RUNNING, AlreadyRunningError, acquire_bus_name
+
+    bus = SessionBus()
+    try:
+        name_owner = acquire_bus_name(bus)
+    except AlreadyRunningError as e:
+        logging.getLogger(__name__).error(str(e))
+        print(f"{PROG}: error: {e}", file=sys.stderr)
+        return EXIT_ALREADY_RUNNING
+
     try:
         from .service import WhisperAloudService
-        service = WhisperAloudService()
+        service = WhisperAloudService(bus=bus, name_owner=name_owner)
         service.run()
         return 0
+    except AlreadyRunningError as e:
+        # Defensive: run() re-checks when it wasn't handed a name_owner.
+        # We always pass one above, so this should not normally trigger.
+        logging.getLogger(__name__).error(str(e))
+        print(f"{PROG}: error: {e}", file=sys.stderr)
+        return EXIT_ALREADY_RUNNING
     except Exception as e:
         return _error(f"failed to start daemon: {e}")
 

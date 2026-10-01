@@ -2,6 +2,11 @@
 Description=WhisperAloud Transcription Service
 After=graphical-session.target
 PartOf=graphical-session.target
+# Bound the restart storm if something keeps losing the bus-name race or
+# crashing on start: at most 5 (re)starts per minute, then systemd stops
+# trying until the interval resets.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=dbus
@@ -10,6 +15,13 @@ ExecStart=/usr/lib/whisper-aloud/run --daemon
 TimeoutStartSec=120
 Restart=on-failure
 RestartSec=3
+# EXIT_ALREADY_RUNNING (see service/daemon.py): another instance already
+# owns org.fede.whisperaloud. Restarting would just repeat the race
+# forever, so treat this exit code as a clean stop, not a failure to retry
+# -- SuccessExitStatus keeps the unit from being left in "failed" state,
+# RestartPreventExitStatus stops systemd from restarting it.
+SuccessExitStatus=3
+RestartPreventExitStatus=3
 
 [Install]
 WantedBy=graphical-session.target

@@ -25,6 +25,60 @@ from .media_control import GainController, MprisController
 
 logger = logging.getLogger(__name__)
 
+# D-Bus identifiers. Kept as module constants so the CLI entrypoint can
+# acquire the name before constructing the (heavy) service object.
+BUS_NAME = "org.fede.whisperaloud"
+OBJECT_PATH = "/org/fede/whisperaloud"
+
+# Distinct exit code for "another instance already owns the bus name".
+# The systemd unit maps this to RestartPreventExitStatus so a losing
+# instance does not restart-loop forever (see data/whisper-aloud.service).
+EXIT_ALREADY_RUNNING = 3
+
+
+class AlreadyRunningError(RuntimeError):
+    """Raised when another process already owns BUS_NAME on the session bus."""
+
+    def __init__(self, message: str, pid: Optional[int] = None):
+        super().__init__(message)
+        self.pid = pid
+
+
+def _lookup_owner_pid(bus, name: str = BUS_NAME) -> Optional[int]:
+    """Best-effort lookup of the PID currently holding `name`.
+
+    Returns None if the lookup fails for any reason (e.g. no permission,
+    bus quirks) -- this is purely for a nicer log line, never load-bearing.
+    """
+    try:
+        unique_name = bus.dbus.GetNameOwner(name)
+        return int(bus.dbus.GetConnectionUnixProcessID(unique_name))
+    except Exception:
+        return None
+
+
+def acquire_bus_name(bus):
+    """Claim BUS_NAME on `bus` without publishing any object.
+
+    Doing this before constructing WhisperAloudService means a losing
+    daemon start (another instance already owns the name) never pays for
+    audio/tray/model initialization -- it fails fast, here, first.
+
+    Returns the NameOwner context manager on success; keep a reference to
+    it for the lifetime of the process (releasing it gives up the name).
+
+    Raises AlreadyRunningError if another process already owns the name.
+    Any other failure to acquire the name is re-raised unchanged.
+    """
+    try:
+        return bus.request_name(BUS_NAME, allow_replacement=False, replace=False)
+    except RuntimeError as e:
+        if "already exists" in str(e):
+            pid = _lookup_owner_pid(bus)
+            suffix = f" (pid {pid})" if pid else " (pid unknown)"
+            raise AlreadyRunningError(f"another instance owns {BUS_NAME}{suffix}", pid=pid) from None
+        raise
+
 
 class WhisperAloudService:
     """
@@ -116,9 +170,28 @@ class WhisperAloudService:
     ConfigChanged = signal()
     Error = signal()
 
-    def __init__(self, config: Optional[WhisperAloudConfig] = None):
-        """Initialize the service."""
+    def __init__(
+        self,
+        config: Optional[WhisperAloudConfig] = None,
+        bus=None,
+        name_owner=None,
+    ):
+        """Initialize the service.
+
+        Args:
+            config: Loaded config, or None to load from disk.
+            bus: An already-connected SessionBus, if the caller already
+                acquired one (see acquire_bus_name). If None, run() creates
+                its own.
+            name_owner: The NameOwner returned by a prior acquire_bus_name()
+                call on `bus`. Passing this means run() will not attempt to
+                re-request the name (and construction of this object, with
+                its audio/tray/model setup below, implies the caller already
+                confirmed no other instance owns the bus name).
+        """
         self.config = config or WhisperAloudConfig.load()
+        self._bus = bus
+        self._name_owner = name_owner
 
         # Core components
         self.recorder: Optional[AudioRecorder] = None
@@ -263,11 +336,27 @@ class WhisperAloudService:
             logger.info("Transcription model loaded")
 
     def run(self) -> None:
-        """Run the D-Bus service."""
+        """Run the D-Bus service.
+
+        Bus-name acquisition is kept outside the main try/finally: if it
+        fails because another instance already owns the name (the WHISP-63
+        race), we want a clean one-line log and a plain re-raise -- no
+        traceback spam, and no _cleanup() of components that never did
+        anything. The normal (CLI) path never reaches this branch because
+        acquire_bus_name() is already called before this object is even
+        constructed; this is a defensive fallback for direct callers/tests.
+        """
+        bus = self._bus if self._bus is not None else SessionBus()
+        if self._name_owner is None:
+            try:
+                self._name_owner = acquire_bus_name(bus)
+            except AlreadyRunningError as e:
+                logger.error(str(e))
+                raise
+
         try:
-            # Publish service on D-Bus
-            bus = SessionBus()
-            bus.publish("org.fede.whisperaloud", self)
+            # Register the object on the bus; the name is already ours.
+            self._registration = bus.register_object(OBJECT_PATH, self, None)
             logger.info("D-Bus service published as org.fede.whisperaloud")
 
             # Inject bus into MPRIS controller now that we have one

@@ -549,20 +549,41 @@ install_autostart() {
     local autostart_dir="$HOME/.config/autostart"
     mkdir -p "$autostart_dir"
 
-    # Use the venv path so it works without PATH setup
+    # On a systemd session, the user service (installed above, enabled +
+    # started already) is the single owner of org.fede.whisperaloud; this
+    # entry must not race it with a second direct spawn. We check that the
+    # unit itself is installed with "systemctl --user cat" (a bare "systemctl
+    # --user status" only tells us a user manager exists, not that our unit
+    # does), then ask systemd to start it -- "start" is idempotent (systemd
+    # serializes job execution per unit, so this never spawns a second
+    # process even if the unit is already starting/running). The direct
+    # spawn fallback only runs when the unit genuinely isn't managed by
+    # systemd here (no systemctl, or the unit isn't installed); it is safe
+    # even when `systemctl --user start` fails for another reason (e.g. the
+    # unit hit its StartLimitBurst) because a second instance of the daemon
+    # now exits cleanly via EXIT_ALREADY_RUNNING instead of restart-looping.
     cat > "$autostart_dir/whisper-aloud-autostart.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=WhisperAloud Daemon
 GenericName=Voice Transcription Daemon
 Comment=Start WhisperAloud background service at login
-Exec=sh -lc 'systemctl --user -q is-active whisper-aloud.service 2>/dev/null || $VENV_PATH/bin/whisper-aloud --daemon'
+Exec=sh -lc 'if command -v systemctl >/dev/null 2>&1 && systemctl --user cat whisper-aloud.service >/dev/null 2>&1; then systemctl --user start whisper-aloud.service && exit 0; fi; exec $VENV_PATH/bin/whisper-aloud --daemon'
 Icon=audio-input-microphone-symbolic
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=3
 NoDisplay=true
 StartupNotify=false
 EOF
+
+    # Remove the legacy autostart entry from older installs: it spawned the
+    # daemon directly and had no coordination with the systemd unit at all,
+    # which is exactly the WHISP-63 race.
+    local legacy_autostart="$autostart_dir/whisperaloud-daemon.desktop"
+    if [ -f "$legacy_autostart" ]; then
+        rm "$legacy_autostart"
+        print_success "Removed legacy autostart entry: whisperaloud-daemon.desktop"
+    fi
 
     print_success "XDG autostart entry installed"
 }
@@ -631,6 +652,11 @@ install_user_service() {
 Description=WhisperAloud Transcription Service
 After=graphical-session.target
 PartOf=graphical-session.target
+# Bound the restart storm if something keeps losing the bus-name race or
+# crashing on start: at most 5 (re)starts per minute, then systemd stops
+# trying until the interval resets.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=dbus
@@ -639,6 +665,13 @@ ExecStart=$VENV_PATH/bin/whisper-aloud-daemon
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=120
+# EXIT_ALREADY_RUNNING (see service/daemon.py): another instance already
+# owns org.fede.whisperaloud. Restarting would just repeat the race
+# forever, so treat this exit code as a clean stop, not a failure to retry
+# -- SuccessExitStatus keeps the unit from being left in "failed" state,
+# RestartPreventExitStatus stops systemd from restarting it.
+SuccessExitStatus=3
+RestartPreventExitStatus=3
 # Forward graphical session env from user manager to this service.
 # GNOME imports these at login; PassEnvironment passes them to the service process.
 PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP
