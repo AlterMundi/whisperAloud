@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from .exceptions import ConfigurationError
+from .stt import catalog
 from .utils.validation_helpers import sanitize_language_code
 
 logger = logging.getLogger(__name__)
@@ -88,14 +89,9 @@ class ModelConfig:
 MODEL_RELOAD_FIELDS: Set[str] = {"engine", "name", "device", "compute_type"}
 
 # Valid model names per engine (used by validate() and engine/download code).
-ENGINE_MODELS: Dict[str, List[str]] = {
-    "faster-whisper": [
-        "tiny", "base", "small", "medium",
-        "large-v1", "large-v2", "large-v3", "large",
-        "large-v3-turbo", "turbo",
-    ],
-    "parakeet": ["parakeet-tdt-0.6b-v3"],
-}
+# Derived from stt.catalog, the single source of truth for model metadata (WHISP-50).
+# Kept as a module-level dict (not a function) for backward compat with existing callers.
+ENGINE_MODELS: Dict[str, List[str]] = catalog.engine_models()
 
 
 @dataclass
