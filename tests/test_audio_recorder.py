@@ -458,3 +458,50 @@ def test_cancel_stops_chunk_worker(mock_stream, mock_validate):
     assert recorder._chunk_worker is None
     assert recorder._chunk_queue is None
     assert recorder.state == RecordingState.IDLE
+
+
+# ── WHISP-65 audit: one-shot pipeline state leaking across recordings ───────
+
+
+@patch('whisper_aloud.audio.device_manager.DeviceManager.validate_device')
+@patch('sounddevice.InputStream')
+def test_second_recording_matches_a_fresh_pipeline(mock_stream, mock_validate):
+    """AudioRecorder reuses one AudioPipeline instance (self._pipeline) across
+    many recording sessions (the daemon keeps one AudioRecorder alive for its
+    whole lifetime). Before WHISP-65's fix, AGC's rolling RMS history and
+    NoiseGate's envelope/hold state from recording N leaked into recording
+    N+1's stop() processing (measured max abs diff ~0.281). start() must now
+    reset self._pipeline, so recording N+1's output matches what a brand-new
+    AudioPipeline would produce on the same audio.
+    """
+    from whisper_aloud.audio.audio_processor import AudioPipeline
+
+    mock_validate.return_value = Mock()
+    mock_stream.return_value = Mock()
+
+    config = AudioConfig(vad_enabled=False)  # keep stop()'s processing deterministic
+    proc_config = AudioProcessingConfig(
+        noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False, limiter_enabled=True
+    )
+    recorder = AudioRecorder(config, processing_config=proc_config)
+
+    sr = 16000
+    t = np.arange(sr, dtype=np.float32) / sr
+    loud_audio = (np.sin(2 * np.pi * 220 * t) * 0.5).astype(np.float32)
+    quiet_audio = (np.sin(2 * np.pi * 440 * t) * 0.02).astype(np.float32)
+
+    # First recording: leaves AGC/gate state behind on recorder._pipeline.
+    recorder.start()
+    recorder._frames = [loud_audio.copy()]
+    recorder._start_time = 0.0
+    recorder.stop()
+
+    # Second recording on the SAME recorder instance.
+    recorder.start()
+    recorder._frames = [quiet_audio.copy()]
+    recorder._start_time = 0.0
+    second_output = recorder.stop()
+
+    expected = AudioPipeline(proc_config).process(quiet_audio.copy(), sample_rate=16000)
+
+    np.testing.assert_allclose(second_output, expected, atol=1e-6)

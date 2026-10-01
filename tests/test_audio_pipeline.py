@@ -182,6 +182,71 @@ class TestPeakLimiter:
 class TestAudioPipeline:
     """Tests for the full audio processing pipeline."""
 
+    def test_pipeline_reset_clears_agc_and_gate_state(self):
+        """AudioPipeline.reset() must clear AGC's rolling RMS history/gain and
+        NoiseGate's envelope/hold state, so a pipeline instance reused across
+        recording sessions behaves identically to a freshly constructed one
+        (WHISP-65 audit finding #1: a reused self._pipeline leaked AGC
+        history between recordings, max abs diff ~0.281 before this fix).
+        """
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig(
+            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False, limiter_enabled=True
+        )
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        # A loud tone, which leaves non-trivial gate/AGC state behind.
+        priming_audio = (np.sin(2 * np.pi * 220 * t) * 0.5).astype(np.float32)
+        probe_audio = (np.sin(2 * np.pi * 440 * t) * 0.02).astype(np.float32)
+
+        reused = AudioPipeline(config)
+        reused.process(priming_audio.copy(), sample_rate=sr)  # leaves state behind
+        reused.reset()
+
+        fresh = AudioPipeline(config)
+
+        out_reused = reused.process(probe_audio.copy(), sample_rate=sr)
+        out_fresh = fresh.process(probe_audio.copy(), sample_rate=sr)
+        np.testing.assert_allclose(out_reused, out_fresh, atol=1e-6)
+
+    def test_pipeline_reset_on_instance_matches_a_separate_fresh_instance(self):
+        """A single AGC/AudioPipeline instance, used once then reset(), must
+        produce the exact same output as a brand-new instance given the same
+        input -- i.e. reset() leaves no residue at all.
+        """
+        from whisper_aloud.audio.audio_processor import AGC, AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        # AGC in isolation.
+        agc = AGC(target_db=-18.0)
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        audio = (np.sin(2 * np.pi * 220 * t) * 0.3).astype(np.float32)
+        agc.process(audio.copy(), sample_rate=sr)
+        agc.reset()
+        assert agc._current_gain == 1.0
+        assert agc._history.size == 0
+
+        fresh_agc = AGC(target_db=-18.0)
+        out_reset = agc.process(audio.copy(), sample_rate=sr)
+        out_fresh = fresh_agc.process(audio.copy(), sample_rate=sr)
+        np.testing.assert_array_equal(out_reset, out_fresh)
+
+        # Full pipeline.
+        config = AudioProcessingConfig(
+            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False, limiter_enabled=True
+        )
+        pipeline = AudioPipeline(config)
+        pipeline.process(audio.copy(), sample_rate=sr)
+        pipeline.reset()
+        fresh_pipeline = AudioPipeline(config)
+        np.testing.assert_array_equal(
+            pipeline.process(audio.copy(), sample_rate=sr),
+            fresh_pipeline.process(audio.copy(), sample_rate=sr),
+        )
+
     def test_pipeline_processes_all_stages(self):
         """Pipeline should run gate -> AGC -> limiter in order."""
         from whisper_aloud.audio.audio_processor import AudioPipeline
