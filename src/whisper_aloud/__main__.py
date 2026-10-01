@@ -393,9 +393,28 @@ def cmd_history_search(args) -> int:
     return cmd_history(args)
 
 
+# Doc a tester should read before accepting a needs_review model's license.
+_NEEDS_REVIEW_DOC_PATH = "docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md"
+
+
 def cmd_download_model(args) -> int:
     """Download a speech model bundle to the local cache (no daemon required)."""
+    from .stt import catalog
     from .stt.model_download import ensure_model
+
+    entry = next(
+        (e for e in catalog.entries() if e.name == args.name or args.name in e.aliases),
+        None,
+    )
+    if entry is not None and entry.needs_review and not getattr(args, "accept_license", False):
+        return _error(
+            f"model '{args.name}' is pending license review (license: {entry.license}).",
+            hint=(
+                f"See {_NEEDS_REVIEW_DOC_PATH} for details, then re-run with "
+                "--accept-license to proceed."
+            ),
+        )
+
     try:
         path = ensure_model(args.name)
     except ValueError as e:
@@ -407,15 +426,24 @@ def cmd_download_model(args) -> int:
 
 
 def cmd_models(args) -> int:
-    """List the STT model catalog as a table (engine, name, size, languages, license)."""
+    """List the STT model catalog as a table (engine, name, size, languages, license).
+
+    Entries pending license review (`needs_review`) are hidden unless `--all` is
+    passed, and are marked "(pending license review)" when shown (WHISP-56 audit
+    item 4).
+    """
     from .stt import catalog
 
+    show_all = getattr(args, "all", False)
     rows = []
     for entry in catalog.entries():
+        if entry.needs_review and not show_all:
+            continue
         size = f"{entry.size_mb} MB" if entry.size_mb is not None else "—"
         langs = "multilingual" if entry.languages is None else f"{len(entry.languages)} langs"
         rec = "yes" if entry.recommended else ""
-        rows.append((entry.engine, entry.name, size, langs, entry.license, rec))
+        name = entry.name + (" (pending license review)" if entry.needs_review else "")
+        rows.append((entry.engine, name, size, langs, entry.license, rec))
 
     headers = ("engine", "name", "size", "languages", "license", "recommended")
     widths = [
@@ -526,12 +554,20 @@ examples:
         description="Download a named speech model to the local cache. No daemon required.",
     )
     p_download.add_argument("name", help="model name, e.g. parakeet-tdt-0.6b-v3")
+    p_download.add_argument(
+        "--accept-license", action="store_true",
+        help="confirm acceptance of a pending-review model's license (required for some models)",
+    )
 
     # ── Model catalog ─────────────────────────────────────────────────────
-    sub.add_parser(
+    p_models = sub.add_parser(
         "models",
         help="list the STT model catalog",
         description="List all engines and models in the STT catalog with their metadata.",
+    )
+    p_models.add_argument(
+        "--all", action="store_true",
+        help="include models pending license review (hidden by default)",
     )
 
     # ── Transcribe ────────────────────────────────────────────────────────
