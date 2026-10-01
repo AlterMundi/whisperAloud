@@ -73,5 +73,6 @@
       <arg type="s" name="code" />
       <arg type="s" name="message" />
     </signal>
+    <property name="ApiVersion" type="s" access="read" />
   </interface>
 </node>

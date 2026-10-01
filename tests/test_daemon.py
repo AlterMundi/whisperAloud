@@ -1,6 +1,7 @@
 """Tests for WhisperAloud D-Bus daemon service."""
 import importlib
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -342,6 +343,30 @@ class TestDaemonMethods:
         daemon.history_manager.delete.assert_called_once_with(4)
         assert result is True
 
+    # ─── D-Bus properties ───────────────────────────────────────────────
+
+    def test_api_version_property_matches_constant(self, daemon):
+        """ApiVersion must report the daemon module's API_VERSION constant.
+
+        This is the property pydbus reads via getattr() for
+        org.freedesktop.DBus.Properties.Get; it must stay in lockstep with
+        the constant the versioning policy in docs/dbus-api.md documents.
+        """
+        assert daemon.ApiVersion == daemon._daemon_module.API_VERSION
+
+    def test_api_version_documented_in_dbus_api_md(self, daemon):
+        """docs/dbus-api.md must mention the current ApiVersion, so the docs
+        can't silently drift from the implementation.
+        """
+        docs_path = (
+            Path(__file__).resolve().parents[1] / "docs" / "dbus-api.md"
+        )
+        docs_text = docs_path.read_text(encoding="utf-8")
+        assert daemon._daemon_module.API_VERSION in docs_text, (
+            f"docs/dbus-api.md does not mention API_VERSION "
+            f"({daemon._daemon_module.API_VERSION!r}); update its Changelog "
+            "section when bumping API_VERSION."
+        )
 
     # ─── Deferred model loading ────────────────────────────────────────
 
