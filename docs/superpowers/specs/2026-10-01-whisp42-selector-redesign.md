@@ -54,7 +54,7 @@ GTK/Adw stays thin glue. `config.model.engine`/`.name`/`.device` save unchanged 
 - **No in-app download with a progress bar.** The daemon still lazy-downloads on first use
   (sherpa-onnx tarball via `model_download.ensure_model`, or faster-whisper's own HF-cache
   download inside `WhisperModel(...)`). This ticket only shows a notice with the expected size.
-  Follow-up ticket: **WHISP-58 "In-app model download with progress"** (number reserved here;
+  Follow-up ticket: **WHISP-68 "In-app model download with progress"** (number reserved here;
   create it in Lattice when this ticket is picked up) — a `Downloading(bytes, total)` D-Bus
   signal from `model_download._download`'s existing progress hook (already computed, currently
   only logged) plus a progress row in the dialog.
@@ -219,7 +219,7 @@ license shows up in the catalog — not an attempt to parse SPDX.
   the save. The existing reload plumbing (`detect_config_changes(...).requires_model_reload`) is
   unchanged by this ticket; the *daemon*, not the dialog, performs the lazy download on the next
   reload/transcription, exactly as today. The dialog's job is only to set the expectation via the
-  notice — not to pre-download, not to block Save, not to show a spinner (that's WHISP-58).
+  notice — not to pre-download, not to block Save, not to show a spinner (that's WHISP-68).
 
 ### 1.5 License notice
 - A second, separate inline notice (same `Gtk.Revealer`/`Gtk.Label` pattern), shown when
@@ -408,7 +408,7 @@ triggers `requires_model_reload` and the existing daemon `ReloadConfig` path.
    behavior this ticket doesn't change** (the June spec's non-goals already excluded in-UI
    download/progress), but it's now more reachable than before (any engine's models can trigger
    it, not just the single previously-undiscoverable Parakeet path), so it's called out here
-   explicitly as the main risk this ticket's UX decisions create (§7) and the reason WHISP-58
+   explicitly as the main risk this ticket's UX decisions create (§7) and the reason WHISP-68
    (§0) exists as a near-term follow-up rather than a someday-maybe.
 4. If the download fails (network error, bad tarball), the existing error path is unchanged —
    whatever `ReloadConfig`/the daemon does today on an engine-load exception. This ticket does not
@@ -522,7 +522,7 @@ rediscover the option.
 - **Blocking reload on download (§3)** is the main UX risk this ticket's wider model
   discoverability creates (more models are now reachable than before, all sharing the same
   synchronous-download-on-reload behavior). Mitigated by the §1.4 notice setting expectations;
-  not fixed — WHISP-58 fixes it.
+  not fixed — WHISP-68 fixes it.
 - **faster-whisper download-state detection is a heuristic (§2.3), not authoritative.** A
   nonstandard `HF_HOME`/`HUGGINGFACE_HUB_CACHE`/`model.download_root` can produce a false
   "not downloaded" notice. Low severity (worst case: an unnecessary notice for a model that's
