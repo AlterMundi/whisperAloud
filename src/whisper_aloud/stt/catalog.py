@@ -241,6 +241,25 @@ if os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1":
             notes="Deterministic test double — reads a sidecar .txt next to a "
             "fixture WAV. Never shown to real users.",
         ),
+        # WHISP-57: a second hidden fake entry, this one `streaming=True`, so the
+        # daemon's streaming code path (start_session/accept_chunk/get_partial/
+        # finalize/cancel_session + PartialTranscript) can be exercised end-to-end
+        # in e2e tests without a real streaming model. See
+        # FakeStreamingSpeechEngine in stt/fake_engine.py.
+        ModelEntry(
+            engine="fake",
+            name="fake-streaming",
+            label="Fake streaming (test only)",
+            size_mb=0,
+            languages=None,
+            streaming=True,
+            license="N/A",
+            devices=("cpu",),
+            tier="fast",
+            recommended=False,
+            notes="Deterministic streaming test double — reveals the sidecar "
+            ".txt one word at a time as chunks arrive. Never shown to real users.",
+        ),
     )
     ENGINES["fake"] = "Fake (test only)"
 

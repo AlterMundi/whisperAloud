@@ -63,6 +63,12 @@
     <signal name="LevelUpdate">
       <arg type="d" name="level" />
     </signal>
+    <signal name="PartialTranscript">
+      <arg type="s" name="session_id" />
+      <arg type="s" name="committed" />
+      <arg type="s" name="tentative" />
+      <arg type="u" name="seq" />
+    </signal>
     <signal name="StatusChanged">
       <arg type="s" name="state" />
     </signal>

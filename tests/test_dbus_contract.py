@@ -80,6 +80,7 @@ CLIENT_SIGNAL_SUBSCRIPTIONS = {
     "RecordingStopped",
     "TranscriptionReady",
     "LevelUpdate",
+    "PartialTranscript",
     "StatusChanged",
     "ConfigChanged",
     "Error",

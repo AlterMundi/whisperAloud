@@ -260,6 +260,12 @@ class TestFakeEngineTestModeGating:
             assert "fake" in catalog_module.engines()
             assert catalog_module.get("fake", "fake") is not None
             assert "fake" in catalog_module.engine_models()
+
+            # WHISP-57: a second hidden entry for the streaming fake engine.
+            streaming_entry = catalog_module.get("fake", "fake-streaming")
+            assert streaming_entry is not None
+            assert streaming_entry.streaming is True
+            assert "fake-streaming" in catalog_module.engine_models()["fake"]
         finally:
             monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
             importlib.reload(catalog_module)  # restore module state for later tests

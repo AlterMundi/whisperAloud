@@ -62,6 +62,14 @@ def create_engine(config: "WhisperAloudConfig") -> "SpeechEngine":
 
         return NemotronStreamingEngine(config)
     if engine == "fake":
+        from . import catalog
+
+        entry = catalog.get("fake", config.model.name)
+        if entry is not None and entry.streaming:
+            from .fake_engine import FakeStreamingSpeechEngine
+
+            return FakeStreamingSpeechEngine(config)
+
         from .fake_engine import FakeSpeechEngine
 
         return FakeSpeechEngine(config)

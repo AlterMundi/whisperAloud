@@ -292,6 +292,15 @@ class WhisperAloudClient:
         """Subscribe to LevelUpdate signal (level float)."""
         self._subscribe_signal("LevelUpdate", callback)
 
+    def on_partial_transcript(self, callback: Callable) -> None:
+        """Subscribe to PartialTranscript signal (session_id, committed, tentative, seq).
+
+        Emitted while recording with a streaming engine configured (WHISP-57);
+        never emitted with a batch (non-streaming) engine. `session_id`
+        matches the one carried in the following TranscriptionReady's `meta`.
+        """
+        self._subscribe_signal("PartialTranscript", callback)
+
     def on_status_changed(self, callback: Callable) -> None:
         """Subscribe to StatusChanged signal (state string)."""
         self._subscribe_signal("StatusChanged", callback)

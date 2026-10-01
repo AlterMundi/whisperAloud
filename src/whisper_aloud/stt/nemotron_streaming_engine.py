@@ -83,6 +83,17 @@ class NemotronStreamingEngine:
         # get_partial()/cancel_session() from another thread.
         self._lock = threading.Lock()
         self._session_started = False
+        # WHISP-57 audit (HIGH), defense in depth: incremented by every
+        # start_session() call. accept_chunk() already guards its own trailing
+        # mutation with a `self._stream is not stream` identity check; finalize()
+        # additionally snapshots this generation at entry and, after its
+        # unlocked decode section, only applies `_tracker.flush()`'s result to
+        # `_last_partial` if the generation is unchanged -- otherwise a slow
+        # finalize() racing a fresh start_session() (e.g. a daemon bug that lets
+        # Stop->Start overlap, which the daemon's own `_transcribing` guard
+        # should prevent in practice) would clobber the NEW session's partial
+        # state with the OLD session's stale flush().
+        self._generation = 0
 
     @property
     def is_loaded(self) -> bool:
@@ -153,6 +164,7 @@ class NemotronStreamingEngine:
             self._cancelling = False
             self._last_partial = PartialResult(committed="", tentative="", seq=0)
             self._session_started = True
+            self._generation += 1
 
     def accept_chunk(self, samples: np.ndarray) -> None:
         with self._lock:
@@ -190,6 +202,7 @@ class NemotronStreamingEngine:
             stream = self._stream
             recognizer = self._recognizer
             cancelling = self._cancelling
+            generation = self._generation
             self._stream = None  # the session ends now regardless of what follows
 
         if stream is None:
@@ -218,7 +231,14 @@ class NemotronStreamingEngine:
             # final text: merging a diverged commit into it would duplicate
             # words (e.g. "que tal." + "qué tal amigo"). Clients replace the
             # partial view with this text on TranscriptionReady.
-            self._last_partial = self._tracker.flush(final_text)
+            #
+            # Only apply flush()'s result if no newer session has started
+            # since this finalize() began (WHISP-57 audit, HIGH): the decode
+            # work above runs unlocked, so a concurrent start_session() could
+            # have already reset _tracker for a new session by now, and
+            # applying this stale flush() would corrupt it.
+            if self._generation == generation:
+                self._last_partial = self._tracker.flush(final_text)
 
         return TranscriptionResult(
             text=final_text,

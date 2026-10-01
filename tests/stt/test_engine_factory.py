@@ -50,3 +50,28 @@ def test_create_engine_dispatches_fake(monkeypatch):
     from whisper_aloud.stt.fake_engine import FakeSpeechEngine
 
     assert isinstance(create_engine(config), FakeSpeechEngine)
+
+
+def test_create_engine_dispatches_fake_streaming(monkeypatch):
+    """engine="fake", name="fake-streaming" dispatches to FakeStreamingSpeechEngine
+    (WHISP-57). The catalog only registers that model name under TEST_MODE=1, so
+    the catalog module must be reloaded with the env var set, same as
+    tests/stt/test_catalog.py's TestFakeEngineTestModeGating."""
+    import importlib
+
+    from whisper_aloud.stt import catalog as catalog_module
+
+    monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+    importlib.reload(catalog_module)
+    try:
+        config = WhisperAloudConfig()
+        config.model.engine = "fake"
+        config.model.name = "fake-streaming"
+        from whisper_aloud.stt.fake_engine import FakeStreamingSpeechEngine
+
+        engine = create_engine(config)
+        assert isinstance(engine, FakeStreamingSpeechEngine)
+        assert engine.is_streaming is True
+    finally:
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        importlib.reload(catalog_module)

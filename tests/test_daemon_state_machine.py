@@ -178,21 +178,37 @@ class TestAutoStop:
 
 
 class TestToggleWhileTranscribing:
-    """ToggleRecording only inspects recorder.is_recording — document that behavior."""
+    """WHISP-57 audit (HIGH): a Stop->Start double-tap while the previous
+    recording's transcription is still in flight on the executor must not
+    start a new recording -- doing so could run engine.start_session() for
+    a new session while the old one's finalize()/transcribe_numpy() is still
+    touching the same engine instance's shared state."""
 
-    def test_toggle_while_transcribing_starts_a_new_recording(self, daemon):
-        """Once StopRecording returns, recorder.is_recording is False again even though
-        _transcribing is still True (the previous job is running in the executor). A
-        toggle at that point starts a new recording rather than being rejected or
-        cancelling the in-flight transcription — this is today's actual behavior.
+    def test_toggle_while_transcribing_does_not_start_a_new_recording(self, daemon):
+        """Once StopRecording returns, recorder.is_recording is False again even
+        though _transcribing is still True (the previous job is running in the
+        executor). A toggle at that point must not call recorder.start() --
+        StartRecording's _transcribing guard blocks it.
         """
         daemon.recorder.is_recording = False
         daemon._transcribing = True
         daemon.recorder.start.reset_mock()
 
-        state = daemon.ToggleRecording()
+        daemon.ToggleRecording()
 
-        assert state == "recording"
-        daemon.recorder.start.assert_called_once()
-        # The in-flight transcription flag is untouched by starting a new recording.
+        daemon.recorder.start.assert_not_called()
+        # The in-flight transcription flag is untouched.
         assert daemon._transcribing is True
+
+    def test_start_recording_returns_false_while_transcribing(self, daemon):
+        daemon._transcribing = True
+        daemon.RecordingStarted.reset_mock()
+        daemon.StatusChanged.reset_mock()
+
+        result = daemon.StartRecording()
+
+        assert result is False
+        daemon.recorder.start.assert_not_called()
+        daemon.RecordingStarted.assert_not_called()
+        daemon.StatusChanged.assert_not_called()
+        daemon.Error.assert_not_called()

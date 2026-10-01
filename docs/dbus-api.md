@@ -91,9 +91,15 @@ synchronously before capture starts.
 - Returns `false` and emits `Error("recording_failed", <message>)` if
   starting the audio stream raises (e.g. no capture device). Any mic-gain
   change already applied is rolled back.
-- Calling it while already **recording** or **transcribing** restarts
-  capture via the underlying recorder rather than raising; prefer checking
-  `GetStatus()` first.
+- Returns `false` and emits **no** signal while **transcribing** (WHISP-57):
+  the previous recording's transcription (batch or a streaming engine's
+  `finalize()`) is still running in the background, and starting a new
+  session now would touch the same engine instance's shared state while
+  that job is still using it. Call `GetStatus()` or wait for
+  `TranscriptionReady`/`Error` before retrying.
+- Calling it while already **recording** restarts capture via the
+  underlying recorder rather than raising; prefer checking `GetStatus()`
+  first.
 
 ### StopRecording
 
@@ -353,6 +359,36 @@ Emitted at up to 10Hz while recording, with the current peak input level
 (0.0–1.0-ish, depending on the audio pipeline's gain staging). Purely
 cosmetic (VU meter); not emitted outside **recording**.
 
+### PartialTranscript
+
+```
+PartialTranscript(s session_id, s committed, s tentative, u seq)
+```
+
+Emitted only while **recording** with a streaming engine configured (one
+whose `StreamingSpeechEngine.is_streaming` is `True` — today, the
+`nemotron-streaming` engine or the test-only streaming fake engine; a
+non-streaming engine, e.g. `faster-whisper` or `parakeet`, never emits
+this). Polled from the engine at `PARTIAL_TRANSCRIPT_HZ` (5Hz by default)
+and re-emitted only when `seq` has advanced since the last emission, so a
+client never sees a duplicate.
+
+- `session_id` identifies the recording session (a fresh `uuid4().hex`
+  generated in `StartRecording`, the same value as `TranscriptionReady`'s
+  `meta["session_id"]` for this recording) — use it to discard stale
+  partials after a cancel/restart race.
+- `committed` is the stable prefix of the transcript so far; it is never
+  retracted (monotonically non-decreasing length) once reported.
+- `tentative` is the unstable in-flight tail that may still be revised by a
+  later update.
+- `seq` is a monotonically increasing sequence number, one per engine
+  update, scoped to this session — use it for ordering/dedup.
+
+On `StopRecording`, the engine's `finalize()` result (not the last
+`committed`+`tentative` partial) is the authoritative final text delivered
+via `TranscriptionReady`; clients should replace their partial view with it
+at that point rather than concatenating.
+
 ### StatusChanged
 
 ```
@@ -482,18 +518,9 @@ cross-version API surface the way the method signatures are).
 Not yet available — tracked here so API consumers can plan for it ahead of
 implementation:
 
-- **`PartialTranscript(s session_id, s committed, s tentative, u seq)`**
-  (WHISP-57 follow-up, see `docs/research/2026-10-01-sota-stt-offline/report.md`):
-  a signal emitted during **recording**, 3–10 times per second, from a
-  streaming speech engine (`StreamingSpeechEngine`). `session_id`
-  identifies the recording session (so a client can discard stale partials
-  after a cancel/restart race), `committed` is the stable prefix of the
-  transcript so far, `tentative` is the unstable in-flight tail that may
-  still be revised, and `seq` is a monotonically increasing sequence
-  number per session for ordering/dedup. This will ship as an additive
-  (minor-version) change once a streaming engine is wired into the daemon
-  — only non-streaming engines are wired into `create_engine` today, so no
-  code in this repository emits this signal yet.
+- **GUI live partial-text display** (WHISP-58): the GUI does not yet render
+  `PartialTranscript` anywhere; it is only emitted by the daemon and
+  wrapped by `client.py` so far.
 
 ## Examples
 
@@ -618,6 +645,32 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.1.0 — 2026-10-01
+
+Additive (minor) change, WHISP-57:
+
+- New signal `PartialTranscript(s session_id, s committed, s tentative, u
+  seq)`, emitted during **recording** only when the configured engine is a
+  streaming engine (`StreamingSpeechEngine.is_streaming == True`); a
+  non-streaming engine's behavior is unchanged. See the signal's own
+  section above for the full contract.
+- New keys `"session_id"` and `"dropped_chunks"` in `TranscriptionReady`'s
+  `meta` dict (an implementation-defined, forward-compatible dict per the
+  versioning policy below). `session_id` is a fresh `uuid4().hex` per
+  recording, present for every engine (streaming or not), matching
+  `PartialTranscript`'s `session_id` for the same recording. `dropped_chunks`
+  is the number of per-chunk streaming-hook samples dropped because its
+  queue was full (`AudioRecorder.dropped_chunks`, WHISP-65); 0 when no
+  streaming hook was registered for the recording (i.e. a non-streaming
+  engine, or a streaming engine whose chunk queue never filled up).
+- Documented semantic clarification (no wire-format change, so no bump by
+  itself — folded into this 1.1.0 entry): `StartRecording` now returns
+  `false` and emits no signal while **transcribing**, instead of the
+  previously-undocumented behavior of restarting capture via the recorder
+  while a previous recording's transcription was still in flight. That
+  undocumented behavior could corrupt a streaming engine's session state
+  (WHISP-57 audit finding); see `StartRecording`'s own section above.
 
 ### 1.0.0 — 2026-10-01
 
