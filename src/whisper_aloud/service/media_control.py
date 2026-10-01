@@ -131,6 +131,13 @@ class GainController:
     _atexit_registered: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
+        if os.environ.get("WHISPER_ALOUD_TEST_MODE") == "1":
+            # WHISP-46 e2e harness: never probe for or shell out to wpctl, and
+            # never touch the real crash-recovery file (restore_from_crash_file
+            # already no-ops when self._wpctl is None).
+            self._wpctl = None
+            logger.info("GainController: WHISPER_ALOUD_TEST_MODE=1, gain control disabled")
+            return
         self._wpctl = shutil.which("wpctl")
         if self._wpctl:
             logger.debug(f"GainController: wpctl found at {self._wpctl}")

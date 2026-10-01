@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from typing import Optional, Set
@@ -168,6 +169,35 @@ class TestMprisController:
 # =============================================================================
 # GainController tests
 # =============================================================================
+
+class TestGainControllerTestMode:
+    """WHISPER_ALOUD_TEST_MODE=1 must disable wpctl entirely -- no subprocess
+    probe, no crash-file read/act -- regardless of whether wpctl is actually
+    present on the host (WHISP-46)."""
+
+    def test_gain_controller_skips_wpctl_probe_in_test_mode(self, monkeypatch):
+        """WHISPER_ALOUD_TEST_MODE=1 must prevent wpctl detection even if present."""
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wpctl")
+        controller = GainController()
+        assert controller._wpctl is None
+
+    def test_gain_controller_restore_from_crash_file_is_noop_in_test_mode(self, monkeypatch, tmp_path):
+        """Even if a real recovery file exists, test mode must never read/act on it."""
+        monkeypatch.setenv("WHISPER_ALOUD_TEST_MODE", "1")
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wpctl")
+        controller = GainController()
+        # Should not raise, should not touch _RECOVERY_FILE at all.
+        controller.restore_from_crash_file()
+        assert controller._snapshot is None
+
+    def test_gain_controller_probes_wpctl_without_test_mode(self, monkeypatch):
+        """Unset WHISPER_ALOUD_TEST_MODE reproduces today's behavior exactly."""
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wpctl" if name == "wpctl" else None)
+        controller = GainController()
+        assert controller._wpctl == "/usr/bin/wpctl"
+
 
 class TestGainController:
     def test_no_wpctl_is_noop(self):
