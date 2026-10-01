@@ -703,7 +703,12 @@ class SettingsDialog(Gtk.Window):
         if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
             return
         entry = self._model_entries[index]
-        if hasattr(self, "engine_row"):
+        # Guard like _on_catalog_entry_chosen does: entry.engine may not be in
+        # self._engine_keys for a catalog entry whose engine isn't registered in
+        # catalog.ENGINES yet (e.g. WHISP-56's nemotron-streaming) — WHISP-42 audit
+        # MEDIUM #3. Such an entry is reachable via the full-catalog view even though
+        # it's never in the Advanced->Engine dropdown.
+        if hasattr(self, "engine_row") and entry.engine in self._engine_keys:
             self._suppress_model_sync = True
             try:
                 self.engine_row.set_selected(self._engine_keys.index(entry.engine))
