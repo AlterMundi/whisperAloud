@@ -121,6 +121,8 @@ class PortalHotkeys:
             )
             logger.info("Registered app_id '%s' with portal host registry", self._app_id)
         except Exception as e:
+            # Also covers a second Register() on the same connection (e.g. a future
+            # caller re-using this instance): the portal rejects that, we just log it.
             logger.debug("Registry.Register unavailable or failed (pre-1.19 portal?): %s", e)
 
     def _call_request(self, method_name: str, args, timeout_ms: int = 5000):
@@ -172,7 +174,7 @@ class PortalHotkeys:
             method_name,
             args,
             Gio.DBusCallFlags.NONE,
-            -1,
+            timeout_ms,
             None,
         )
 
@@ -368,7 +370,7 @@ class PortalHotkeys:
                     ),
                 ),
                 Gio.DBusCallFlags.NONE,
-                -1,
+                5000,
                 None,
             )
         except Exception as e:
