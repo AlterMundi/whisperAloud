@@ -564,6 +564,8 @@ def cmd_history(args) -> int:
     try:
         if hasattr(args, 'query') and args.query:
             entries = call_service_method("SearchHistory", args.query, args.count)
+        elif getattr(args, 'favorites', False):
+            entries = call_service_method("GetFavoriteHistory", args.count)
         else:
             entries = call_service_method("GetHistory", args.count)
 
@@ -598,6 +600,50 @@ def cmd_history_search(args) -> int:
     """Search transcription history."""
     args.query = args.search_query
     return cmd_history(args)
+
+
+def cmd_history_export(args) -> int:
+    """Export transcription history to a file or stdout (WHISP-79).
+
+    Goes through the daemon's ExportHistory D-Bus method, like every other
+    history command -- the daemon renders the content server-side and
+    returns it as a string; this command is the one that writes it to disk
+    (or stdout), since ExportHistory deliberately never writes to a path
+    itself (see docs/dbus-api.md's ExportHistory section).
+    """
+    if not _require_daemon():
+        return 1
+
+    # Local import: avoids a hard gi.repository/GLib dependency for every
+    # other CLI command that doesn't need a{sv} variant wrapping.
+    from .service.client import _wrap_config_changes
+
+    filters = {}
+    if getattr(args, "since", None):
+        filters["since"] = args.since
+    if getattr(args, "until", None):
+        filters["until"] = args.until
+    if getattr(args, "favorites", False):
+        filters["favorites_only"] = True
+    if getattr(args, "query", None):
+        filters["query"] = args.query
+    if getattr(args, "limit", None):
+        filters["limit"] = args.limit
+
+    try:
+        content = call_service_method(
+            "ExportHistory", args.format, _wrap_config_changes(filters)
+        )
+    except WhisperAloudError as e:
+        return _error(str(e))
+
+    if args.output:
+        Path(args.output).write_text(content, encoding="utf-8")
+        print(f"Exported to {args.output}")
+    else:
+        print(content)
+
+    return 0
 
 
 # Doc a tester should read before accepting a needs_review model's license.
@@ -856,8 +902,52 @@ examples:
     )
 
     p_history_sub = p_history.add_subparsers(dest="history_action", metavar="")
+
+    p_list = p_history_sub.add_parser("list", help="list recent history (default)")
+    p_list.add_argument(
+        "--limit", type=int, default=None,
+        help="number of entries to show (default: 10)",
+    )
+    p_list.add_argument(
+        "--favorites", action="store_true",
+        help="only show favorited entries",
+    )
+
     p_search = p_history_sub.add_parser("search", help="search history by text")
     p_search.add_argument("search_query", help="search text")
+
+    p_export = p_history_sub.add_parser(
+        "export", help="export history to a file or stdout",
+        description="Export transcription history, optionally filtered, via the daemon.",
+    )
+    p_export.add_argument(
+        "--format", choices=["md", "json", "csv", "txt"], required=True,
+        help="export format",
+    )
+    p_export.add_argument(
+        "--output", "-o", default=None,
+        help="write to FILE instead of stdout",
+    )
+    p_export.add_argument(
+        "--since", default=None,
+        help="only entries on/after this ISO date or datetime (e.g. 2026-01-01)",
+    )
+    p_export.add_argument(
+        "--until", default=None,
+        help="only entries on/before this ISO date or datetime",
+    )
+    p_export.add_argument(
+        "--favorites", action="store_true",
+        help="only export favorited entries",
+    )
+    p_export.add_argument(
+        "--query", default=None,
+        help="only export entries matching this full-text search",
+    )
+    p_export.add_argument(
+        "--limit", type=int, default=None,
+        help="maximum entries to export (daemon default 500, max 5000)",
+    )
 
     return parser
 
@@ -892,10 +982,16 @@ def main(argv=None) -> int:
         parser.print_help()
         return 0
 
-    # History search sub-action
+    # History sub-actions
     if args.command == "history" and getattr(args, 'history_action', None) == "search":
         args.query = args.search_query
         return cmd_history(args)
+    if args.command == "history" and getattr(args, 'history_action', None) == "list":
+        if args.limit is not None:
+            args.count = args.limit
+        return cmd_history(args)
+    if args.command == "history" and getattr(args, 'history_action', None) == "export":
+        return cmd_history_export(args)
 
     # Config with no sub-action defaults to 'show'
     if args.command == "config" and not getattr(args, 'config_action', None):

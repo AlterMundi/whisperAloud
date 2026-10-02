@@ -51,7 +51,20 @@ EXIT_ALREADY_RUNNING = 3
 #
 # 1.3.0 (WHISP-68, this branch) is additive on top of 1.2.0 (fix/WHISP-72,
 # now merged to master) -- see docs/dbus-api.md's Changelog for both entries.
-API_VERSION = "1.3.0"
+#
+# 1.4.0 (WHISP-79): additive -- new ExportHistory(s format, a{sv} filters)
+# -> (s content) method.
+API_VERSION = "1.4.0"
+
+# ExportHistory (WHISP-79): default/maximum number of entries a single
+# export may include. Keeps one unbounded/malicious `limit` from building an
+# arbitrarily large string in memory and handing it back over D-Bus in one
+# reply. Documented in docs/dbus-api.md alongside the method itself.
+EXPORT_DEFAULT_LIMIT = 500
+EXPORT_MAX_LIMIT = 5000
+
+# Formats ExportHistory accepts, matching HistoryManager.EXPORT_FORMATS.
+EXPORT_FORMATS = ("md", "json", "csv", "txt")
 
 # Throttle for DownloadProgress emissions (WHISP-68): a fast/cached download
 # can otherwise flood the session bus with one signal per urllib/tqdm chunk
@@ -134,6 +147,32 @@ def _wrap_flat_config_as_variants(flat: dict) -> dict:
     return result
 
 
+def _parse_export_date(value: str, *, end_of_day: bool = False):
+    """Parse an ExportHistory `since`/`until` filter value (WHISP-79).
+
+    Accepts any ISO 8601 date or datetime string `datetime.fromisoformat`
+    understands (e.g. "2026-01-01" or "2026-01-01T13:30:00"). A date-only
+    `until` value is end-exclusive by construction (midnight), so
+    `end_of_day=True` pushes it to the last microsecond of that day --
+    otherwise `until="2026-01-31"` would silently exclude every entry from
+    the 31st itself.
+
+    Raises ValueError (with a message safe to forward to Error(...)) on an
+    unparseable string.
+    """
+    from datetime import datetime, time, timedelta
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"invalid ISO date/datetime: {value!r}") from None
+
+    if end_of_day and parsed.time() == time.min:
+        parsed = parsed + timedelta(days=1) - timedelta(microseconds=1)
+
+    return parsed
+
+
 class WhisperAloudService:
     """
     <node>
@@ -178,6 +217,11 @@ class WhisperAloudService:
           <arg direction="in" type="i" name="entry_id"/>
           <arg direction="in" type="s" name="text"/>
           <arg direction="out" type="b" name="success"/>
+        </method>
+        <method name="ExportHistory">
+          <arg direction="in" type="s" name="format"/>
+          <arg direction="in" type="a{sv}" name="filters"/>
+          <arg direction="out" type="s" name="content"/>
         </method>
         <method name="GetConfig">
           <arg direction="out" type="a{sv}" name="config"/>
@@ -883,6 +927,82 @@ class WhisperAloudService:
             logger.error("UpdateHistoryEntry failed: %s", e)
             self.Error("history_update_failed", str(e))
             return False
+
+    def ExportHistory(self, format: str, filters: dict) -> str:
+        """Render filtered history entries to a string in one of
+        EXPORT_FORMATS (WHISP-79).
+
+        Deliberately returns the rendered content rather than writing it to
+        a path the caller supplies: a D-Bus method that writes to an
+        arbitrary filesystem path on the caller's behalf is a privileged-
+        path-write vector (the daemon runs as the user, but a D-Bus method
+        is reachable by anything on the session bus, not just this
+        project's own client) -- see docs/dbus-api.md's ExportHistory
+        section. The CLI/GUI client writes the returned string to disk
+        itself, under whatever permissions it already has.
+
+        `filters` (a{sv}), all optional:
+          - "since" (s): ISO date/datetime, inclusive lower bound
+          - "until" (s): ISO date/datetime, inclusive upper bound (a
+            date-only value is end-of-day inclusive, not midnight)
+          - "favorites_only" (b): only favorited entries
+          - "query" (s): FTS5 search text
+          - "limit" (numeric): capped to EXPORT_MAX_LIMIT, defaults to
+            EXPORT_DEFAULT_LIMIT for a missing/non-positive value
+
+        Returns the rendered content, or "" (with an Error signal) on any
+        validation failure or export error.
+        """
+        fmt = (format or "").strip().lower()
+        if fmt not in EXPORT_FORMATS:
+            self.Error(
+                "export_invalid_format",
+                f"Unknown export format: {format!r} (expected one of {EXPORT_FORMATS})",
+            )
+            return ""
+
+        unpacked = {
+            key: (value.unpack() if hasattr(value, "unpack") else value)
+            for key, value in (filters or {}).items()
+        }
+
+        try:
+            since = _parse_export_date(str(unpacked["since"])) if unpacked.get("since") else None
+            until = (
+                _parse_export_date(str(unpacked["until"]), end_of_day=True)
+                if unpacked.get("until")
+                else None
+            )
+        except ValueError as e:
+            self.Error("export_invalid_filter", str(e))
+            return ""
+
+        raw_limit = unpacked.get("limit", EXPORT_DEFAULT_LIMIT)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            self.Error("export_invalid_filter", f"limit must be an integer, got {raw_limit!r}")
+            return ""
+        if limit <= 0:
+            limit = EXPORT_DEFAULT_LIMIT
+        limit = min(limit, EXPORT_MAX_LIMIT)
+
+        favorites_only = bool(unpacked.get("favorites_only", False))
+        query = (str(unpacked.get("query") or "")).strip() or None
+
+        try:
+            entries = self.history_manager.query(
+                since=since,
+                until=until,
+                favorites_only=favorites_only,
+                query=query,
+                limit=limit,
+            )
+            return self.history_manager.export_string(entries, fmt)
+        except Exception as e:
+            logger.error("ExportHistory failed: %s", e)
+            self.Error("export_failed", str(e))
+            return ""
 
     def GetConfig(self) -> dict:
         """Return current configuration flattened to GLib variants."""

@@ -443,6 +443,71 @@ class TranscriptionDatabase:
             """, (query, limit))
             return [self._row_to_entry(row) for row in cursor.fetchall()]
 
+    def query_entries(
+        self,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        favorites_only: bool = False,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[HistoryEntry]:
+        """
+        Flexible combined filter query (WHISP-79): since/until date range,
+        favorites-only, and FTS5 text search, all optional and composable.
+
+        Used by ExportHistory's daemon-side filtering -- unlike search(),
+        get_favorites() and get_by_date_range(), which each apply exactly
+        one filter, this lets a caller combine any subset of them in a
+        single query (e.g. "favorited entries mentioning 'budget' from last
+        week").
+
+        Args:
+            since: Only entries with timestamp >= this (inclusive)
+            until: Only entries with timestamp <= this (inclusive)
+            favorites_only: Only entries with favorite = 1
+            query: FTS5 MATCH expression against text/tags/notes
+            limit: Maximum number of results (default: 50)
+
+        Returns:
+            List of matching HistoryEntry instances, newest first
+        """
+        with self._connection() as conn:
+            cursor = conn.cursor()
+
+            from_clause = "transcriptions t"
+            conditions = []
+            params: list = []
+
+            if query:
+                from_clause += " JOIN transcriptions_fts fts ON t.id = fts.rowid"
+                conditions.append("transcriptions_fts MATCH ?")
+                params.append(query)
+
+            if favorites_only:
+                conditions.append("t.favorite = 1")
+
+            if since is not None:
+                conditions.append("t.timestamp >= ?")
+                params.append(since.isoformat())
+
+            if until is not None:
+                conditions.append("t.timestamp <= ?")
+                params.append(until.isoformat())
+
+            where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            params.append(limit)
+
+            cursor.execute(
+                f"""
+                SELECT t.* FROM {from_clause}
+                {where_clause}
+                ORDER BY t.timestamp DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [self._row_to_entry(row) for row in cursor.fetchall()]
+
     def get_by_tag(self, tag: str, limit: int = 50) -> List[HistoryEntry]:
         """
         Get entries with specific tag.

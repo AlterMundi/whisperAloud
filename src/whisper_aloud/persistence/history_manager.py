@@ -2,8 +2,10 @@
 
 import csv
 import hashlib
+import io
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -138,6 +140,36 @@ class HistoryManager:
             List of matching HistoryEntry instances
         """
         return self.db.search(query, limit)
+
+    def query(
+        self,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        favorites_only: bool = False,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[HistoryEntry]:
+        """
+        Combined filter query (WHISP-79): since/until date range,
+        favorites-only, and full-text search, any subset combinable.
+
+        Args:
+            since: Only entries with timestamp >= this (inclusive)
+            until: Only entries with timestamp <= this (inclusive)
+            favorites_only: Only entries marked as favorite
+            query: Optional FTS search text
+            limit: Maximum number of results (default: 50)
+
+        Returns:
+            List of matching HistoryEntry instances, newest first
+        """
+        return self.db.query_entries(
+            since=since,
+            until=until,
+            favorites_only=favorites_only,
+            query=query,
+            limit=limit,
+        )
 
     def get_recent(self, limit: Optional[int] = 50) -> List[HistoryEntry]:
         """
@@ -353,30 +385,53 @@ class HistoryManager:
         return self.db.get_stats()
 
     # Export methods
+    #
+    # Each format has a `_build_*` method that returns the formatted string
+    # (shared by export_string(), used by the ExportHistory D-Bus method, and
+    # the public export_* methods below that write the same content to a
+    # file) -- kept as one implementation per format so the string returned
+    # over D-Bus and the file written to disk can never silently diverge.
 
-    def export_json(self, entries: List[HistoryEntry], path: Path) -> None:
+    EXPORT_FORMATS = ("json", "md", "csv", "txt")
+
+    def export_string(self, entries: List[HistoryEntry], format: str) -> str:
         """
-        Export entries to JSON.
+        Render entries to one of EXPORT_FORMATS as a string, without writing
+        to disk (WHISP-79: used by the daemon's ExportHistory D-Bus method,
+        which must not write to an arbitrary path itself -- the caller
+        writes the file).
 
         Args:
             entries: List of HistoryEntry instances to export
-            path: Destination file path
+            format: One of "json", "md", "csv", "txt"
+
+        Returns:
+            The fully rendered export content
+
+        Raises:
+            ValueError: if `format` isn't one of EXPORT_FORMATS
         """
+        builders = {
+            "json": self._build_json,
+            "md": self._build_markdown,
+            "csv": self._build_csv,
+            "txt": self._build_text,
+        }
+        builder = builders.get(format)
+        if builder is None:
+            raise ValueError(
+                f"Unknown export format: {format!r} (expected one of {self.EXPORT_FORMATS})"
+            )
+        return builder(entries)
+
+    def _build_json(self, entries: List[HistoryEntry]) -> str:
+        """Render entries as a JSON array string (ensure_ascii=False so
+        accented characters like ñ/é come through literally, not \\uXXXX)."""
         data = [entry.to_dict() for entry in entries]
+        return json.dumps(data, indent=2, ensure_ascii=False)
 
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-
-        logger.info(f"Exported {len(entries)} entries to JSON: {path}")
-
-    def export_markdown(self, entries: List[HistoryEntry], path: Path) -> None:
-        """
-        Export entries to Markdown.
-
-        Args:
-            entries: List of HistoryEntry instances to export
-            path: Destination file path
-        """
+    def _build_markdown(self, entries: List[HistoryEntry]) -> str:
+        """Render entries as a Markdown document, grouped by date."""
         lines = ["# WhisperAloud Transcription History", ""]
 
         # Group by date
@@ -424,8 +479,82 @@ class HistoryManager:
                 lines.append("---")
                 lines.append("")
 
+        return "\n".join(lines)
+
+    def _build_csv(self, entries: List[HistoryEntry]) -> str:
+        """Render entries as CSV (csv.writer handles quoting of embedded
+        commas/quotes/newlines automatically)."""
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+
+        # Header
+        writer.writerow([
+            'ID',
+            'Timestamp',
+            'Text',
+            'Language',
+            'Confidence',
+            'Duration',
+            'Processing Time',
+            'Tags',
+            'Notes',
+            'Favorite',
+            'Session ID'
+        ])
+
+        # Data
+        for entry in entries:
+            writer.writerow([
+                entry.id,
+                entry.timestamp.isoformat() if entry.timestamp else '',
+                entry.text,
+                entry.language,
+                entry.confidence,
+                entry.duration,
+                entry.processing_time,
+                ','.join(entry.tags) if entry.tags else '',
+                entry.notes,
+                entry.favorite,
+                entry.session_id or ''
+            ])
+
+        return buf.getvalue()
+
+    def _build_text(self, entries: List[HistoryEntry]) -> str:
+        """Render entries as plain text (transcriptions only)."""
+        lines = []
+
+        for entry in entries:
+            timestamp_str = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S") if entry.timestamp else "Unknown"
+            lines.append(f"[{timestamp_str}] {entry.language.upper()}")
+            lines.append(entry.text)
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def export_json(self, entries: List[HistoryEntry], path: Path) -> None:
+        """
+        Export entries to JSON.
+
+        Args:
+            entries: List of HistoryEntry instances to export
+            path: Destination file path
+        """
         with open(path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(lines))
+            f.write(self._build_json(entries))
+
+        logger.info(f"Exported {len(entries)} entries to JSON: {path}")
+
+    def export_markdown(self, entries: List[HistoryEntry], path: Path) -> None:
+        """
+        Export entries to Markdown.
+
+        Args:
+            entries: List of HistoryEntry instances to export
+            path: Destination file path
+        """
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(self._build_markdown(entries))
 
         logger.info(f"Exported {len(entries)} entries to Markdown: {path}")
 
@@ -438,38 +567,7 @@ class HistoryManager:
             path: Destination file path
         """
         with open(path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-
-            # Header
-            writer.writerow([
-                'ID',
-                'Timestamp',
-                'Text',
-                'Language',
-                'Confidence',
-                'Duration',
-                'Processing Time',
-                'Tags',
-                'Notes',
-                'Favorite',
-                'Session ID'
-            ])
-
-            # Data
-            for entry in entries:
-                writer.writerow([
-                    entry.id,
-                    entry.timestamp.isoformat() if entry.timestamp else '',
-                    entry.text,
-                    entry.language,
-                    entry.confidence,
-                    entry.duration,
-                    entry.processing_time,
-                    ','.join(entry.tags) if entry.tags else '',
-                    entry.notes,
-                    entry.favorite,
-                    entry.session_id or ''
-                ])
+            f.write(self._build_csv(entries))
 
         logger.info(f"Exported {len(entries)} entries to CSV: {path}")
 
@@ -481,16 +579,8 @@ class HistoryManager:
             entries: List of HistoryEntry instances to export
             path: Destination file path
         """
-        lines = []
-
-        for entry in entries:
-            timestamp_str = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S") if entry.timestamp else "Unknown"
-            lines.append(f"[{timestamp_str}] {entry.language.upper()}")
-            lines.append(entry.text)
-            lines.append("")
-
         with open(path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(lines))
+            f.write(self._build_text(entries))
 
         logger.info(f"Exported {len(entries)} entries to text: {path}")
 

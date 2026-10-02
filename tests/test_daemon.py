@@ -395,6 +395,108 @@ class TestDaemonMethods:
         daemon.history_manager.delete.assert_called_once_with(4)
         assert result is True
 
+    # ─── ExportHistory (WHISP-79) ──────────────────────────────────────
+
+    def test_export_history_default_filters(self, daemon):
+        """No filters: query() is called with every filter at its default
+        and the default export limit, and export_string renders the result."""
+        daemon.history_manager.query.return_value = []
+        daemon.history_manager.export_string.return_value = "[]"
+
+        result = daemon.ExportHistory("json", {})
+
+        assert result == "[]"
+        daemon.history_manager.query.assert_called_once()
+        _, kwargs = daemon.history_manager.query.call_args
+        assert kwargs["since"] is None
+        assert kwargs["until"] is None
+        assert kwargs["favorites_only"] is False
+        assert kwargs["query"] is None
+        assert kwargs["limit"] == daemon._daemon_module.EXPORT_DEFAULT_LIMIT
+        daemon.history_manager.export_string.assert_called_once_with([], "json")
+
+    def test_export_history_passes_filters_through(self, daemon):
+        """since/until/favorites_only/query/limit all reach query() parsed
+        to the right Python types."""
+        daemon.history_manager.query.return_value = []
+        daemon.history_manager.export_string.return_value = ""
+
+        daemon.ExportHistory(
+            "csv",
+            {
+                "since": "2026-01-01",
+                "until": "2026-01-31",
+                "favorites_only": True,
+                "query": "budget",
+                "limit": 25,
+            },
+        )
+
+        _, kwargs = daemon.history_manager.query.call_args
+        assert kwargs["since"].isoformat().startswith("2026-01-01")
+        assert kwargs["until"].isoformat().startswith("2026-01-31")
+        assert kwargs["favorites_only"] is True
+        assert kwargs["query"] == "budget"
+        assert kwargs["limit"] == 25
+
+    def test_export_history_rejects_unknown_format(self, daemon):
+        result = daemon.ExportHistory("pdf", {})
+        assert result == ""
+        daemon.Error.assert_called_once()
+        code, _ = daemon.Error.call_args[0]
+        assert code == "export_invalid_format"
+        daemon.history_manager.query.assert_not_called()
+
+    def test_export_history_rejects_bad_since(self, daemon):
+        result = daemon.ExportHistory("json", {"since": "not-a-date"})
+        assert result == ""
+        daemon.Error.assert_called_once()
+        code, _ = daemon.Error.call_args[0]
+        assert code == "export_invalid_filter"
+        daemon.history_manager.query.assert_not_called()
+
+    def test_export_history_rejects_bad_limit(self, daemon):
+        result = daemon.ExportHistory("json", {"limit": "not-a-number"})
+        assert result == ""
+        daemon.Error.assert_called_once()
+        code, _ = daemon.Error.call_args[0]
+        assert code == "export_invalid_filter"
+
+    def test_export_history_caps_limit_to_maximum(self, daemon):
+        daemon.history_manager.query.return_value = []
+        daemon.history_manager.export_string.return_value = ""
+
+        daemon.ExportHistory("json", {"limit": 10_000_000})
+
+        _, kwargs = daemon.history_manager.query.call_args
+        assert kwargs["limit"] == daemon._daemon_module.EXPORT_MAX_LIMIT
+
+    def test_export_history_nonpositive_limit_uses_default(self, daemon):
+        daemon.history_manager.query.return_value = []
+        daemon.history_manager.export_string.return_value = ""
+
+        daemon.ExportHistory("json", {"limit": 0})
+
+        _, kwargs = daemon.history_manager.query.call_args
+        assert kwargs["limit"] == daemon._daemon_module.EXPORT_DEFAULT_LIMIT
+
+    def test_export_history_empty_query_treated_as_no_filter(self, daemon):
+        daemon.history_manager.query.return_value = []
+        daemon.history_manager.export_string.return_value = ""
+
+        daemon.ExportHistory("json", {"query": "   "})
+
+        _, kwargs = daemon.history_manager.query.call_args
+        assert kwargs["query"] is None
+
+    def test_export_history_manager_failure_emits_error(self, daemon):
+        daemon.history_manager.query.side_effect = RuntimeError("db exploded")
+        result = daemon.ExportHistory("json", {})
+        assert result == ""
+        daemon.Error.assert_called_once()
+        code, _ = daemon.Error.call_args[0]
+        assert code == "export_failed"
+
     # ─── D-Bus properties ───────────────────────────────────────────────
 
     def test_api_version_property_matches_constant(self, daemon):

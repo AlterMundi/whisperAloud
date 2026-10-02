@@ -295,6 +295,88 @@ class TestDatabaseQueries:
         assert all_entries[0].text == "New entry"
 
 
+class TestDatabaseQueryEntries:
+    """Test query_entries: the combined since/until/favorites_only/query/limit
+    filter used by WHISP-79's ExportHistory D-Bus method."""
+
+    def test_query_entries_no_filters_returns_all(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries()
+        assert len(results) == len(sample_entries)
+
+    def test_query_entries_favorites_only(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries(favorites_only=True)
+        assert len(results) == 1
+        assert results[0].favorite is True
+
+    def test_query_entries_text_query(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries(query="Spanish")
+        assert len(results) == 1
+        assert "Spanish" in results[0].text
+
+    def test_query_entries_date_range(self, db):
+        now = datetime.now()
+        yesterday = now - timedelta(days=1)
+        tomorrow = now + timedelta(days=1)
+        last_week = now - timedelta(days=7)
+
+        db.insert(HistoryEntry(
+            text="Recent entry", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=now,
+        ))
+        db.insert(HistoryEntry(
+            text="Old entry", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=last_week,
+        ))
+
+        results = db.query_entries(since=yesterday, until=tomorrow)
+        assert len(results) == 1
+        assert results[0].text == "Recent entry"
+
+    def test_query_entries_combines_filters(self, db):
+        now = datetime.now()
+        db.insert(HistoryEntry(
+            text="Budget meeting notes", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=now,
+            favorite=True,
+        ))
+        db.insert(HistoryEntry(
+            text="Budget meeting notes but not favorited", language="en",
+            confidence=0.9, duration=1.0, processing_time=0.5, segments=[],
+            timestamp=now,
+        ))
+        db.insert(HistoryEntry(
+            text="Unrelated favorite", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=now,
+            favorite=True,
+        ))
+
+        results = db.query_entries(query="Budget", favorites_only=True)
+        assert len(results) == 1
+        assert results[0].text == "Budget meeting notes"
+
+    def test_query_entries_respects_limit(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries(limit=1)
+        assert len(results) == 1
+
+    def test_query_entries_ordered_newest_first(self, db, sample_entries):
+        ids = [db.insert(entry) for entry in sample_entries]
+
+        results = db.query_entries()
+        assert results[0].id == ids[-1]
+
+
 class TestFullTextSearch:
     """Test FTS5 full-text search functionality."""
 
@@ -941,6 +1023,99 @@ class TestHistoryManagerExport:
         content = output_file.read_text()
         assert "**Notes:**" in content
         assert "Remember to double-check this one" in content
+
+    # ─── export_string (WHISP-79: string-returning variant for ExportHistory) ──
+
+    def test_export_string_json_matches_file_export(self, manager_with_data, tmp_path):
+        entries = manager_with_data.get_recent()
+        content = manager_with_data.export_string(entries, "json")
+
+        output_file = tmp_path / "export.json"
+        manager_with_data.export_json(entries, output_file)
+
+        assert content == output_file.read_text(encoding="utf-8")
+
+    def test_export_string_markdown_matches_file_export(self, manager_with_data, tmp_path):
+        entries = manager_with_data.get_recent()
+        content = manager_with_data.export_string(entries, "md")
+
+        output_file = tmp_path / "export.md"
+        manager_with_data.export_markdown(entries, output_file)
+
+        assert content == output_file.read_text(encoding="utf-8")
+
+    def test_export_string_csv_matches_file_export(self, manager_with_data, tmp_path):
+        entries = manager_with_data.get_recent()
+        content = manager_with_data.export_string(entries, "csv")
+
+        output_file = tmp_path / "export.csv"
+        manager_with_data.export_csv(entries, output_file)
+
+        # newline="" avoids universal-newline translation of csv.writer's
+        # \r\n line terminator on read, matching how export_csv itself opens
+        # the file for writing.
+        with open(output_file, "r", newline="", encoding="utf-8") as f:
+            assert content == f.read()
+
+    def test_export_string_txt_matches_file_export(self, manager_with_data, tmp_path):
+        entries = manager_with_data.get_recent()
+        content = manager_with_data.export_string(entries, "txt")
+
+        output_file = tmp_path / "export.txt"
+        manager_with_data.export_text(entries, output_file)
+
+        assert content == output_file.read_text(encoding="utf-8")
+
+    def test_export_string_unknown_format_raises(self, manager_with_data):
+        with pytest.raises(ValueError):
+            manager_with_data.export_string(manager_with_data.get_recent(), "pdf")
+
+    def test_export_string_csv_quotes_embedded_commas_and_newlines(self, manager_with_data):
+        """CSV must properly quote text containing commas, quotes, and newlines
+        (WHISP-79: a transcription can legitimately contain any of these)."""
+        from whisper_aloud.transcriber import TranscriptionResult
+
+        result = TranscriptionResult(
+            text='Line one, with a comma\nLine two with a "quote"',
+            language="en",
+            confidence=0.9,
+            duration=1.0,
+            processing_time=0.5,
+            segments=[],
+        )
+        manager_with_data.add_transcription(result)
+
+        entries = manager_with_data.get_recent()
+        content = manager_with_data.export_string(entries, "csv")
+
+        import csv
+        import io
+
+        rows = list(csv.reader(io.StringIO(content)))
+        texts = [row[2] for row in rows[1:]]
+        assert 'Line one, with a comma\nLine two with a "quote"' in texts
+
+    def test_export_string_json_preserves_unicode(self, manager_with_data):
+        """export_string(..., 'json') must use ensure_ascii=False so accents
+        and ñ are written literally, not as \\uXXXX escapes (WHISP-79)."""
+        from whisper_aloud.transcriber import TranscriptionResult
+
+        result = TranscriptionResult(
+            text="Una canción muy bonita, año nuevo",
+            language="es",
+            confidence=0.9,
+            duration=1.0,
+            processing_time=0.5,
+            segments=[],
+        )
+        manager_with_data.add_transcription(result)
+
+        entries = manager_with_data.get_recent()
+        content = manager_with_data.export_string(entries, "json")
+
+        assert "canción" in content
+        assert "año" in content
+        assert "\\u" not in content
 
 
 class TestHistoryManagerWithAudioArchive:

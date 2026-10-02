@@ -41,6 +41,11 @@
       <arg direction="in" type="s" name="text" />
       <arg direction="out" type="b" name="success" />
     </method>
+    <method name="ExportHistory">
+      <arg direction="in" type="s" name="format" />
+      <arg direction="in" type="a{sv}" name="filters" />
+      <arg direction="out" type="s" name="content" />
+    </method>
     <method name="GetConfig">
       <arg direction="out" type="a{sv}" name="config" />
     </method>

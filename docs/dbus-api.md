@@ -252,6 +252,56 @@ Valid in any state. Overwrites the transcribed text of a history entry
 (e.g. a manual correction). Returns `false` and emits
 `Error("history_update_failed", <message>)` on failure.
 
+### ExportHistory
+
+```
+ExportHistory(s format, a{sv} filters) → (s content)
+```
+
+Valid in any state. Renders history entries matching `filters` to one of
+four formats and returns the result as a string — it does **not** write
+anything to disk. `format` is one of:
+
+| `format` | Content |
+|---|---|
+| `"md"` | Markdown, grouped by date, one section per entry |
+| `"json"` | A JSON array of entry objects (`ensure_ascii=False` — accented characters are written literally, not as `\uXXXX` escapes) |
+| `"csv"` | One header row plus one row per entry; text/tags/notes fields containing commas, quotes, or newlines are quoted per RFC 4180 |
+| `"txt"` | Plain text, transcriptions only, no metadata |
+
+`filters` (all optional):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `since` | `s` | ISO 8601 date or datetime (e.g. `"2026-01-01"` or `"2026-01-01T13:30:00"`); inclusive lower bound on timestamp |
+| `until` | `s` | Same format; inclusive upper bound. A date-only value (no time component) is treated as the **end** of that day, not midnight at its start — so `until="2026-01-31"` includes everything from the 31st |
+| `favorites_only` | `b` | Only entries with the favorite flag set |
+| `query` | `s` | FTS5 search text (same engine as `SearchHistory`); empty/whitespace-only is treated as no filter |
+| `limit` | numeric | Maximum entries to include. Missing or `<= 0` defaults to **500**; any value above **5000** is silently capped there (`EXPORT_DEFAULT_LIMIT`/`EXPORT_MAX_LIMIT` in `daemon.py`) — this bounds how large a single D-Bus reply string can get |
+
+All filters compose: e.g. `{"favorites_only": true, "query": "budget",
+"since": "2026-01-01"}` returns only favorited entries from 2026-01-01
+onward whose text/tags/notes match "budget".
+
+Returns `""` and emits an `Error` signal on failure, without touching
+`history_manager`:
+
+- `Error("export_invalid_format", <message>)` — `format` isn't one of the
+  four above.
+- `Error("export_invalid_filter", <message>)` — `since`/`until` isn't a
+  parseable ISO date/datetime, or `limit` isn't a number.
+- `Error("export_failed", <message>)` — the query or render itself raised
+  (e.g. a database error).
+
+**Why this method returns a string instead of accepting an output path**:
+a D-Bus method that writes to a caller-supplied filesystem path is a
+privileged-path-write vector — the daemon would be writing a file wherever
+*any* session-bus client asked, not just this project's own CLI/GUI, with
+no sandboxing of the destination. Returning the content and letting the
+client write it keeps that write inside the client's own, already-scoped
+filesystem permissions. The tradeoff is the `limit` cap above, since the
+whole export must fit in one D-Bus method reply.
+
 ### History entry shape
 
 `GetHistory` / `SearchHistory` / `GetFavoriteHistory` all return entries
@@ -784,6 +834,25 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.4.0 — 2026-10-02
+
+Minor (additive), WHISP-79: history export and search exposed over D-Bus
+(and the CLI's `history list`/`history search`/`history export`), closing
+out WHISP-40's FTS5-history-with-search-and-export differentiator.
+
+- **New method** `ExportHistory(s format, a{sv} filters) → (s content)`:
+  renders history entries to `"md"`/`"json"`/`"csv"`/`"txt"` and returns the
+  content as a string — the daemon never writes to a filesystem path on the
+  caller's behalf (see the method's own section above for why). `filters`
+  supports `since`/`until` (ISO date/datetime), `favorites_only`, `query`
+  (FTS5), and a capped `limit` (default 500, max 5000), all composable.
+- **`Error`'s `code` values gain three new entries**: `export_invalid_format`,
+  `export_invalid_filter`, `export_failed`.
+- `SearchHistory` and `GetHistory` are unchanged — `ExportHistory` is a new,
+  separate method rather than an export flag on an existing one, since its
+  filter shape (date range + favorites + query combined) is strictly wider
+  than what those two already support.
 
 ### 1.3.0 — 2026-10-02
 

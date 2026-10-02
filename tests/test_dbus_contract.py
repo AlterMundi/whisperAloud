@@ -69,6 +69,7 @@ CLIENT_METHOD_CALLS = {
     "ToggleHistoryFavorite": 1,
     "DeleteHistoryEntry": 1,
     "UpdateHistoryEntry": 2,
+    "ExportHistory": 2,
     "GetConfig": 0,
     "SetConfig": 1,
     "ReloadConfig": 0,

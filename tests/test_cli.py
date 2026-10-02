@@ -378,6 +378,90 @@ def test_history_search_passes_query_through(mock_check, mock_call, capsys):
         mock_call.assert_called_once_with("SearchHistory", "budget meeting", 10)
 
 
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_list_explicit_subaction(mock_check, mock_call, capsys):
+    """`history list` is an explicit spelling of the default (no-subaction) behavior."""
+    mock_call.return_value = [{"id": 1, "text": "hello there", "timestamp": 0}]
+    with patch('sys.argv', ['whisper-aloud', 'history', 'list', '--limit', '5']):
+        exit_code = main()
+        assert exit_code == 0
+        mock_call.assert_called_once_with("GetHistory", 5)
+        assert "hello there" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_list_favorites_flag(mock_check, mock_call, capsys):
+    mock_call.return_value = []
+    with patch('sys.argv', ['whisper-aloud', 'history', 'list', '--favorites']):
+        exit_code = main()
+        assert exit_code == 0
+        mock_call.assert_called_once_with("GetFavoriteHistory", 10)
+
+
+# ─── History export subcommand (WHISP-79) ─────────────────────────────────────
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_export_prints_to_stdout_by_default(mock_check, mock_call, capsys):
+    mock_call.return_value = "[]"
+    with patch('sys.argv', ['whisper-aloud', 'history', 'export', '--format', 'json']):
+        exit_code = main()
+        assert exit_code == 0
+        name, fmt, filters = mock_call.call_args[0]
+        assert (name, fmt) == ("ExportHistory", "json")
+        assert filters == {}
+        assert "[]" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_export_writes_to_output_file(mock_check, mock_call, tmp_path, capsys):
+    mock_call.return_value = "ID,Timestamp\r\n"
+    output_file = tmp_path / "out.csv"
+    with patch('sys.argv', [
+        'whisper-aloud', 'history', 'export', '--format', 'csv', '--output', str(output_file),
+    ]):
+        exit_code = main()
+        assert exit_code == 0
+        with open(output_file, "r", newline="", encoding="utf-8") as f:
+            assert f.read() == "ID,Timestamp\r\n"
+        assert "Exported" in capsys.readouterr().out
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_history_export_passes_all_filters(mock_check, mock_call, capsys):
+    mock_call.return_value = "[]"
+    with patch('sys.argv', [
+        'whisper-aloud', 'history', 'export', '--format', 'json',
+        '--since', '2026-01-01', '--until', '2026-01-31',
+        '--favorites', '--query', 'budget', '--limit', '25',
+    ]):
+        exit_code = main()
+        assert exit_code == 0
+        _, _, filters = mock_call.call_args[0]
+        # filters are wrapped as GLib.Variant-like; unwrap for the assertion
+        unwrapped = {k: (v.unpack() if hasattr(v, 'unpack') else v) for k, v in filters.items()}
+        assert unwrapped == {
+            "since": "2026-01-01",
+            "until": "2026-01-31",
+            "favorites_only": True,
+            "query": "budget",
+            "limit": 25,
+        }
+
+
+@patch('whisper_aloud.__main__.check_service_running', return_value=False)
+def test_history_export_requires_daemon(mock_check, capsys):
+    with patch('sys.argv', ['whisper-aloud', 'history', 'export', '--format', 'json']):
+        exit_code = main()
+        assert exit_code == 1
+        assert "daemon is not running" in capsys.readouterr().err
+
+
 # ─── Config subcommand ────────────────────────────────────────────────────────
 
 
