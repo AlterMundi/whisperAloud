@@ -209,6 +209,26 @@ class TestDaemonMethods:
         result = daemon.ToggleRecording()
         assert result == "transcribing"
 
+    def test_toggle_recording_refused_while_transcribing(self, daemon):
+        """WHISP-72: ToggleRecording must report the real resulting state,
+        not a hardcoded "recording", when StartRecording() refuses because a
+        previous transcription is still in flight."""
+        daemon.recorder.is_recording = False
+        daemon._transcribing = True
+        result = daemon.ToggleRecording()
+        assert result == "transcribing"
+        daemon.recorder.start.assert_not_called()
+
+    def test_toggle_recording_start_failure_reports_error(self, daemon):
+        """WHISP-72: if StartRecording() fails for a reason other than an
+        in-flight transcription, ToggleRecording() must not claim
+        "recording" either."""
+        daemon.recorder.is_recording = False
+        daemon._transcribing = False
+        daemon.recorder.start.side_effect = RuntimeError("boom")
+        result = daemon.ToggleRecording()
+        assert result == "error"
+
     def test_get_status_returns_dict(self, daemon):
         """GetStatus should return dict with expected keys."""
         daemon.recorder.state = MagicMock()
