@@ -1415,9 +1415,9 @@ class WhisperAloudService:
                     and self.clipboard_manager
                     and result.text):
                 try:
-                    from ..clipboard import PasteSimulator
+                    from ..clipboard import build_paste_simulator
                     import threading as _threading
-                    simulator = PasteSimulator(
+                    simulator = build_paste_simulator(
                         self.clipboard_manager._session_type,
                         self.config.clipboard,
                     )
