@@ -2,12 +2,15 @@
 
 import logging
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk
+gi.require_version('Adw', '1')
+from gi.repository import Adw, Gtk
+
+from . import dialogs
 
 logger = logging.getLogger(__name__)
 
@@ -23,43 +26,56 @@ class ErrorDialog:
     """Helper for creating error dialogs with recovery options."""
 
     @staticmethod
+    def _build_responses(
+        recovery_action: Optional[Tuple[str, Callable]],
+    ) -> List[Tuple[str, str, "Adw.ResponseAppearance"]]:
+        """Pure response-list builder (WHISP-80), kept separate from dialog
+        construction so the button set is unit-testable without GTK/a
+        display.
+
+        Returns ``(response_id, label, appearance)`` tuples in presentation
+        order: the optional recovery action first, then "Close" last --
+        Close is always present and is always the default/close response.
+        """
+        responses = []
+        if recovery_action is not None:
+            label, _callback = recovery_action
+            responses.append(("recovery", label, Adw.ResponseAppearance.SUGGESTED))
+        responses.append(("close", "Close", Adw.ResponseAppearance.DEFAULT))
+        return responses
+
+    @staticmethod
     def show_error(
         parent: Gtk.Window,
         title: str,
         message: str,
         details: Optional[str] = None,
         severity: ErrorSeverity = ErrorSeverity.ERROR,
-        recovery_action: Optional[tuple[str, Callable]] = None
-    ) -> None:
+        recovery_action: Optional[Tuple[str, Callable]] = None
+    ):
         """
         Show an error dialog with optional details and recovery action.
+
+        Uses dialogs.show_dialog (WHISP-80) -- Adw.AlertDialog on libadwaita
+        >= 1.5, falling back to the deprecated Adw.MessageDialog on older
+        libadwaita, same as confirm(). Note severity no longer changes the
+        dialog's icon/styling: neither AlertDialog nor MessageDialog expose
+        the Gtk.MessageType concept Gtk.MessageDialog had; ``severity`` is
+        kept for API compatibility with callers.
 
         Args:
             parent: Parent window
             title: Dialog title
             message: Main error message
             details: Optional detailed error information
-            severity: Error severity level
+            severity: Error severity level (currently unused for styling)
             recovery_action: Optional tuple of (button_label, callback)
+
+        Returns the constructed dialog (useful for tests).
         """
-        # Map severity to GTK message type
-        message_type_map = {
-            ErrorSeverity.INFO: Gtk.MessageType.INFO,
-            ErrorSeverity.WARNING: Gtk.MessageType.WARNING,
-            ErrorSeverity.ERROR: Gtk.MessageType.ERROR,
-        }
+        del severity  # kept for API compatibility; no Adw equivalent to apply it to
 
-        # Create dialog
-        dialog = Gtk.MessageDialog(
-            transient_for=parent,
-            modal=True,
-            message_type=message_type_map[severity],
-            buttons=Gtk.ButtonsType.NONE,
-            text=title,
-            secondary_text=message,
-        )
-
-        # Add details if provided
+        extra_child = None
         if details:
             expander = Gtk.Expander(label="Show Details")
             details_view = Gtk.TextView()
@@ -77,28 +93,26 @@ class ErrorDialog:
             scrolled.set_child(details_view)
 
             expander.set_child(scrolled)
-            dialog.get_content_area().append(expander)
+            extra_child = expander
 
-        # Add recovery button if provided
-        if recovery_action:
-            label, callback = recovery_action
-            dialog.add_button(label, Gtk.ResponseType.ACCEPT)
-
-        # Add close button
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-
-        def on_response(d: Gtk.MessageDialog, response: Gtk.ResponseType) -> None:
-            """Handle dialog response."""
-            if response == Gtk.ResponseType.ACCEPT and recovery_action:
+        def _on_response(response: str) -> None:
+            if response == "recovery" and recovery_action:
                 _, callback = recovery_action
                 try:
                     callback()
                 except Exception as e:
                     logger.error(f"Recovery action failed: {e}", exc_info=True)
-            d.close()
 
-        dialog.connect("response", on_response)
-        dialog.present()
+        return dialogs.show_dialog(
+            parent=parent,
+            heading=title,
+            body=message,
+            responses=ErrorDialog._build_responses(recovery_action),
+            default_response="close",
+            close_response="close",
+            on_response=_on_response,
+            extra_child=extra_child,
+        )
 
 
 class ValidationError(Exception):
