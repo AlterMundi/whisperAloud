@@ -295,6 +295,88 @@ class TestDatabaseQueries:
         assert all_entries[0].text == "New entry"
 
 
+class TestDatabaseQueryEntries:
+    """Test query_entries: the combined since/until/favorites_only/query/limit
+    filter used by WHISP-79's ExportHistory D-Bus method."""
+
+    def test_query_entries_no_filters_returns_all(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries()
+        assert len(results) == len(sample_entries)
+
+    def test_query_entries_favorites_only(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries(favorites_only=True)
+        assert len(results) == 1
+        assert results[0].favorite is True
+
+    def test_query_entries_text_query(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries(query="Spanish")
+        assert len(results) == 1
+        assert "Spanish" in results[0].text
+
+    def test_query_entries_date_range(self, db):
+        now = datetime.now()
+        yesterday = now - timedelta(days=1)
+        tomorrow = now + timedelta(days=1)
+        last_week = now - timedelta(days=7)
+
+        db.insert(HistoryEntry(
+            text="Recent entry", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=now,
+        ))
+        db.insert(HistoryEntry(
+            text="Old entry", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=last_week,
+        ))
+
+        results = db.query_entries(since=yesterday, until=tomorrow)
+        assert len(results) == 1
+        assert results[0].text == "Recent entry"
+
+    def test_query_entries_combines_filters(self, db):
+        now = datetime.now()
+        db.insert(HistoryEntry(
+            text="Budget meeting notes", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=now,
+            favorite=True,
+        ))
+        db.insert(HistoryEntry(
+            text="Budget meeting notes but not favorited", language="en",
+            confidence=0.9, duration=1.0, processing_time=0.5, segments=[],
+            timestamp=now,
+        ))
+        db.insert(HistoryEntry(
+            text="Unrelated favorite", language="en", confidence=0.9,
+            duration=1.0, processing_time=0.5, segments=[], timestamp=now,
+            favorite=True,
+        ))
+
+        results = db.query_entries(query="Budget", favorites_only=True)
+        assert len(results) == 1
+        assert results[0].text == "Budget meeting notes"
+
+    def test_query_entries_respects_limit(self, db, sample_entries):
+        for entry in sample_entries:
+            db.insert(entry)
+
+        results = db.query_entries(limit=1)
+        assert len(results) == 1
+
+    def test_query_entries_ordered_newest_first(self, db, sample_entries):
+        ids = [db.insert(entry) for entry in sample_entries]
+
+        results = db.query_entries()
+        assert results[0].id == ids[-1]
+
+
 class TestFullTextSearch:
     """Test FTS5 full-text search functionality."""
 
