@@ -54,6 +54,15 @@
     <method name="Quit">
       <arg direction="out" type="b" name="success" />
     </method>
+    <method name="DownloadModel">
+      <arg direction="in" type="s" name="engine" />
+      <arg direction="in" type="s" name="name" />
+      <arg direction="in" type="b" name="accept_license" />
+      <arg direction="out" type="b" name="started" />
+    </method>
+    <method name="CancelDownload">
+      <arg direction="out" type="b" name="success" />
+    </method>
     <signal name="RecordingStarted" />
     <signal name="RecordingStopped" />
     <signal name="TranscriptionReady">
@@ -78,6 +87,18 @@
     <signal name="Error">
       <arg type="s" name="code" />
       <arg type="s" name="message" />
+    </signal>
+    <signal name="DownloadProgress">
+      <arg type="s" name="engine" />
+      <arg type="s" name="name" />
+      <arg type="t" name="bytes_done" />
+      <arg type="t" name="bytes_total" />
+    </signal>
+    <signal name="DownloadFinished">
+      <arg type="s" name="engine" />
+      <arg type="s" name="name" />
+      <arg type="b" name="ok" />
+      <arg type="s" name="error" />
     </signal>
     <property name="ApiVersion" type="s" access="read" />
   </interface>

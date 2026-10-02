@@ -305,6 +305,32 @@ class WhisperAloudClient:
             logger.warning(f"quit_daemon failed: {e}")
             return False
 
+    def download_model(self, engine: str, name: str, accept_license: bool = False) -> bool:
+        """Start a background download of a catalog (engine, name) model.
+
+        Returns True only if the daemon *started* the download (False if one
+        was already running, or the model/license was refused -- see the
+        Error signal for why). Progress/completion arrive via
+        on_download_progress/on_download_finished, not this return value.
+        """
+        if not self._connected or not self._proxy:
+            return False
+        try:
+            return self._proxy.DownloadModel(engine, name, accept_license)
+        except Exception as e:
+            logger.warning(f"download_model failed: {e}")
+            return False
+
+    def cancel_download(self) -> bool:
+        """Request cancellation of the in-flight model download, if any."""
+        if not self._connected or not self._proxy:
+            return False
+        try:
+            return self._proxy.CancelDownload()
+        except Exception as e:
+            logger.warning(f"cancel_download failed: {e}")
+            return False
+
     def get_api_version(self) -> str:
         """Get the org.fede.whisperaloud.Control interface's semantic version.
 
@@ -358,6 +384,14 @@ class WhisperAloudClient:
     def on_error(self, callback: Callable) -> None:
         """Subscribe to Error signal (code, message)."""
         self._subscribe_signal("Error", callback)
+
+    def on_download_progress(self, callback: Callable) -> None:
+        """Subscribe to DownloadProgress signal (engine, name, bytes_done, bytes_total)."""
+        self._subscribe_signal("DownloadProgress", callback)
+
+    def on_download_finished(self, callback: Callable) -> None:
+        """Subscribe to DownloadFinished signal (engine, name, ok, error)."""
+        self._subscribe_signal("DownloadFinished", callback)
 
     def _subscribe_signal(self, signal_name: str, callback: Callable) -> None:
         """Internal: subscribe to a D-Bus signal by name.

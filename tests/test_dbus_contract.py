@@ -73,6 +73,8 @@ CLIENT_METHOD_CALLS = {
     "SetConfig": 1,
     "ReloadConfig": 0,
     "Quit": 0,
+    "DownloadModel": 3,
+    "CancelDownload": 0,
 }
 
 CLIENT_SIGNAL_SUBSCRIPTIONS = {
@@ -84,6 +86,8 @@ CLIENT_SIGNAL_SUBSCRIPTIONS = {
     "StatusChanged",
     "ConfigChanged",
     "Error",
+    "DownloadProgress",
+    "DownloadFinished",
 }
 
 # ─── Regex self-check: keeps the explicit lists above honest ───────────────

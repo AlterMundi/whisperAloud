@@ -17,6 +17,7 @@ from ..config import (
     WhisperAloudConfig,
 )
 from ..stt import catalog
+from .download_logic import compute_ui_state, requires_license_consent
 from .error_handler import InputValidator, ValidationError
 from .model_picker_logic import (
     badges_for,
@@ -270,10 +271,40 @@ class SettingsDialog(Gtk.Window):
         self._language_fallback_notice.add_css_class("dim-label")
         self._language_fallback_notice.set_visible(False)
 
+        # In-app model download row (WHISP-68): Download button, progress bar,
+        # Cancel, and an error label. Visibility/content is entirely driven by
+        # download_logic.compute_ui_state() -- see _update_download_row().
+        # State must also exist before _refresh_model_row() below, since it
+        # ends in _update_notices() -> _update_download_row().
+        self._download_client = None
+        self._downloading = False
+        self._download_active_entry: Optional[tuple] = None  # (engine, name)
+        self._download_progress_state: Optional[tuple] = None  # (bytes_done, bytes_total)
+        self._download_error: Optional[str] = None
+
+        self._download_row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._download_row_box.set_visible(False)
+        self._download_button = Gtk.Button(label="Download")
+        self._download_button.connect("clicked", self._on_download_clicked)
+        self._download_progress = Gtk.ProgressBar()
+        self._download_progress.set_hexpand(True)
+        self._download_progress.set_valign(Gtk.Align.CENTER)
+        self._download_cancel_button = Gtk.Button(label="Cancel")
+        self._download_cancel_button.connect("clicked", self._on_download_cancel_clicked)
+        self._download_row_box.append(self._download_button)
+        self._download_row_box.append(self._download_progress)
+        self._download_row_box.append(self._download_cancel_button)
+
+        self._download_error_label = Gtk.Label(wrap=True, xalign=0)
+        self._download_error_label.add_css_class("error")
+        self._download_error_label.set_visible(False)
+
         self._refresh_model_row()
         self._model_list_box.append(self.model_row)
         page.append(self._model_list_box)
         page.append(self._download_notice)
+        page.append(self._download_row_box)
+        page.append(self._download_error_label)
         page.append(self._license_notice)
         page.append(self._language_fallback_notice)
 
@@ -677,6 +708,7 @@ class SettingsDialog(Gtk.Window):
         if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
             self._download_notice.set_visible(False)
             self._license_notice.set_visible(False)
+            self._update_download_row()
             return
 
         entry = self._model_entries[index]
@@ -697,6 +729,182 @@ class SettingsDialog(Gtk.Window):
             self._license_notice.set_visible(True)
         else:
             self._license_notice.set_visible(False)
+
+        self._update_download_row()
+
+    # ─── WHISP-68: in-app model download ───────────────────────────────────
+
+    def _selected_entry(self) -> Optional["catalog.ModelEntry"]:
+        index = self.model_row.get_selected()
+        if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
+            return None
+        return self._model_entries[index]
+
+    def _get_download_client(self):
+        """Lazily create (and keep) one WhisperAloudClient for the download
+        signals, subscribing to DownloadProgress/DownloadFinished exactly
+        once -- mirrors _on_register_hotkey_clicked's lazy-client pattern."""
+        if self._download_client is None:
+            from whisper_aloud.service.client import WhisperAloudClient
+
+            client = WhisperAloudClient()
+            client.on_download_progress(self._on_download_progress_signal)
+            client.on_download_finished(self._on_download_finished_signal)
+            self._download_client = client
+        return self._download_client
+
+    def _update_download_row(self) -> None:
+        """Render the download row for the currently selected Model-row entry,
+        entirely from download_logic.compute_ui_state() -- no visibility/label
+        decision is made here directly."""
+        entry = self._selected_entry()
+        if entry is None:
+            self._download_row_box.set_visible(False)
+            self._download_error_label.set_visible(False)
+            return
+
+        is_current = self._download_active_entry == (entry.engine, entry.name)
+        state = compute_ui_state(
+            downloaded=download_state_for(entry).downloaded,
+            is_downloading=is_current and self._downloading,
+            size_mb=entry.size_mb,
+            progress=self._download_progress_state if is_current else None,
+            error=self._download_error if is_current else None,
+        )
+
+        self._download_button.set_visible(state.button_visible)
+        self._download_button.set_label(state.button_label)
+        self._download_button.set_sensitive(state.button_sensitive)
+        self._download_progress.set_visible(state.progress_visible)
+        if state.progress_visible:
+            if state.progress_fraction is None:
+                self._download_progress.pulse()
+            else:
+                self._download_progress.set_fraction(state.progress_fraction)
+        self._download_cancel_button.set_visible(state.cancel_visible)
+        self._download_row_box.set_visible(state.button_visible or state.progress_visible)
+        self._download_error_label.set_text(state.error_text)
+        self._download_error_label.set_visible(state.error_visible)
+
+    def _on_download_clicked(self, _button: Gtk.Button) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        if requires_license_consent(entry):
+            # WHISP-68 audit BLOCKER #1: a needs_review or non-standard-license
+            # entry must never start downloading from a plain click -- show an
+            # explicit consent dialog first. Only its "Accept and download"
+            # response calls _start_download(..., accept_license=True); every
+            # other outcome (Cancel, Esc, closing the dialog) sends nothing at
+            # all, not even accept_license=False.
+            self._show_license_consent_dialog(entry)
+            return
+        self._start_download(entry, accept_license=False)
+
+    # Findings doc referenced by the license-consent dialog for the one
+    # catalog entry that needs it today (nemotron-streaming's OpenMDW-1.1
+    # pending-review license). Relative to the repo root (settings_dialog.py
+    # lives at src/whisper_aloud/ui/, three parents up).
+    _LICENSE_FINDINGS_DOC = "docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md"
+
+    def _license_findings_doc_markup(self) -> str:
+        """A clickable `file://` link to the findings doc when it can be
+        resolved on disk (a source checkout), else just its repo-relative
+        path as plain text (e.g. an installed package without docs/) --
+        never a broken link."""
+        repo_root = Path(__file__).resolve().parents[3]
+        doc_path = repo_root / self._LICENSE_FINDINGS_DOC
+        escaped_rel = GLib.markup_escape_text(self._LICENSE_FINDINGS_DOC)
+        if doc_path.is_file():
+            return f'<a href="file://{doc_path}">{escaped_rel}</a>'
+        return escaped_rel
+
+    def _show_license_consent_dialog(self, entry: "catalog.ModelEntry") -> None:
+        """Explicit license-consent dialog for a needs_review/non-standard-
+        license entry (WHISP-68 audit BLOCKER #1). Shows the model label, the
+        license id, the pending-review status, and a link to the findings doc
+        (or the license itself) -- never started implicitly from a notice
+        merely being visible."""
+        status = (
+            "This model's license is pending human legal review."
+            if entry.needs_review
+            else "This model's license is non-standard for this app (MIT)."
+        )
+        label = GLib.markup_escape_text(entry.label)
+        license_id = GLib.markup_escape_text(entry.license)
+        body = (
+            f"<b>{label}</b>\n"
+            f"License: {license_id}\n"
+            f"{status}\n\n"
+            f"See {self._license_findings_doc_markup()} for details."
+        )
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading=entry.label,
+            body=body,
+            body_use_markup=True,
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("accept", "Accept and download")
+        dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_license_consent_response, entry)
+        dialog.present()
+
+    def _on_license_consent_response(
+        self, _dialog: "Adw.MessageDialog", response: str, entry: "catalog.ModelEntry"
+    ) -> None:
+        if response != "accept":
+            return  # Cancel/Esc/close: nothing is sent to the daemon at all.
+        self._start_download(entry, accept_license=True)
+
+    def _start_download(self, entry: "catalog.ModelEntry", accept_license: bool) -> None:
+        client = self._get_download_client()
+        self._download_error = None
+        started = client.download_model(entry.engine, entry.name, accept_license)
+        if not started:
+            self._download_error = (
+                "Could not start download (another download may already be running)."
+            )
+            self._update_download_row()
+            return
+        self._downloading = True
+        self._download_active_entry = (entry.engine, entry.name)
+        self._download_progress_state = (0, 0)
+        self._update_download_row()
+
+    def _on_download_cancel_clicked(self, _button: Gtk.Button) -> None:
+        # Cancel is only ever visible/clickable while a download this dialog
+        # itself started is in flight (see compute_ui_state's cancel_visible),
+        # so a client always already exists by the time this can fire --
+        # still routed through _get_download_client() (not self._download_client
+        # directly) so it's consistent with _on_download_clicked and trivially
+        # fakeable in tests.
+        self._get_download_client().cancel_download()
+
+    def _on_download_progress_signal(
+        self, engine: str, name: str, bytes_done: int, bytes_total: int
+    ) -> None:
+        if self._download_active_entry != (engine, name):
+            return
+        self._download_progress_state = (bytes_done, bytes_total)
+        self._update_download_row()
+
+    def _on_download_finished_signal(
+        self, engine: str, name: str, ok: bool, error: str
+    ) -> None:
+        if self._download_active_entry != (engine, name):
+            return
+        self._downloading = False
+        self._download_progress_state = None
+        self._download_error = None if ok else (error or "Download failed")
+        # Prefer refreshing the download state after DownloadFinished over
+        # tracking "downloaded" locally -- re-derives it from disk via
+        # model_picker_logic.download_state_for (the single source of
+        # truth), which also keeps the row's badges/notices consistent.
+        self._refresh_model_row()
 
     def _on_model_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
         """Handle a (user- or programmatically-driven) Model row selection change."""
