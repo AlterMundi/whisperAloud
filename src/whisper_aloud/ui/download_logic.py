@@ -11,7 +11,12 @@ error label) without deciding any of that itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
+
+from .model_picker_logic import is_nonstandard_license
+
+if TYPE_CHECKING:
+    from ..stt.catalog import ModelEntry
 
 
 @dataclass(frozen=True)
@@ -104,13 +109,18 @@ def compute_ui_state(
     )
 
 
-def should_accept_license(license_notice_visible: bool) -> bool:
-    """Whether a Download click should pass accept_license=True to
-    DownloadModel(). The Settings dialog already shows a license notice
-    (model_picker_logic.is_nonstandard_license) for any selected entry with
-    a non-standard or needs_review license *before* the user can click
-    Download -- so if that notice is visible, clicking Download is the
-    user's explicit acknowledgement of it. A standard-license entry never
-    needs this (accept_license is simply ignored by the daemon for
-    needs_review=False entries), so False is always safe there."""
-    return license_notice_visible
+def requires_license_consent(entry: "ModelEntry") -> bool:
+    """Whether clicking Download for `entry` must show an explicit consent
+    dialog before DownloadModel() is ever called (WHISP-68 audit BLOCKER
+    #1). True for a `needs_review` entry (license pending human legal
+    review, e.g. the nemotron-streaming model) or any entry whose license is
+    outside the standard allowlist (model_picker_logic.is_nonstandard_license)
+    -- in both cases the daemon's DownloadModel requires (or the UI wants a
+    human to see) an affirmative decision, not an implicit one inferred from
+    a notice merely being visible on screen.
+
+    Replaces the removed `should_accept_license(license_notice_visible)`,
+    which inferred consent from a *display* state (a notice happening to be
+    visible) rather than from an explicit user action -- a real UX/legal
+    bug: a user could click Download without ever having been asked."""
+    return entry.needs_review or is_nonstandard_license(entry.license)

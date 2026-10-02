@@ -1,7 +1,18 @@
 """Unit tests for ui/download_logic.py (WHISP-68)."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from whisper_aloud.ui import download_logic as dl
+
+
+@dataclass(frozen=True)
+class _FakeEntry:
+    """Minimal stand-in for stt.catalog.ModelEntry -- only the fields
+    requires_license_consent() actually reads."""
+
+    license: str = "MIT"
+    needs_review: bool = False
 
 
 def test_button_label_with_known_size():
@@ -69,6 +80,19 @@ def test_not_downloaded_state_with_error_shows_error_and_retry_button():
     assert state.error_text == "network exploded"
 
 
-def test_should_accept_license_mirrors_notice_visibility():
-    assert dl.should_accept_license(True) is True
-    assert dl.should_accept_license(False) is False
+def test_requires_license_consent_false_for_standard_license():
+    assert dl.requires_license_consent(_FakeEntry(license="MIT", needs_review=False)) is False
+    assert dl.requires_license_consent(_FakeEntry(license="Apache-2.0")) is False
+    assert dl.requires_license_consent(_FakeEntry(license="CC-BY-4.0")) is False
+    assert dl.requires_license_consent(_FakeEntry(license="BSD-3-Clause")) is False
+
+
+def test_requires_license_consent_true_for_nonstandard_license():
+    assert dl.requires_license_consent(_FakeEntry(license="OpenMDW-1.1")) is True
+    assert dl.requires_license_consent(_FakeEntry(license="GPL-3.0")) is True
+
+
+def test_requires_license_consent_true_for_needs_review_even_with_standard_license():
+    """needs_review alone is enough, independent of the license string --
+    the pending-review status itself is what needs a human decision."""
+    assert dl.requires_license_consent(_FakeEntry(license="MIT", needs_review=True)) is True
