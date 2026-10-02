@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 
 class TestNoiseGate:
@@ -179,6 +180,111 @@ class TestPeakLimiter:
         assert result.size == 0
 
 
+class TestHighPass:
+    """Tests for the causal high-pass stage (WHISP-83).
+
+    A 2nd-order Butterworth high-pass via scipy's ``sosfilt``, with
+    persistent ``zi`` state carried across ``process()`` calls -- the same
+    "causal + stateful = exactly chunk-invariant" shape as ``PeakLimiter``
+    (stateless) and the WHISP-65 ``AGC`` fix (stateful, exact). See
+    ``tests/test_audio_pipeline_streaming.py`` for the chunk-invariance and
+    no-lookahead coverage.
+    """
+
+    def _tone(self, freq_hz: float, sr: int = 16000, duration_s: float = 1.0) -> np.ndarray:
+        t = np.arange(int(sr * duration_s), dtype=np.float64) / sr
+        return np.sin(2 * np.pi * freq_hz * t).astype(np.float32)
+
+    def _rms(self, audio: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+
+    def test_attenuates_30hz_rumble(self):
+        """A 30Hz tone (well inside the WHISP-77 rumble band, 30-60Hz) must
+        be strongly attenuated by an 80Hz high-pass."""
+        from whisper_aloud.audio.audio_processor import HighPass
+
+        hp = HighPass(cutoff_hz=80.0)
+        tone = self._tone(30.0)
+        out = hp.process(tone.copy(), 16000)
+        # Settle past the filter's initial transient before measuring level.
+        settled_in, settled_out = tone[4000:], out[4000:]
+        ratio = self._rms(settled_out) / self._rms(settled_in)
+        assert ratio < 0.25, f"expected 30Hz to be attenuated below -12dB, got ratio={ratio:.3f}"
+
+    def test_near_unity_at_300hz_and_above(self):
+        """Speech-range content (300Hz+) should pass through close to unity
+        gain -- a 2nd-order Butterworth at 80Hz is well out of its stopband
+        by 300Hz."""
+        from whisper_aloud.audio.audio_processor import HighPass
+
+        for freq in (300.0, 1000.0, 3000.0):
+            hp = HighPass(cutoff_hz=80.0)
+            tone = self._tone(freq)
+            out = hp.process(tone.copy(), 16000)
+            settled_in, settled_out = tone[2000:], out[2000:]
+            ratio = self._rms(settled_out) / self._rms(settled_in)
+            assert 0.9 < ratio <= 1.01, (
+                f"expected near-unity gain at {freq}Hz, got ratio={ratio:.3f}"
+            )
+
+    def test_cutoff_zero_is_noop(self):
+        """cutoff_hz=0 must be a pure passthrough (so callers never need to
+        branch on whether the stage is enabled), matching
+        stt.normalize.apply_highpass_filter's contract."""
+        from whisper_aloud.audio.audio_processor import HighPass
+
+        hp = HighPass(cutoff_hz=0)
+        audio = np.random.default_rng(0).normal(size=1600).astype(np.float32)
+        result = hp.process(audio.copy(), 16000)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_state_continuity_matches_one_shot(self):
+        """Processing in two back-to-back chunks (state carried via ``zi``)
+        must match a single one-shot call over the concatenation, to
+        floating-point precision -- a causal IIR filter's state-passing is
+        exact, not approximate, when each call's ``zi`` continues the last."""
+        from whisper_aloud.audio.audio_processor import HighPass
+
+        rng = np.random.default_rng(1)
+        audio = rng.normal(size=3200).astype(np.float32)
+
+        one_shot = HighPass(cutoff_hz=80.0).process(audio.copy(), 16000)
+
+        chunked_stage = HighPass(cutoff_hz=80.0)
+        first = chunked_stage.process(audio[:1200].copy(), 16000)
+        second = chunked_stage.process(audio[1200:].copy(), 16000)
+        chunked = np.concatenate([first, second])
+
+        np.testing.assert_allclose(one_shot, chunked, atol=1e-6)
+
+    def test_reset_clears_state(self):
+        """reset() must bring the filter back to its just-constructed state,
+        so a reused instance behaves identically to a fresh one."""
+        from whisper_aloud.audio.audio_processor import HighPass
+
+        rng = np.random.default_rng(2)
+        audio = rng.normal(size=1600).astype(np.float32)
+
+        reused = HighPass(cutoff_hz=80.0)
+        reused.process(audio.copy(), 16000)  # leaves zi state behind
+        reused.reset()
+
+        fresh = HighPass(cutoff_hz=80.0)
+
+        probe = rng.normal(size=1600).astype(np.float32)
+        out_reused = reused.process(probe.copy(), 16000)
+        out_fresh = fresh.process(probe.copy(), 16000)
+        np.testing.assert_array_equal(out_reused, out_fresh)
+
+    def test_handles_empty_audio(self):
+        from whisper_aloud.audio.audio_processor import HighPass
+
+        hp = HighPass(cutoff_hz=80.0)
+        empty = np.array([], dtype=np.float32)
+        result = hp.process(empty, 16000)
+        assert result.size == 0
+
+
 class TestAudioPipeline:
     """Tests for the full audio processing pipeline."""
 
@@ -267,7 +373,9 @@ class TestAudioPipeline:
         assert result.dtype == np.float32
 
     def test_pipeline_all_disabled_passthrough(self):
-        """With all stages disabled, output equals input."""
+        """With all stages disabled (including the WHISP-83 high-pass, which
+        must also be explicitly off here via highpass_hz=0), output equals
+        input."""
         from whisper_aloud.audio.audio_processor import AudioPipeline
         from whisper_aloud.config import AudioProcessingConfig
 
@@ -276,6 +384,7 @@ class TestAudioPipeline:
             agc_enabled=False,
             denoising_enabled=False,
             limiter_enabled=False,
+            highpass_hz=0,
         )
         pipeline = AudioPipeline(config)
         audio = np.random.randn(1600).astype(np.float32) * 0.5
@@ -349,6 +458,84 @@ class TestAudioPipeline:
         audio = (np.sin(2 * np.pi * 440 * t) * 0.3).astype(np.float32)
         result = pipeline.process(audio, sample_rate=sr)
         assert result.shape == audio.shape
+
+    def test_pipeline_runs_highpass_before_gate(self):
+        """WHISP-83: the high-pass stage must run first, ahead of NoiseGate,
+        in both one-shot and streaming (process_chunk) modes -- so it sees
+        raw audio, and NoiseGate/AGC/limiter all see the filtered signal.
+        Verified by disabling every other stage and checking pipeline output
+        matches HighPass run standalone.
+        """
+        from whisper_aloud.audio.audio_processor import AudioPipeline, HighPass
+        from whisper_aloud.config import AudioProcessingConfig
+
+        config = AudioProcessingConfig(
+            noise_gate_enabled=False,
+            agc_enabled=False,
+            denoising_enabled=False,
+            limiter_enabled=False,
+            highpass_hz=80.0,
+        )
+        sr = 16000
+        rng = np.random.default_rng(3)
+        audio = rng.normal(size=1600).astype(np.float32)
+
+        expected = HighPass(cutoff_hz=80.0).process(audio.copy(), sr)
+
+        one_shot = AudioPipeline(config).process(audio.copy(), sample_rate=sr)
+        np.testing.assert_allclose(one_shot, expected, atol=1e-6)
+
+        streaming = AudioPipeline(config, streaming=True).process_chunk(
+            audio.copy(), sample_rate=sr
+        )
+        np.testing.assert_allclose(streaming, expected, atol=1e-6)
+
+    def test_pipeline_highpass_enabled_does_not_regress_clean_audio(self):
+        """An explicitly-enabled 80Hz high-pass (highpass_hz defaults to 0/off
+        -- see AudioProcessingConfig.highpass_hz's docstring for why -- but
+        remains available and must behave correctly when turned on) must not
+        meaningfully change pipeline *loudness* behaviour on audio *without*
+        low-frequency rumble -- e.g. the existing speech-range synthetic test
+        signal -- versus the pipeline with it left off (highpass_hz=0).
+
+        Compared by RMS level (not raw sample-for-sample diff): a 2nd-order
+        Butterworth highpass is near-unity *magnitude* at 440Hz (5.5x the
+        80Hz cutoff) but still introduces a real phase shift there, which by
+        itself can produce a large sample-wise difference between two
+        otherwise-equal-energy sine waves (and gets amplified further by the
+        gate's hysteresis/attack timing and AGC's asymmetric attack/release
+        tracking) without actually changing the audio's audible loudness or
+        the pipeline's effectiveness. RMS is insensitive to that phase shift
+        and is what AGC itself targets, so it is the right level to compare
+        "no regression" at.
+        """
+        from whisper_aloud.audio.audio_processor import AudioPipeline
+        from whisper_aloud.config import AudioProcessingConfig
+
+        sr = 16000
+        t = np.arange(sr, dtype=np.float32) / sr
+        audio = (np.sin(2 * np.pi * 440 * t) * 0.3).astype(np.float32)
+
+        config_with_hp = AudioProcessingConfig(
+            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False,
+            limiter_enabled=True, highpass_hz=80.0,
+        )
+        config_without_hp = AudioProcessingConfig(
+            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False,
+            limiter_enabled=True, highpass_hz=0,
+        )
+
+        with_hp = AudioPipeline(config_with_hp).process(audio.copy(), sample_rate=sr)
+        without_hp = AudioPipeline(config_without_hp).process(audio.copy(), sample_rate=sr)
+
+        def rms(x):
+            return float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
+
+        rms_with, rms_without = rms(with_hp), rms(without_hp)
+        assert rms_with == pytest.approx(rms_without, rel=0.05), (
+            f"expected near-equal RMS loudness with/without highpass on clean audio: "
+            f"with={rms_with:.4f}, without={rms_without:.4f}"
+        )
 
 
 class TestDenoiser:

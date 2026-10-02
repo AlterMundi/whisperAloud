@@ -138,6 +138,99 @@ class NoiseGate:
         return (audio * gain).astype(audio.dtype)
 
 
+class HighPass:
+    """Causal high-pass stage, ahead of NoiseGate in ``AudioPipeline`` (WHISP-83).
+
+    A 2nd-order Butterworth high-pass applied with ``scipy.signal.sosfilt``
+    (causal, sample-by-sample, unlike the file-transcription path's
+    zero-phase ``stt.normalize.apply_highpass_filter``, which uses
+    ``sosfiltfilt`` and needs the whole buffer up front). The filter's state
+    (``zi``, one pair of delay values per second-order section) is kept in
+    ``self`` and carried across ``process()`` calls, so splitting a signal
+    into chunks and processing them in sequence reproduces one-shot
+    processing over the whole signal exactly (to floating-point precision)
+    -- the same "causal + stateful" property that makes a stateful IIR
+    filter chunk-invariant by construction, unlike ``NoiseGate``'s windowed
+    RMS (see ``tests/test_audio_pipeline_streaming.py``).
+
+    Motivation (WHISP-77): on a real 36-minute meeting recording, removing
+    low-frequency rumble (HVAC, handling noise, room hum) with a plain 80Hz
+    high-pass raised Silero VAD retention from 87%/93% to 96%/99% at
+    threshold 0.2/0.1 in the *file* transcription path
+    (``TranscriptionConfig.highpass_hz`` / ``stt.normalize.apply_highpass_filter``).
+    This class brings the same kind of fix to *live* dictation, ahead of
+    ``NoiseGate``.
+
+    WHISP-83 measurement update: that file-path win does **not** carry over
+    one-for-one here, which is why ``AudioProcessingConfig.highpass_hz``
+    defaults to 0 (off) rather than 80 -- see that field's docstring and
+    ``scripts/measure_live_highpass_vad_retention.py``. In short: NoiseGate
+    is an RMS/energy gate, not a spectral one, so it barely reacts to the
+    rumble either way; and unlike the file path's zero-phase
+    (``sosfiltfilt``) filter, this *causal* (``sosfilt``) filter's own phase
+    shift measured as a small net negative for Silero VAD retention right
+    around the project's ``vad_threshold=0.2`` default on a real fixture --
+    and the live-dictation path (``Transcriber.transcribe_numpy``) does run
+    Silero VAD by default, so that regression would reach every live
+    dictation, not just an opt-in flag. The class/stage are unchanged and
+    available for anyone who wants to enable it; the config default is what
+    changed.
+
+    Args:
+        cutoff_hz: High-pass cutoff frequency in Hz. ``0`` (or any
+            non-positive value) disables filtering entirely -- ``process()``
+            returns its input unchanged and no filter coefficients are ever
+            computed -- so callers don't need to branch on whether the stage
+            is enabled, matching ``apply_highpass_filter``'s contract.
+        order: Butterworth filter order (default 2, i.e. 2 second-order
+            sections -> 1 SOS row), matching the file-transcription path.
+    """
+
+    def __init__(self, cutoff_hz: float = 80.0, order: int = 2):
+        self.cutoff_hz = cutoff_hz
+        self.order = order
+        self._sos = None  # built lazily once we know the sample rate
+        self._sample_rate = None
+        self._zi = None
+
+    def reset(self) -> None:
+        """Clear filter state (``zi``), as if freshly constructed. Keeps any
+        already-computed filter coefficients (``_sos``) -- only the carried
+        delay state is session-specific.
+        """
+        if self._sos is not None:
+            self._zi = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
+        else:
+            self._zi = None
+
+    def _ensure_sos(self, sample_rate: int) -> None:
+        if self._sos is not None and self._sample_rate == sample_rate:
+            return
+        sos = signal.butter(
+            self.order, self.cutoff_hz, btype="highpass", fs=sample_rate, output="sos"
+        )
+        self._sos = sos
+        self._sample_rate = sample_rate
+        self._zi = np.zeros((sos.shape[0], 2), dtype=np.float64)
+
+    def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply the high-pass filter to one chunk, carrying state forward.
+
+        No-op (returns ``audio`` unchanged) when ``cutoff_hz <= 0`` or the
+        cutoff is at/above Nyquist, or ``audio`` is empty.
+        """
+        if self.cutoff_hz <= 0 or audio.size == 0:
+            return audio
+
+        nyquist = sample_rate / 2.0
+        if self.cutoff_hz >= nyquist:
+            return audio
+
+        self._ensure_sos(sample_rate)
+        filtered, self._zi = signal.sosfilt(self._sos, audio.astype(np.float64), zi=self._zi)
+        return filtered.astype(np.float32)
+
+
 class AGC:
     """Automatic Gain Control using sliding-window RMS.
 
@@ -530,13 +623,20 @@ class AudioProcessor:
 
 
 class AudioPipeline:
-    """Full audio processing pipeline: gate -> AGC -> denoising -> limiter.
+    """Full audio processing pipeline: highpass -> gate -> AGC -> denoising -> limiter.
 
     Each stage is toggleable via config. The pipeline is stateful ---
     call process() repeatedly with audio chunks for streaming use.
 
     Args:
         config: AudioProcessingConfig controlling which stages are active.
+            ``config.highpass_hz`` (WHISP-83, default 0 i.e. off -- opt-in;
+            see ``AudioProcessingConfig.highpass_hz``'s docstring for the
+            measurement behind that default) controls the leading
+            high-pass stage -- see ``HighPass`` for why this lives on
+            ``AudioProcessingConfig`` rather than sharing
+            ``TranscriptionConfig.highpass_hz`` (the file-transcription
+            path's equivalent knob).
         streaming: When True, the pipeline is in streaming mode: the
             whole-buffer ``Denoiser`` (noisereduce) is never instantiated,
             regardless of ``config.denoising_enabled``. Per WHISP-34's
@@ -545,16 +645,17 @@ class AudioPipeline:
             with no state kept between calls, so it is structurally
             incompatible with per-chunk processing (it would need a
             genuinely streaming/causal noise suppressor instead, which is
-            out of scope here). ``NoiseGate``, ``AGC``, and ``PeakLimiter``
-            are all causal/stateful and safe to call per-chunk, so they are
-            unaffected by this flag. Defaults to False, which preserves
-            today's one-shot behaviour used by ``AudioRecorder.stop()``
-            unchanged.
+            out of scope here). ``HighPass``, ``NoiseGate``, ``AGC``, and
+            ``PeakLimiter`` are all causal/stateful and safe to call
+            per-chunk, so they are unaffected by this flag. Defaults to
+            False, which preserves today's one-shot behaviour used by
+            ``AudioRecorder.stop()`` unchanged.
     """
 
     def __init__(self, config: AudioProcessingConfig, streaming: bool = False):
         self.config = config
         self.streaming = streaming
+        self._highpass = HighPass(cutoff_hz=config.highpass_hz) if config.highpass_hz else None
         self._gate = NoiseGate(threshold_db=config.noise_gate_threshold_db) if config.noise_gate_enabled else None
         self._agc = AGC(target_db=config.agc_target_db, max_gain_db=config.agc_max_gain_db) if config.agc_enabled else None
         self._limiter = PeakLimiter(ceiling_db=config.limiter_ceiling_db) if config.limiter_enabled else None
@@ -563,12 +664,15 @@ class AudioPipeline:
         )
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Process audio through the pipeline (gate -> AGC -> denoise -> limiter).
+        """Process audio through the pipeline (highpass -> gate -> AGC -> denoise -> limiter).
 
         This is the one-shot entry point used by ``AudioRecorder.stop()`` on
-        the full recorded buffer; its behaviour is unchanged by WHISP-65.
+        the full recorded buffer; its behaviour is unchanged by WHISP-65
+        apart from the new leading high-pass stage (WHISP-83).
         """
         result = audio
+        if self._highpass:
+            result = self._highpass.process(result, sample_rate)
         if self._gate:
             result = self._gate.process(result, sample_rate)
         if self._agc:
@@ -596,9 +700,9 @@ class AudioPipeline:
         return self.process(audio, sample_rate)
 
     def reset(self) -> None:
-        """Clear all stateful history (gate envelope/hold, AGC gain/RMS
-        history) so this pipeline behaves like a freshly constructed one on
-        the next process()/process_chunk() call.
+        """Clear all stateful history (highpass zi, gate envelope/hold, AGC
+        gain/RMS history) so this pipeline behaves like a freshly
+        constructed one on the next process()/process_chunk() call.
 
         This exists because AudioRecorder keeps a single AudioPipeline
         instance (``self._pipeline``) alive across many recording sessions
@@ -609,6 +713,8 @@ class AudioPipeline:
         PeakLimiter and Denoiser are stateless, so there is nothing to reset
         for them.
         """
+        if self._highpass is not None:
+            self._highpass.reset()
         if self._gate is not None:
             self._gate.reset()
         if self._agc is not None:
