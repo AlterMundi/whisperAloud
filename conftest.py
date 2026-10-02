@@ -34,6 +34,13 @@ for _var, _sub in (
     ("XDG_RUNTIME_DIR", "runtime"),
 ):
     os.environ[_var] = os.path.join(_test_home, _sub)
+# config.py resolves ~/.config via Path.home(), not XDG_CONFIG_HOME, so a test
+# that saved a config wrote the user's real ~/.config/whisper_aloud/config.json.
+# Point HOME at the temp tree too; real-model tests that need the user's model
+# caches read them via WHISPER_ALOUD_TEST_REAL_HOME.
+os.environ.setdefault("WHISPER_ALOUD_TEST_REAL_HOME", os.path.expanduser("~"))
+os.environ["HOME"] = os.path.join(_test_home, "home")
+os.makedirs(os.environ["HOME"])
 # A real runtime dir holds the wayland-0, pipewire-0 and bus sockets; clipboard
 # tools fall back to wayland-0 even without WAYLAND_DISPLAY.
 os.makedirs(os.environ["XDG_RUNTIME_DIR"], mode=0o700)

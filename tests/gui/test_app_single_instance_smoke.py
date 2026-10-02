@@ -30,7 +30,7 @@ _GUI_ENABLED = (
     and "WAYLAND_DISPLAY" not in os.environ
     and _GUI_DISPLAY.startswith(":")
     and _GUI_DISPLAY.split(".")[0] not in (":0", ":1")
-    and not os.path.expanduser("~").startswith("/home/")
+    and not os.environ.get("WHISPER_ALOUD_TEST_REAL_HOME", os.path.expanduser("~")).startswith("/home/")
 )
 
 if _GUI_ENABLED:

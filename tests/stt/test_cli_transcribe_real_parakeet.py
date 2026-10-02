@@ -19,7 +19,7 @@ import pytest
 _HAS_SHERPA = importlib.util.find_spec("sherpa_onnx") is not None
 # Real $HOME is untouched by the root conftest (only XDG_*/DBUS/runtime dirs
 # are redirected), so this -- not $XDG_CACHE_HOME -- finds the real cache.
-_REAL_CACHE_HOME = Path(os.path.expanduser("~/.cache"))
+_REAL_CACHE_HOME = Path(os.environ.get("WHISPER_ALOUD_TEST_REAL_HOME", os.path.expanduser("~"))) / ".cache"
 _MODEL_DIR = _REAL_CACHE_HOME / "whisper_aloud" / "models" / "parakeet-tdt-0.6b-v3"
 _BENCH_WAV = _MODEL_DIR / "test_wavs" / "en.wav"
 

@@ -25,3 +25,16 @@ def test_runtime_dir_is_private():
     runtime = os.environ["XDG_RUNTIME_DIR"]
     assert not runtime.startswith("/run/user/")
     assert not any(n.startswith(("wayland-", "pipewire-")) for n in os.listdir(runtime))
+
+
+def test_home_is_isolated_and_config_save_stays_inside_it():
+    from pathlib import Path
+
+    from whisper_aloud.config import WhisperAloudConfig
+
+    real_home = os.environ["WHISPER_ALOUD_TEST_REAL_HOME"]
+    assert str(Path.home()) != real_home
+    WhisperAloudConfig().save()
+    saved = Path.home() / ".config" / "whisper_aloud" / "config.json"
+    assert saved.exists()
+    assert not str(saved).startswith(real_home + os.sep)

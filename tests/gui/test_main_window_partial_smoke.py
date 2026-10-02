@@ -28,7 +28,7 @@ _GUI_ENABLED = (
     # disposable HOME: a hand-set WHISPER_ALOUD_GUI_TEST must not put windows
     # on the real screen.
     and _GUI_DISPLAY.split(".")[0] not in (":0", ":1")
-    and not os.path.expanduser("~").startswith("/home/")
+    and not os.environ.get("WHISPER_ALOUD_TEST_REAL_HOME", os.path.expanduser("~")).startswith("/home/")
 )
 
 if _GUI_ENABLED:
