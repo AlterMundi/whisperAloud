@@ -82,13 +82,29 @@ def load_restore_token() -> Optional[str]:
 
 
 def save_restore_token(token: str) -> None:
-    """Persist `token` so the next daemon run skips the consent prompt."""
+    """Persist `token` so the next daemon run skips the consent prompt.
+
+    The restore_token is a long-lived RemoteDesktop consent credential, so
+    it is written private to this user (dir 0700, file 0600) regardless of
+    the process umask -- `os.open`'s mode argument alone is masked by
+    umask, so each permission is pinned again with an explicit `os.chmod`
+    after creation (and on every save, in case an existing file/dir was
+    ever left world/group-readable by something else).
+    """
     if not token:
         return
     try:
         path = _restore_token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(token, encoding="utf-8")
+        parent = path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(parent, 0o700)
+
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, token.encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.chmod(path, 0o600)
     except OSError as e:
         logger.warning("Failed to persist portal restore_token: %s", e)
 
