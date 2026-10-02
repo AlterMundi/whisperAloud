@@ -707,9 +707,13 @@ class TestRecorderInitialization:
 
 
 def test_engine_change_triggers_model_reload():
-    """Changing model.engine alone (same name/device) reloads the engine via create_engine."""
+    """Changing model.engine alone (same name/device) reloads the engine via create_engine,
+    when the daemon is idle (WHISP-74: a busy daemon defers this instead -- see
+    TestConfigReloadDuringTranscription in tests/test_daemon_concurrency.py)."""
     daemon = _make_daemon()
     daemon.config = WhisperAloudConfig()  # engine=faster-whisper, name=base
+    daemon._transcribing = False
+    daemon.recorder.is_recording = False
     new = WhisperAloudConfig()
     new.model.engine = "parakeet"
     # Only engine differs (name/device are identical fresh defaults) — isolates the engine-reload path.
@@ -717,12 +721,15 @@ def test_engine_change_triggers_model_reload():
         daemon._apply_config_changes(new)
     mock_ce.assert_called_once_with(new)
     mock_ce.return_value.load_model.assert_called_once()
+    assert daemon._pending_reload_config is None
 
 
 def test_no_model_change_does_not_reload():
     """An identical model config does not trigger a reload."""
     daemon = _make_daemon()
     daemon.config = WhisperAloudConfig()
+    daemon._transcribing = False
+    daemon.recorder.is_recording = False
     new = WhisperAloudConfig()  # identical model fields
     with patch.object(daemon._daemon_module, "create_engine") as mock_ce:
         daemon._apply_config_changes(new)
