@@ -439,12 +439,15 @@ def test_license_consent_dialog_accept_sends_accept_license_true(config, monkeyp
 
 
 def test_license_consent_dialog_shows_label_license_and_doc_reference(config, monkeypatch):
-    """Real Adw.MessageDialog construction (no mocking of the dialog itself):
-    confirms the dialog actually appears with the right heading/body, and
-    that its Cancel response sends nothing while Accept sends accept_license=True."""
+    """Real dialog construction (no mocking of the dialog itself): confirms the
+    consent dialog -- Adw.AlertDialog on this libadwaita, or the Adw.MessageDialog
+    fallback on older libadwaita (WHISP-78) -- actually appears with the right
+    heading, and that its Cancel response sends nothing while Accept sends
+    accept_license=True."""
     from unittest.mock import MagicMock
 
     from whisper_aloud.stt import catalog
+    from whisper_aloud.ui import dialogs
 
     dialog = _make_dialog(config, monkeypatch)
     fake_client = MagicMock()
@@ -454,20 +457,67 @@ def test_license_consent_dialog_shows_label_license_and_doc_reference(config, mo
     entry = next(e for e in catalog.entries() if e.needs_review)
     dialog._show_license_consent_dialog(entry)
 
-    # The dialog was actually presented (no exception) -- now simulate the
-    # user picking "Cancel", then re-show and pick "Accept and download".
-    import gi
-
-    gi.require_version("Adw", "1")
-    from gi.repository import Adw
-
-    msg_dialog = Adw.MessageDialog(
-        transient_for=dialog, modal=True, heading=entry.label, body="x"
+    # The dialog was actually presented (no exception) -- now build one the same
+    # way the helper does, to confirm the heading is wired through correctly,
+    # then simulate the user picking "Cancel" and "Accept and download".
+    built = dialogs.confirm(
+        parent=dialog,
+        heading=entry.label,
+        body="x",
+        accept_label="Accept and download",
+        on_accept=lambda: None,
     )
-    assert entry.label == msg_dialog.get_heading()
+    assert entry.label == built.get_heading()
 
     dialog._on_license_consent_response(None, "cancel", entry)
     fake_client.download_model.assert_not_called()
 
     dialog._on_license_consent_response(None, "accept", entry)
     fake_client.download_model.assert_called_once_with(entry.engine, entry.name, True)
+
+
+# ─── WHISP-78: discard-changes confirmation migrated off Gtk.MessageDialog ──
+
+
+def test_discard_confirmation_shown_sets_child_dialog_open(config, monkeypatch):
+    """Real dialog construction (Adw.AlertDialog on this libadwaita, or the
+    Adw.MessageDialog fallback on older libadwaita per WHISP-78) -- confirms
+    the discard-confirmation dialog actually appears with the right heading."""
+    from whisper_aloud.ui import dialogs
+
+    dialog = _make_dialog(config, monkeypatch)
+    assert dialog._child_dialog_open is False
+
+    dialog._show_discard_confirmation()
+    assert dialog._child_dialog_open is True
+
+    built = dialogs.confirm(
+        parent=dialog,
+        heading="Discard unsaved changes?",
+        body="x",
+        accept_label="Discard",
+        on_accept=lambda: None,
+    )
+    assert built.get_heading() == "Discard unsaved changes?"
+
+
+def test_discard_confirmation_keep_editing_does_not_close(config, monkeypatch):
+    """'Keep Editing' (cancel response) must not close the dialog or mark it
+    allowed to close -- only clears the child-dialog-open bookkeeping flag."""
+    dialog = _make_dialog(config, monkeypatch)
+    dialog._child_dialog_open = True
+
+    dialog._on_discard_confirmation_response("cancel")
+
+    assert dialog._child_dialog_open is False
+    assert dialog._allow_close is False
+
+
+def test_discard_confirmation_discard_sets_allow_close(config, monkeypatch):
+    """Only the 'Discard' (accept) response triggers allow_close+close."""
+    dialog = _make_dialog(config, monkeypatch)
+    assert dialog._allow_close is False
+
+    dialog._on_discard_confirmed()
+
+    assert dialog._allow_close is True

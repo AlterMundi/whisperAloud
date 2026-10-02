@@ -17,6 +17,7 @@ from ..config import (
     WhisperAloudConfig,
 )
 from ..stt import catalog
+from . import dialogs
 from .download_logic import compute_ui_state, requires_license_consent
 from .error_handler import InputValidator, ValidationError
 from .model_picker_logic import (
@@ -102,26 +103,25 @@ class SettingsDialog(Gtk.Window):
     def _show_discard_confirmation(self) -> None:
         """Ask user to confirm discarding unsaved changes."""
         self._child_dialog_open = True
-        dialog = Gtk.MessageDialog(
-            transient_for=self,
-            modal=True,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.NONE,
-            text="Discard unsaved changes?",
-            secondary_text="You have unsaved changes in Settings.",
+        dialogs.confirm(
+            parent=self,
+            heading="Discard unsaved changes?",
+            body="You have unsaved changes in Settings.",
+            accept_label="Discard",
+            on_accept=self._on_discard_confirmed,
+            destructive=True,
+            cancel_label="Keep Editing",
+            on_response=self._on_discard_confirmation_response,
         )
-        dialog.add_button("Keep Editing", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Discard", Gtk.ResponseType.OK)
 
-        def on_response(d: Gtk.MessageDialog, response: int) -> None:
-            self._child_dialog_open = False
-            d.close()
-            if response == Gtk.ResponseType.OK:
-                self._allow_close = True
-                self.close()
+    def _on_discard_confirmation_response(self, _response: str) -> None:
+        """Runs for every response (Keep Editing or Discard)."""
+        self._child_dialog_open = False
 
-        dialog.connect("response", on_response)
-        dialog.present()
+    def _on_discard_confirmed(self) -> None:
+        """Runs only for the 'Discard' (accept) response."""
+        self._allow_close = True
+        self.close()
 
     def _build_ui(self) -> None:
         """Build the settings dialog UI."""
@@ -838,23 +838,17 @@ class SettingsDialog(Gtk.Window):
             f"{status}\n\n"
             f"See {self._license_findings_doc_markup()} for details."
         )
-        dialog = Adw.MessageDialog(
-            transient_for=self,
-            modal=True,
+        dialogs.confirm(
+            parent=self,
             heading=entry.label,
             body=body,
             body_use_markup=True,
+            accept_label="Accept and download",
+            on_accept=lambda: self._on_license_consent_response(None, "accept", entry),
         )
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("accept", "Accept and download")
-        dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("cancel")
-        dialog.set_close_response("cancel")
-        dialog.connect("response", self._on_license_consent_response, entry)
-        dialog.present()
 
     def _on_license_consent_response(
-        self, _dialog: "Adw.MessageDialog", response: str, entry: "catalog.ModelEntry"
+        self, _dialog: object, response: str, entry: "catalog.ModelEntry"
     ) -> None:
         if response != "accept":
             return  # Cancel/Esc/close: nothing is sent to the daemon at all.
