@@ -261,13 +261,18 @@ export WHISPER_ALOUD_MODEL_NAME=small
 export WHISPER_ALOUD_MODEL_DEVICE=cpu
 ```
 
-Live dictation's audio pipeline (`gate -> AGC -> denoise -> limiter`) runs a
-causal 80Hz high-pass first by default (`audio_processing.highpass_hz`, env
-override `WHISPER_ALOUD_AUDIO_HIGHPASS_HZ`, `0` disables) to remove
-low-frequency rumble before the noise gate -- the same fix file transcription
-already applies via `transcription.highpass_hz` (see `TranscriptionConfig`'s
-docstring for the measurements behind it), kept as a separate knob since the
-two run on different code paths and must never both apply to the same audio.
+Live dictation's audio pipeline (`gate -> AGC -> denoise -> limiter`) can
+also run a causal high-pass first (`audio_processing.highpass_hz`, env
+override `WHISPER_ALOUD_AUDIO_HIGHPASS_HZ`), the live equivalent of file
+transcription's `transcription.highpass_hz` -- kept as a separate knob since
+the two run on different code paths and must never both apply to the same
+audio. Unlike the file path (on by default at 80Hz), this one defaults to
+`0` (off, opt-in): measured against a real rumble fixture, the causal filter
+showed a small net *negative* for Silero VAD retention right around the
+project's default VAD threshold, and live dictation does run Silero VAD by
+default (`Transcriber.transcribe_numpy`) -- see
+`AudioProcessingConfig.highpass_hz`'s docstring and
+`scripts/measure_live_highpass_vad_retention.py` for the full measurement.
 
 ## Development
 

@@ -293,13 +293,17 @@ def test_invalid_highpass_hz():
 
 
 def test_audio_processing_highpass_hz_default():
-    """WHISP-83: the live AudioPipeline's high-pass knob defaults to 80Hz,
-    same as the file-transcription path's TranscriptionConfig.highpass_hz --
-    but as its own separate field, since live audio and file audio go
-    through different code paths (see AudioProcessingConfig.highpass_hz's
-    docstring)."""
+    """WHISP-83: unlike the file-transcription path's
+    TranscriptionConfig.highpass_hz (default 80Hz), the live AudioPipeline's
+    high-pass knob defaults to 0 (off) -- opt-in. Measured with
+    scripts/measure_live_highpass_vad_retention.py: the causal filter's own
+    phase shift showed a small net negative for Silero VAD retention right
+    around the project's vad_threshold=0.2 default on a real fixture, and
+    the live-dictation path does run Silero VAD by default
+    (Transcriber.transcribe_numpy), unlike what the file path's win would
+    suggest. See AudioProcessingConfig.highpass_hz's docstring."""
     config = WhisperAloudConfig.load()
-    assert config.audio_processing.highpass_hz == pytest.approx(80.0)
+    assert config.audio_processing.highpass_hz == pytest.approx(0.0)
 
 
 def test_audio_processing_highpass_hz_env_override():

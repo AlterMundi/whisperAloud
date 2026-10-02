@@ -229,19 +229,31 @@ class AudioProcessingConfig:
     # in AudioPipeline, ahead of NoiseGate, for *live* dictation. 0 disables.
     # Deliberately a separate knob from TranscriptionConfig.highpass_hz (the
     # file-transcription path's equivalent, applied non-causally via
-    # stt.normalize.apply_highpass_filter): live audio already goes through
-    # this pipeline before transcriber.transcribe_numpy ever sees it, and
-    # transcribe_numpy applies no filtering of its own, so sharing one knob
-    # across both paths would either double-filter live audio (if the file
-    # path's pre-processing were reused there) or require transcribe_numpy
-    # to special-case its caller -- two fields, each owned by the path that
-    # actually runs it, keeps that boundary explicit. Same 80Hz default and
-    # rationale as TranscriptionConfig.highpass_hz: removes low-frequency
-    # rumble (HVAC, handling noise, room hum) that otherwise raises the
-    # noise floor NoiseGate's RMS-based open/close decision reacts to (see
-    # WHISP-77's real-recording finding, same lever, file path).
+    # stt.normalize.apply_highpass_filter): live and file audio run through
+    # entirely different code paths, and two fields, each owned by the path
+    # that actually runs it, keeps that boundary explicit.
+    #
+    # Default is 0 (OFF) -- opt-in, unlike TranscriptionConfig.highpass_hz's
+    # 80Hz default. Transcriber.transcribe_numpy (the live-dictation path:
+    # service/daemon.py -> Transcriber.transcribe_numpy, distinct from the
+    # lower-level STTEngine.transcribe_numpy) *does* run faster-whisper's
+    # Silero vad_filter/vad_parameters by default (vad_threshold=0.2, see
+    # TranscriptionConfig), so a regression here would reach every live
+    # dictation, not just an opt-in file-transcription flag. Measured with
+    # scripts/measure_live_highpass_vad_retention.py against the WHISP-77
+    # quiet_speech_component.wav fixture (real speech + synthetic 30-60Hz
+    # rumble): unlike the file path's zero-phase (sosfiltfilt) filter, this
+    # *causal* (sosfilt) filter's own phase shift measured as a small net
+    # NEGATIVE for Silero VAD retention specifically around the project's
+    # vad_threshold=0.2 default (checked against both zero and
+    # steady-state-scaled initial filter state -- not a cold-start
+    # artifact). NoiseGate itself (the stage this runs ahead of) barely
+    # reacted to the rumble either way, being an RMS/energy gate rather than
+    # a spectral one. With no demonstrated gain and a plausible live-path
+    # regression, the stage stays available (same implementation, same
+    # tests) but is off until explicitly enabled.
     # Env override: WHISPER_ALOUD_AUDIO_HIGHPASS_HZ.
-    highpass_hz: float = 80.0
+    highpass_hz: float = 0.0
 
 
 @dataclass

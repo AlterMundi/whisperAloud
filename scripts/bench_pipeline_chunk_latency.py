@@ -13,9 +13,10 @@ Prints median/p95 wall time per 560ms chunk, and the real-time ratio
 bottleneck relative to the 80-1120ms Nemotron chunk sizes it would need to
 keep up with in a streaming configuration.
 
-WHISP-83 update: the pipeline now runs a leading HighPass stage by default
-(AudioProcessingConfig.highpass_hz=80, not set explicitly below so this
-bench exercises the real default config) -- this added roughly 0.03-0.05ms
+WHISP-83 update: the pipeline can also run a leading HighPass stage
+(AudioProcessingConfig.highpass_hz, explicitly enabled below at 80Hz so
+this bench measures its cost -- it defaults to 0/off for live dictation,
+see that field's docstring for why). Enabling it added roughly 0.03-0.05ms
 per 560ms chunk on a dev machine (a single 2nd-order sosfilt call), nowhere
 near enough to change the real-time ratio's order of magnitude.
 """
@@ -37,7 +38,8 @@ def main() -> None:
     rng = np.random.default_rng(0)
 
     config = AudioProcessingConfig(
-        noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False, limiter_enabled=True
+        noise_gate_enabled=True, agc_enabled=True, denoising_enabled=False, limiter_enabled=True,
+        highpass_hz=80.0,  # off by default for live dictation; enabled here to measure its cost
     )
     pipeline = AudioPipeline(config)
 

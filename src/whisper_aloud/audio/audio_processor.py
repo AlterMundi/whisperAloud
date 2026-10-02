@@ -158,9 +158,23 @@ class HighPass:
     high-pass raised Silero VAD retention from 87%/93% to 96%/99% at
     threshold 0.2/0.1 in the *file* transcription path
     (``TranscriptionConfig.highpass_hz`` / ``stt.normalize.apply_highpass_filter``).
-    This class brings the same fix to *live* dictation, ahead of
-    ``NoiseGate``, so the gate's RMS-based open/close decision is made on
-    rumble-free audio too.
+    This class brings the same kind of fix to *live* dictation, ahead of
+    ``NoiseGate``.
+
+    WHISP-83 measurement update: that file-path win does **not** carry over
+    one-for-one here, which is why ``AudioProcessingConfig.highpass_hz``
+    defaults to 0 (off) rather than 80 -- see that field's docstring and
+    ``scripts/measure_live_highpass_vad_retention.py``. In short: NoiseGate
+    is an RMS/energy gate, not a spectral one, so it barely reacts to the
+    rumble either way; and unlike the file path's zero-phase
+    (``sosfiltfilt``) filter, this *causal* (``sosfilt``) filter's own phase
+    shift measured as a small net negative for Silero VAD retention right
+    around the project's ``vad_threshold=0.2`` default on a real fixture --
+    and the live-dictation path (``Transcriber.transcribe_numpy``) does run
+    Silero VAD by default, so that regression would reach every live
+    dictation, not just an opt-in flag. The class/stage are unchanged and
+    available for anyone who wants to enable it; the config default is what
+    changed.
 
     Args:
         cutoff_hz: High-pass cutoff frequency in Hz. ``0`` (or any
@@ -616,9 +630,10 @@ class AudioPipeline:
 
     Args:
         config: AudioProcessingConfig controlling which stages are active.
-            ``config.highpass_hz`` (WHISP-83, default 80Hz; 0 disables)
-            controls the leading high-pass stage -- see ``HighPass`` and
-            ``AudioProcessingConfig.highpass_hz`` for why this lives on
+            ``config.highpass_hz`` (WHISP-83, default 0 i.e. off -- opt-in;
+            see ``AudioProcessingConfig.highpass_hz``'s docstring for the
+            measurement behind that default) controls the leading
+            high-pass stage -- see ``HighPass`` for why this lives on
             ``AudioProcessingConfig`` rather than sharing
             ``TranscriptionConfig.highpass_hz`` (the file-transcription
             path's equivalent knob).

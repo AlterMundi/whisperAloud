@@ -3,6 +3,12 @@
 NoiseGate/VAD retention the same way WHISP-77's file-transcription highpass
 did?
 
+This is the measurement that decided AudioProcessingConfig.highpass_hz's
+default: it does NOT -- see the note at the bottom of main()'s output. The
+stage stays in (same implementation, same tests, available opt-in via
+highpass_hz), but defaults to 0 (off) for live dictation rather than
+mirroring the file path's 80Hz default.
+
 Not a test -- a one-off measurement script, mirroring
 tests/test_vad_quiet_speech.py's approach but through the *live* pipeline
 (HighPass -> NoiseGate) instead of the file path's

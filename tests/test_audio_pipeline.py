@@ -490,11 +490,13 @@ class TestAudioPipeline:
         )
         np.testing.assert_allclose(streaming, expected, atol=1e-6)
 
-    def test_pipeline_highpass_default_does_not_regress_clean_audio(self):
-        """The default 80Hz high-pass (default highpass_hz=80) must not
+    def test_pipeline_highpass_enabled_does_not_regress_clean_audio(self):
+        """An explicitly-enabled 80Hz high-pass (highpass_hz defaults to 0/off
+        -- see AudioProcessingConfig.highpass_hz's docstring for why -- but
+        remains available and must behave correctly when turned on) must not
         meaningfully change pipeline *loudness* behaviour on audio *without*
         low-frequency rumble -- e.g. the existing speech-range synthetic test
-        signal -- versus the pre-WHISP-83 pipeline (highpass_hz=0).
+        signal -- versus the pipeline with it left off (highpass_hz=0).
 
         Compared by RMS level (not raw sample-for-sample diff): a 2nd-order
         Butterworth highpass is near-unity *magnitude* at 440Hz (5.5x the
