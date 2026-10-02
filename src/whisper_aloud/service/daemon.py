@@ -728,6 +728,16 @@ class WhisperAloudService:
             self.StatusChanged("idle")
             if self.indicator:
                 self.indicator.set_state("idle")
+            # Audit fix (WHISP-74): the daemon is idle again now too -- apply
+            # any model reload that was deferred by a SetConfig()/
+            # ReloadConfig() that landed while this recording (not yet even
+            # transcribing) was in flight. Without this, self._pending_
+            # reload_config stayed set after a cancel-during-recording, and a
+            # later idle SetConfig() could swap self.transcriber directly
+            # while that now-stale pending config was still sitting there --
+            # the NEXT job's success/error handler would then stomp the
+            # already-applied engine by "applying" the stale one.
+            self._apply_pending_config_reload()
             return True
 
         if self._transcribing and self.transcriber:
@@ -912,6 +922,15 @@ class WhisperAloudService:
                 self.transcriber = create_engine(new_config)
                 self.transcriber.load_model()
                 self._model_loaded = True
+                # Audit fix (WHISP-74): this immediate reload supersedes
+                # whatever was sitting in self._pending_reload_config from an
+                # earlier busy SetConfig()/ReloadConfig() that the daemon
+                # never got a chance to apply-and-clear (e.g. a gap in some
+                # idle transition). Clearing it here is cheap defense in
+                # depth: it guarantees a later success/error/cancel handler
+                # can never "apply" a stale pending config on top of an
+                # engine that was already swapped directly.
+                self._pending_reload_config = None
 
         # Check if audio config changed
         if (new_config.audio != self.config.audio or
@@ -1188,7 +1207,7 @@ class WhisperAloudService:
         try:
             result = self._transcribe_audio(audio_data, engine)
         except Exception as e:
-            self._emit_transcription_error(e, token)
+            self._emit_transcription_error(e, token, job_id)
             return
         self._emit_transcription_success(
             result, audio_data, job_id, recording_session_id, dropped_chunks, token
@@ -1218,7 +1237,7 @@ class WhisperAloudService:
         try:
             result = engine.finalize()
         except Exception as e:
-            self._emit_transcription_error(e, token)
+            self._emit_transcription_error(e, token, job_id)
             return
         self._emit_transcription_success(
             result, audio_data, job_id, recording_session_id, dropped_chunks, token
@@ -1232,10 +1251,16 @@ class WhisperAloudService:
         job-submission path."""
         return token is not None and token != self._job_id
 
-    def _emit_transcription_error(self, exc: Exception, token: Optional[int] = None) -> None:
+    def _emit_transcription_error(
+        self, exc: Exception, token: Optional[int] = None, job_id: str = ""
+    ) -> None:
         """Shared failure path for both the batch and streaming transcription
         routes. All D-Bus signal emissions are marshalled to the GLib main
-        loop via idle_add for thread safety.
+        loop via idle_add for thread safety; this error path never had a
+        history write to race, so (unlike `_emit_transcription_success`)
+        there is no separate executor-thread pre-check -- everything already
+        happens inside the idle_add closure, which is the authoritative
+        check (see that method's docstring for why that matters).
 
         WHISP-73: if `token` is stale (the job was cancelled, or the daemon
         is quitting) by the time this runs, the error is logged and dropped:
@@ -1247,6 +1272,12 @@ class WhisperAloudService:
         logger.error(f"Transcription failed: {error_message}")
 
         def _emit_error():
+            # Audit fix (item 4): release this job's captured-window entry
+            # (if any) unconditionally -- it is only ever consumed on the
+            # success path's auto-paste branch, so an error (or a stale/
+            # cancelled drop, handled below) must still release it instead
+            # of leaking it in self._captured_by_job forever.
+            self._captured_by_job.pop(job_id, None)
             if self._is_job_stale(token):
                 logger.debug(
                     f"Dropping stale transcription error for job token {token} "
@@ -1282,52 +1313,84 @@ class WhisperAloudService:
         meta -- WHISP-57, for client-side correlation with PartialTranscript --
         and `dropped_chunks`, the chunk-hook queue's drop count for this
         session, 0 when no hook was registered), then clipboard copy/paste and
-        notifications. All D-Bus signal emissions and indicator updates are
-        marshalled to the GLib main loop via idle_add for thread safety.
+        notifications.
 
-        WHISP-73: checked twice -- once here (on the executor thread, before
-        the history write) and again inside the idle_add closure (on the main
-        loop, right before any signal/clipboard/paste) -- because `token` can
-        go stale in the gap between the two (CancelRecording()/Quit() run on
-        whatever thread calls them, not marshalled through idle_add). A stale
-        job emits nothing: no TranscriptionReady, no clipboard copy/paste, no
-        history row.
+        Audit fix (WHISP-73, item 2): the history write and every other
+        persisted/user-visible side effect (clipboard copy/paste,
+        notifications, signals) now happen INSIDE the `GLib.idle_add`
+        closure, strictly after its own stale-token check -- not before, on
+        the executor thread, as a prior version of this method did.
+        `CancelRecording()`/`Quit()` are plain D-Bus method calls, which
+        pydbus dispatches through the GLib main context -- i.e. they run on
+        the *same* thread as any `GLib.idle_add` callback, and the two can
+        therefore never interleave. The executor thread, by contrast, is a
+        separate OS thread with no such serialization: writing history there
+        meant a cancel landing in the gap between the (old) pre-check and
+        the write could still let a stale job's row land in the database.
+        Moving the write inside the closure makes "is this job still
+        current" and "do every side effect" atomic with respect to a
+        concurrent Cancel/Quit. The SQLite insert's latency (small, local,
+        synchronous, WAL-mode -- sub-millisecond in practice) now runs on
+        the main loop; that's an acceptable trade for actually closing this
+        race, and nothing else competes with the main loop for the duration
+        of one insert.
+
+        The check below (on the executor thread, before scheduling
+        `idle_add` at all) is now purely a skip-work optimization -- it
+        avoids marshalling an already-known-stale result onto the main loop
+        and building its `meta` dict for nothing -- and is NOT load-bearing
+        for correctness on its own; see `TestPreCheckToIdleAddWindow` in
+        tests/test_daemon_concurrency.py, which pins the exact window this
+        optimization cannot close by itself (a cancel landing *after* this
+        check passes but *before* the closure actually runs) and asserts the
+        closure's own check is what catches it.
         """
         if self._is_job_stale(token):
             logger.debug(
-                f"Dropping stale transcription result for job token {token} "
-                f"(current {self._job_id}); no history will be written"
+                f"Dropping stale transcription result early for job token {token} "
+                f"(current {self._job_id}); skipping idle_add entirely"
             )
+            self._captured_by_job.pop(job_id, None)
             return
 
-        try:
-            entry_id = self.history_manager.add_transcription(
-                result=result,
-                audio=audio_data if self.config.persistence.save_audio else None,
-                sample_rate=self.config.audio.sample_rate,
-                session_id=self.session_id
-            )
-            logger.info(f"Transcription saved to database: ID {entry_id}")
-        except Exception as e:
-            logger.error(f"Failed to save history: {e}")
-            entry_id = -1
-
-        meta = {
-            "duration": GLib.Variant("d", result.duration),
-            "language": GLib.Variant("s", result.language),
-            "confidence": GLib.Variant("d", result.confidence),
-            "history_id": GLib.Variant("i", entry_id),
-            "session_id": GLib.Variant("s", recording_session_id or ""),
-            "dropped_chunks": GLib.Variant("u", max(0, int(dropped_chunks))),
-        }
-
         def _emit_success():
+            # Authoritative check (see docstring above): this closure runs on
+            # the GLib main loop thread, the same thread CancelRecording()/
+            # Quit() run on, so nothing below this line can race a
+            # concurrently-arriving cancel.
             if self._is_job_stale(token):
                 logger.debug(
                     f"Dropping stale transcription result for job token {token} "
-                    f"(current {self._job_id}); already dropped before history write"
+                    f"(current {self._job_id}); no history row written"
                 )
+                # Audit fix (item 4): release the captured-window entry (if
+                # any) for this job even on a stale drop -- otherwise it
+                # leaks in self._captured_by_job forever (it's normally only
+                # consumed by the auto-paste branch below).
+                self._captured_by_job.pop(job_id, None)
                 return False
+
+            try:
+                entry_id = self.history_manager.add_transcription(
+                    result=result,
+                    audio=audio_data if self.config.persistence.save_audio else None,
+                    sample_rate=self.config.audio.sample_rate,
+                    session_id=self.session_id
+                )
+                logger.info(f"Transcription saved to database: ID {entry_id}")
+            except Exception as e:
+                logger.error(f"Failed to save history: {e}")
+                entry_id = -1
+
+            meta = {
+                "duration": GLib.Variant("d", result.duration),
+                "language": GLib.Variant("s", result.language),
+                "confidence": GLib.Variant("d", result.confidence),
+                "history_id": GLib.Variant("i", entry_id),
+                "session_id": GLib.Variant("s", recording_session_id or ""),
+                "dropped_chunks": GLib.Variant("u", max(0, int(dropped_chunks))),
+            }
+
             self._transcribing = False
             self._streaming_session = False
             self.StatusChanged("idle")
@@ -1341,6 +1404,11 @@ class WhisperAloudService:
                     logger.info("Transcription copied to clipboard")
                 except Exception as e:
                     logger.warning(f"Failed to copy to clipboard: {e}")
+            # Audit fix (item 4): pop unconditionally, not only inside the
+            # auto-paste branch below -- otherwise a job with auto_paste
+            # disabled (or running under _test_mode) never releases its
+            # captured-window entry.
+            captured = self._captured_by_job.pop(job_id, None)
             if (self.config.clipboard.auto_copy
                     and self.config.clipboard.auto_paste
                     and not self._test_mode
@@ -1353,7 +1421,6 @@ class WhisperAloudService:
                         self.clipboard_manager._session_type,
                         self.config.clipboard,
                     )
-                    captured = self._captured_by_job.pop(job_id, None)
 
                     def _do_paste():
                         if captured and self.config.clipboard.paste_to_captured_window:
