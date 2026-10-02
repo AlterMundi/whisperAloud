@@ -47,7 +47,7 @@ EXIT_ALREADY_RUNNING = 3
 # (additive = minor, breaking = major + a new Control2 interface) and
 # record the change in that document's Changelog section, in the same
 # commit as the interface change.
-API_VERSION = "1.1.1"
+API_VERSION = "1.2.0"
 
 # Polling cadence for PartialTranscript while a streaming engine is recording
 # (WHISP-57): docs/dbus-api.md's "Planned" entry says 3-10Hz; 5Hz is a
@@ -689,9 +689,14 @@ class WhisperAloudService:
 
         if self.recorder.is_recording:
             return self.StopRecording()
-        else:
-            self.StartRecording()
+
+        # WHISP-72: StartRecording() can refuse (e.g. a previous
+        # transcription is still in flight) and return False without
+        # starting anything. Report the real resulting state instead of
+        # unconditionally claiming "recording".
+        if self.StartRecording():
             return "recording"
+        return "transcribing" if self._transcribing else "error"
 
     def CancelRecording(self) -> bool:
         """Cancel active recording without transcribing."""

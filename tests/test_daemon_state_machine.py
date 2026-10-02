@@ -188,14 +188,17 @@ class TestToggleWhileTranscribing:
         """Once StopRecording returns, recorder.is_recording is False again even
         though _transcribing is still True (the previous job is running in the
         executor). A toggle at that point must not call recorder.start() --
-        StartRecording's _transcribing guard blocks it.
+        StartRecording's _transcribing guard blocks it. WHISP-72: the toggle
+        must also report the real resulting state ("transcribing"), not the
+        previous unconditional "recording" literal.
         """
         daemon.recorder.is_recording = False
         daemon._transcribing = True
         daemon.recorder.start.reset_mock()
 
-        daemon.ToggleRecording()
+        result = daemon.ToggleRecording()
 
+        assert result == "transcribing"
         daemon.recorder.start.assert_not_called()
         # The in-flight transcription flag is untouched.
         assert daemon._transcribing is True
