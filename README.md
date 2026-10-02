@@ -261,6 +261,14 @@ export WHISPER_ALOUD_MODEL_NAME=small
 export WHISPER_ALOUD_MODEL_DEVICE=cpu
 ```
 
+Live dictation's audio pipeline (`gate -> AGC -> denoise -> limiter`) runs a
+causal 80Hz high-pass first by default (`audio_processing.highpass_hz`, env
+override `WHISPER_ALOUD_AUDIO_HIGHPASS_HZ`, `0` disables) to remove
+low-frequency rumble before the noise gate -- the same fix file transcription
+already applies via `transcription.highpass_hz` (see `TranscriptionConfig`'s
+docstring for the measurements behind it), kept as a separate knob since the
+two run on different code paths and must never both apply to the same audio.
+
 ## Development
 
 ```bash

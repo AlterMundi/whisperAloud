@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""WHISP-34: CPU time per 560ms chunk through AudioPipeline (gate -> AGC -> limiter).
+"""WHISP-34: CPU time per 560ms chunk through AudioPipeline
+(highpass -> gate -> AGC -> limiter).
 
 Not a test -- a short, single-threaded timing probe on synthetic audio (no
 microphone, no models, no network). Run manually:
@@ -11,6 +12,12 @@ Prints median/p95 wall time per 560ms chunk, and the real-time ratio
 (chunk duration / processing time) so it's obvious this is nowhere near a
 bottleneck relative to the 80-1120ms Nemotron chunk sizes it would need to
 keep up with in a streaming configuration.
+
+WHISP-83 update: the pipeline now runs a leading HighPass stage by default
+(AudioProcessingConfig.highpass_hz=80, not set explicitly below so this
+bench exercises the real default config) -- this added roughly 0.03-0.05ms
+per 560ms chunk on a dev machine (a single 2nd-order sosfilt call), nowhere
+near enough to change the real-time ratio's order of magnitude.
 """
 
 import time
