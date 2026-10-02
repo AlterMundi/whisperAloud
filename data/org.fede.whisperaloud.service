@@ -1,3 +1,11 @@
 [D-BUS Service]
 Name=org.fede.whisperaloud
+# On a systemd system, dbus-daemon tries SystemdService first (asking
+# systemd to start the unit over its own D-Bus interface). Exec is the
+# fallback used when that isn't possible -- no systemd (or no systemd user
+# session) reachable, or the unit itself fails to start -- so this one file
+# activates the daemon on both systemd and non-systemd (e.g. plain
+# dbus-daemon-only, or a dev checkout with no installed unit) setups. See
+# docs/dbus-activation.md for how this was verified.
 SystemdService=whisper-aloud.service
+Exec=/usr/bin/whisper-aloud --daemon
