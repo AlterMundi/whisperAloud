@@ -235,3 +235,137 @@ def test_dirty_tracking_flags_a_changed_compute_type(config, monkeypatch):
     dialog.compute_type_row.set_selected(other)
 
     assert dialog._has_unsaved_changes() is True
+
+
+# ─── WHISP-68: in-app model download row ───────────────────────────────────
+
+
+def test_download_button_visible_for_not_downloaded_model(config, monkeypatch):
+    """A selected-but-not-downloaded entry shows the Download button and no
+    progress/cancel/error -- the common "fresh install" case."""
+    from whisper_aloud.stt import catalog
+    from whisper_aloud.ui import model_picker_logic
+
+    dialog = _make_dialog(config, monkeypatch)
+    monkeypatch.setattr(
+        "whisper_aloud.ui.settings_dialog.download_state_for",
+        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
+    )
+    dialog._update_download_row()
+
+    assert dialog._download_row_box.get_visible() is True
+    assert dialog._download_button.get_visible() is True
+    assert dialog._download_progress.get_visible() is False
+    assert dialog._download_cancel_button.get_visible() is False
+    assert dialog._download_error_label.get_visible() is False
+
+
+def test_download_button_click_starts_download_and_shows_progress(config, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.ui import model_picker_logic
+
+    dialog = _make_dialog(config, monkeypatch)
+    monkeypatch.setattr(
+        "whisper_aloud.ui.settings_dialog.download_state_for",
+        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
+    )
+
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    dialog._update_download_row()
+    dialog._on_download_clicked(None)
+
+    entry = dialog._selected_entry()
+    fake_client.download_model.assert_called_once()
+    assert dialog._downloading is True
+    assert dialog._download_row_box.get_visible() is True
+    assert dialog._download_button.get_visible() is False
+    assert dialog._download_progress.get_visible() is True
+    assert dialog._download_cancel_button.get_visible() is True
+
+    # A progress signal for this exact (engine, name) updates the bar.
+    dialog._on_download_progress_signal(entry.engine, entry.name, 50, 100)
+    assert dialog._download_progress_state == (50, 100)
+
+    # A progress signal for a *different* entry must be ignored.
+    dialog._on_download_progress_signal("other-engine", "other-name", 1, 2)
+    assert dialog._download_progress_state == (50, 100)
+
+
+def test_download_cancel_button_calls_client_cancel_download(config, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.ui import model_picker_logic
+
+    dialog = _make_dialog(config, monkeypatch)
+    monkeypatch.setattr(
+        "whisper_aloud.ui.settings_dialog.download_state_for",
+        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
+    )
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    dialog._on_download_clicked(None)
+    dialog._on_download_cancel_clicked(None)
+
+    fake_client.cancel_download.assert_called_once()
+
+
+def test_download_finished_failure_shows_error_and_refreshes_row(config, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.ui import model_picker_logic
+
+    dialog = _make_dialog(config, monkeypatch)
+    monkeypatch.setattr(
+        "whisper_aloud.ui.settings_dialog.download_state_for",
+        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
+    )
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    dialog._on_download_clicked(None)
+    entry = dialog._download_active_entry
+
+    dialog._on_download_finished_signal(entry[0], entry[1], False, "network exploded")
+
+    assert dialog._downloading is False
+    assert dialog._download_error_label.get_visible() is True
+    assert "network exploded" in dialog._download_error_label.get_text()
+    # Still not downloaded (the patched download_state_for always says False) --
+    # the Download button must come back so the user can retry.
+    assert dialog._download_button.get_visible() is True
+
+
+def test_download_finished_success_hides_row_once_downloaded(config, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.ui import model_picker_logic
+
+    dialog = _make_dialog(config, monkeypatch)
+    monkeypatch.setattr(
+        "whisper_aloud.ui.settings_dialog.download_state_for",
+        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
+    )
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    dialog._on_download_clicked(None)
+    entry = dialog._download_active_entry
+
+    # Simulate the model now being present on disk once DownloadFinished fires.
+    monkeypatch.setattr(
+        "whisper_aloud.ui.settings_dialog.download_state_for",
+        lambda e: model_picker_logic.DownloadState(downloaded=True, detection="unknown"),
+    )
+    dialog._on_download_finished_signal(entry[0], entry[1], True, "")
+
+    assert dialog._downloading is False
+    assert dialog._download_row_box.get_visible() is False
+    assert dialog._download_error_label.get_visible() is False
