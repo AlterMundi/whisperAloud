@@ -11,6 +11,15 @@ from whisper_aloud.exceptions import AudioFormatError
 from whisper_aloud.transcriber import Transcriber, TranscriptionResult
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch, tmp_path):
+    """Isolate every test in this module from the real
+    ~/.config/whisper_aloud/config.json -- WhisperAloudConfig.load() resolves
+    its path via Path.home(), so every call in this file must never read (or,
+    though nothing here calls save(), write) the real user's config."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
 def test_transcriber_lazy_loading():
     """Test model is not loaded until first use."""
     config = WhisperAloudConfig.load()
@@ -237,6 +246,231 @@ def test_transcribe_numpy_auto_language_uses_none(mock_whisper_model):
 
     call_args = mock_model_instance.transcribe.call_args
     assert call_args[1]["language"] is None
+
+
+# ─── WHISP-77: configurable VAD params + file-path loudness normalization ──
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_numpy_passes_configured_vad_parameters(mock_whisper_model):
+    """vad_filter=True should pass vad_parameters built from the config's
+    (more permissive than Silero's own defaults) threshold/min_speech_ms."""
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio = np.zeros(16000, dtype=np.float32)
+    config = WhisperAloudConfig.load()
+    config.transcription.vad_filter = True
+    config.transcription.vad_threshold = 0.22
+    config.transcription.vad_min_speech_ms = 75
+    transcriber = Transcriber(config)
+
+    transcriber.transcribe_numpy(audio)
+
+    call_kwargs = mock_model_instance.transcribe.call_args[1]
+    assert call_kwargs["vad_filter"] is True
+    assert call_kwargs["vad_parameters"] == {"threshold": 0.22, "min_speech_duration_ms": 75}
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_numpy_no_vad_parameters_when_vad_disabled(mock_whisper_model):
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio = np.zeros(16000, dtype=np.float32)
+    config = WhisperAloudConfig.load()
+    config.transcription.vad_filter = False
+    transcriber = Transcriber(config)
+
+    transcriber.transcribe_numpy(audio)
+
+    call_kwargs = mock_model_instance.transcribe.call_args[1]
+    assert call_kwargs["vad_filter"] is False
+    assert "vad_parameters" not in call_kwargs
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_numpy_never_normalizes_loudness(mock_whisper_model):
+    """transcribe_numpy backs the daemon's live-dictation path, which already
+    ran the audio through AudioPipeline's AGC -- it must never apply a second,
+    file-path-only loudness normalization pass (WHISP-77), even if the config
+    explicitly turns normalize_loudness on."""
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio = (0.01 * np.ones(16000, dtype=np.float32))
+    config = WhisperAloudConfig.load()
+    config.transcription.normalize_loudness = True  # opted in; still must not apply here
+    transcriber = Transcriber(config)
+
+    with patch('whisper_aloud.stt.normalize.normalize_loudness') as mock_normalize:
+        transcriber.transcribe_numpy(audio)
+        mock_normalize.assert_not_called()
+
+    passed_audio = mock_model_instance.transcribe.call_args[0][0]
+    np.testing.assert_array_equal(passed_audio, audio)
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_file_applies_highpass_by_default(mock_whisper_model, tmp_path):
+    """The file-transcription path applies the config's highpass_hz by
+    default -- this is what actually fixes WHISP-77's quiet-remote-speaker
+    VAD drop for CLI/batch file transcription (normalize_loudness defaults to
+    off; see stt/normalize.py's docstring for why)."""
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio_file = tmp_path / "meeting.wav"
+    audio_file.write_bytes(b"RIFF....WAVEfmt ")  # never actually decoded; loader is mocked
+
+    config = WhisperAloudConfig.load()
+    assert config.transcription.highpass_hz == 80.0  # the default
+    assert config.transcription.normalize_loudness is False  # the default
+    transcriber = Transcriber(config)
+
+    raw_samples = np.array([0.01, 0.02, 0.03], dtype=np.float32)
+    filtered_samples = np.array([0.3, 0.4, 0.5], dtype=np.float32)
+
+    with patch(
+        'whisper_aloud.stt.audio_io.load_audio_16k_mono', return_value=raw_samples
+    ) as mock_load, patch(
+        'whisper_aloud.stt.normalize.apply_highpass_filter', return_value=filtered_samples
+    ) as mock_highpass, patch(
+        'whisper_aloud.stt.normalize.normalize_loudness'
+    ) as mock_normalize:
+        transcriber.transcribe_file(str(audio_file))
+
+    mock_load.assert_called_once_with(str(audio_file))
+    mock_highpass.assert_called_once_with(raw_samples, 16000, cutoff_hz=80.0)
+    mock_normalize.assert_not_called()
+    passed_audio = mock_model_instance.transcribe.call_args[0][0]
+    np.testing.assert_array_equal(passed_audio, filtered_samples)
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_file_can_opt_into_normalization(mock_whisper_model, tmp_path):
+    """normalize_loudness can still be opted into explicitly, applied after
+    the highpass filter."""
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio_file = tmp_path / "meeting.wav"
+    audio_file.write_bytes(b"RIFF....WAVEfmt ")
+
+    config = WhisperAloudConfig.load()
+    config.transcription.normalize_loudness = True
+    transcriber = Transcriber(config)
+
+    raw_samples = np.array([0.01, 0.02, 0.03], dtype=np.float32)
+    filtered_samples = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+    normalized_samples = np.array([0.3, 0.4, 0.5], dtype=np.float32)
+
+    with patch(
+        'whisper_aloud.stt.audio_io.load_audio_16k_mono', return_value=raw_samples
+    ), patch(
+        'whisper_aloud.stt.normalize.apply_highpass_filter', return_value=filtered_samples
+    ), patch(
+        'whisper_aloud.stt.normalize.normalize_loudness', return_value=normalized_samples
+    ) as mock_normalize:
+        transcriber.transcribe_file(str(audio_file))
+
+    mock_normalize.assert_called_once_with(filtered_samples, 16000)
+    passed_audio = mock_model_instance.transcribe.call_args[0][0]
+    np.testing.assert_array_equal(passed_audio, normalized_samples)
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_file_skips_all_preprocessing_when_disabled(mock_whisper_model, tmp_path):
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio_file = tmp_path / "meeting.wav"
+    audio_file.write_bytes(b"RIFF....WAVEfmt ")
+
+    config = WhisperAloudConfig.load()
+    config.transcription.highpass_hz = 0  # disabled
+    config.transcription.normalize_loudness = False  # already the default
+    transcriber = Transcriber(config)
+
+    with patch('whisper_aloud.stt.audio_io.load_audio_16k_mono') as mock_load, patch(
+        'whisper_aloud.stt.normalize.apply_highpass_filter'
+    ) as mock_highpass, patch(
+        'whisper_aloud.stt.normalize.normalize_loudness'
+    ) as mock_normalize:
+        transcriber.transcribe_file(str(audio_file))
+
+    mock_load.assert_not_called()
+    mock_highpass.assert_not_called()
+    mock_normalize.assert_not_called()
+    passed_audio = mock_model_instance.transcribe.call_args[0][0]
+    assert passed_audio == str(audio_file)
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_file_preprocessing_failure_falls_back_to_raw_path(mock_whisper_model, tmp_path):
+    """A decode/filter failure must not break transcription -- fall back to
+    letting faster-whisper decode the file itself."""
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio_file = tmp_path / "meeting.wav"
+    audio_file.write_bytes(b"RIFF....WAVEfmt ")
+
+    config = WhisperAloudConfig.load()
+    transcriber = Transcriber(config)
+
+    with patch(
+        'whisper_aloud.stt.audio_io.load_audio_16k_mono', side_effect=RuntimeError("boom")
+    ):
+        transcriber.transcribe_file(str(audio_file))
+
+    passed_audio = mock_model_instance.transcribe.call_args[0][0]
+    assert passed_audio == str(audio_file)
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_transcribe_file_passes_configured_vad_parameters(mock_whisper_model, tmp_path):
+    mock_model_instance = Mock()
+    mock_whisper_model.return_value = mock_model_instance
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+
+    audio_file = tmp_path / "meeting.wav"
+    audio_file.write_bytes(b"RIFF....WAVEfmt ")
+
+    config = WhisperAloudConfig.load()
+    config.transcription.vad_filter = True
+    config.transcription.vad_threshold = 0.3
+    config.transcription.vad_min_speech_ms = 120
+    config.transcription.normalize_loudness = False  # isolate VAD-param behavior
+    transcriber = Transcriber(config)
+
+    transcriber.transcribe_file(str(audio_file))
+
+    call_kwargs = mock_model_instance.transcribe.call_args[1]
+    assert call_kwargs["vad_parameters"] == {"threshold": 0.3, "min_speech_duration_ms": 120}
 
 
 def test_transcriber_initialization_logging():

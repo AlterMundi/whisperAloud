@@ -101,6 +101,43 @@ class TranscriptionConfig:
     beam_size: int = 5
     vad_filter: bool = True
     task: str = "transcribe"
+    # WHISP-77: Silero VAD (faster-whisper's vad_parameters) is more aggressive
+    # than its own author's defaults (threshold=0.5, min_speech_duration_ms=250)
+    # suggest -- a quiet remote meeting participant captured over speakers can
+    # fall entirely below that threshold and get dropped. These defaults are
+    # deliberately more permissive. Distinct from audio.vad_threshold, which is
+    # an RMS amplitude gate for the live-recording noise gate/trim, not a
+    # Silero speech-probability threshold.
+    #
+    # 0.35 (tried first) was not permissive enough on a real 36-minute meeting
+    # recording -- measured Silero retention there was 58%/66%/85%/92% at
+    # threshold 0.5/0.35/0.2/0.1 respectively (see tests/test_vad_quiet_speech.py
+    # and stt/normalize.py's docstring for the full investigation). 0.2 is the
+    # smallest threshold that gets close to full retention on that file without
+    # going as low as 0.1, which is more likely to pick up noise as speech.
+    vad_threshold: float = 0.2
+    vad_min_speech_ms: int = 100
+    # Apply a one-shot loudness normalization pass (see stt.normalize) before
+    # VAD/transcription in the *file* transcription path. Live dictation
+    # already runs through the daemon's AudioPipeline (NoiseGate -> AGC ->
+    # Denoiser -> PeakLimiter) before reaching the engine, so this must not be
+    # (and is not) applied a second time there -- see Transcriber.transcribe_numpy.
+    #
+    # Default False: measured on a real 36-minute meeting recording, dynamic
+    # normalization (both this project's dynaudnorm-style implementation and
+    # literal ffmpeg dynaudnorm) *reduced* Silero VAD retention versus doing
+    # nothing at every threshold tested. The function and the CLI's
+    # `--normalize` flag are kept for anyone who wants to opt in, but it is
+    # not the lever that actually helped on real audio -- see highpass_hz.
+    normalize_loudness: bool = False
+    # High-pass filter (Hz) applied before VAD/transcription in the file path,
+    # removing low-frequency rumble (HVAC, handling noise, room hum) that
+    # otherwise raises the noise floor Silero VAD scores against. 0 disables.
+    # This -- not loudness normalization -- was the change that actually
+    # mattered on a real 36-minute meeting recording: a plain 80Hz high-pass
+    # alone took Silero retention from 87%/93% to 96%/99% at threshold
+    # 0.2/0.1, while dynaudnorm (with or without the high-pass) made it worse.
+    highpass_hz: float = 80.0
 
 
 # Language change may trigger model reload (for optimization)
@@ -233,6 +270,10 @@ class WhisperAloudConfig:
                 "beam_size": self.transcription.beam_size,
                 "vad_filter": self.transcription.vad_filter,
                 "task": self.transcription.task,
+                "vad_threshold": self.transcription.vad_threshold,
+                "vad_min_speech_ms": self.transcription.vad_min_speech_ms,
+                "normalize_loudness": self.transcription.normalize_loudness,
+                "highpass_hz": self.transcription.highpass_hz,
             },
             "audio": {
                 "sample_rate": self.audio.sample_rate,
@@ -428,6 +469,20 @@ class WhisperAloudConfig:
         self.transcription.beam_size = parse_int_env('WHISPER_ALOUD_BEAM_SIZE', self.transcription.beam_size)
         self.transcription.vad_filter = parse_bool_env('WHISPER_ALOUD_VAD_FILTER', self.transcription.vad_filter)
         self.transcription.task = os.getenv('WHISPER_ALOUD_TASK', self.transcription.task)
+        # Distinct env var names from audio.vad_threshold/WHISPER_ALOUD_VAD_THRESHOLD
+        # (RMS gate) -- this is Silero's speech-probability threshold.
+        self.transcription.vad_threshold = parse_float_env(
+            'WHISPER_ALOUD_VAD_SPEECH_THRESHOLD', self.transcription.vad_threshold
+        )
+        self.transcription.vad_min_speech_ms = parse_int_env(
+            'WHISPER_ALOUD_VAD_MIN_SPEECH_MS', self.transcription.vad_min_speech_ms
+        )
+        self.transcription.normalize_loudness = parse_bool_env(
+            'WHISPER_ALOUD_TRANSCRIPTION_NORMALIZE', self.transcription.normalize_loudness
+        )
+        self.transcription.highpass_hz = parse_float_env(
+            'WHISPER_ALOUD_HIGHPASS_HZ', self.transcription.highpass_hz
+        )
 
         # Audio
         self.audio.sample_rate = parse_int_env('WHISPER_ALOUD_SAMPLE_RATE', self.audio.sample_rate)
@@ -564,6 +619,22 @@ class WhisperAloudConfig:
         if self.transcription.task not in valid_tasks:
             raise ConfigurationError(f"Invalid task '{self.transcription.task}'. Valid: {', '.join(valid_tasks)}")
 
+        # Validate Silero VAD settings (WHISP-77)
+        if not (0.0 < self.transcription.vad_threshold < 1.0):
+            raise ConfigurationError(
+                f"Invalid transcription vad_threshold {self.transcription.vad_threshold}. Must be 0.0-1.0"
+            )
+        if not (0 <= self.transcription.vad_min_speech_ms <= 5000):
+            raise ConfigurationError(
+                f"Invalid vad_min_speech_ms {self.transcription.vad_min_speech_ms}. Must be 0-5000"
+            )
+        # 0 disables the high-pass; otherwise must be a valid cutoff strictly
+        # below Nyquist for 16kHz audio (8000 Hz) with headroom for the filter.
+        if self.transcription.highpass_hz != 0 and not (0 < self.transcription.highpass_hz < 4000):
+            raise ConfigurationError(
+                f"Invalid highpass_hz {self.transcription.highpass_hz}. Must be 0 (disabled) or 0-4000"
+            )
+
         # Validate audio configuration
         if not (8000 <= self.audio.sample_rate <= 48000):
             raise ConfigurationError(f"Invalid sample rate {self.audio.sample_rate}. Must be 8000-48000 Hz")
@@ -662,6 +733,14 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
         trans_changes.add("beam_size")
     if old.transcription.task != new.transcription.task:
         trans_changes.add("task")
+    if old.transcription.vad_threshold != new.transcription.vad_threshold:
+        trans_changes.add("vad_threshold")
+    if old.transcription.vad_min_speech_ms != new.transcription.vad_min_speech_ms:
+        trans_changes.add("vad_min_speech_ms")
+    if old.transcription.normalize_loudness != new.transcription.normalize_loudness:
+        trans_changes.add("normalize_loudness")
+    if old.transcription.highpass_hz != new.transcription.highpass_hz:
+        trans_changes.add("highpass_hz")
 
     if trans_changes:
         changes.changed_sections.add("transcription")
