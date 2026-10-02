@@ -4,10 +4,14 @@ participant captured over speakers, much quieter than the local microphone).
 Two independent checks, from cheapest to most realistic:
 
 1. `faster_whisper.vad.get_speech_timestamps` directly, on a real speech clip
+   (with synthetic room reverb + band-limited "over speakers" coloration)
    attenuated enough that Silero's own default threshold (0.5) drops part of
    it -- demonstrating `TranscriptionConfig.vad_threshold`/`vad_min_speech_ms`
-   (configurable, see config.py) recover it. No model download needed: the
-   Silero ONNX model ships inside the `faster-whisper` package itself.
+   (configurable, see config.py) recover it, and that `stt.normalize.normalize_loudness`
+   itself does not reduce retention versus doing nothing (a real regression in
+   an earlier implementation -- see stt/normalize.py's docstring). No model
+   download needed: the Silero ONNX model ships inside the `faster-whisper`
+   package itself.
 
 2. A full `Transcriber.transcribe_file()` run with the real `tiny` model
    against `tests/fixtures/vad_quiet_speech/two_speaker.wav` (see
@@ -63,12 +67,12 @@ def _faster_whisper_tiny_cached() -> bool:
 
 def test_default_silero_threshold_drops_quiet_speech_component():
     """Isolate Silero VAD's own contribution to the bug, independent of the
-    whisper decoder: `quiet_speech_component.wav` (real speech, attenuated
-    -26dB with a -35dB noise floor -- see
-    tests/fixtures/generate_vad_quiet_speech.py) loses a meaningful fraction
-    of its speech-timestamp coverage at Silero's threshold=0.5 default, and
-    `TranscriptionConfig`'s lower, configurable threshold/min_speech_duration
-    recover most of it.
+    whisper decoder: `quiet_speech_component.wav` (real speech, run through
+    synthetic room reverb + 300-3400Hz band-limiting then attenuated -15dB
+    with a -45dB noise floor -- see tests/fixtures/generate_vad_quiet_speech.py)
+    loses a meaningful fraction of its speech-timestamp coverage at Silero's
+    threshold=0.5 default, and `TranscriptionConfig`'s lower, configurable
+    threshold/min_speech_duration recover it.
     """
     vad = pytest.importorskip("faster_whisper.vad")
 
@@ -80,7 +84,7 @@ def test_default_silero_threshold_drops_quiet_speech_component():
 
     default_ts = vad.get_speech_timestamps(quiet, vad.VadOptions(threshold=0.5))
     configured_ts = vad.get_speech_timestamps(
-        quiet, vad.VadOptions(threshold=0.35, min_speech_duration_ms=100)
+        quiet, vad.VadOptions(threshold=0.2, min_speech_duration_ms=100)
     )
 
     default_coverage = coverage(default_ts)
@@ -98,6 +102,43 @@ def test_default_silero_threshold_drops_quiet_speech_component():
         f"expected the configured threshold to recover nearly all of the speech, "
         f"got {configured_coverage:.2f}s / {total_dur_s:.2f}s"
     )
+
+
+def test_normalize_loudness_improves_retention_on_realistic_fixture():
+    """WHISP-77 regression: the first `normalize_loudness` implementation
+    (AGC-based) measured *worse* than raw audio at every Silero VAD threshold
+    on a real recording -- a plain attenuation+noise fixture didn't catch
+    this. `quiet_speech_component.wav` adds room reverb and band-limited
+    "captured over speakers" coloration plus a realistic noise floor, which
+    does catch it: the current (dynaudnorm-style) `normalize_loudness` must
+    give VAD retention at or above raw at every threshold tested, and clearly
+    better at the project's default threshold.
+    """
+    vad = pytest.importorskip("faster_whisper.vad")
+    from whisper_aloud.stt.normalize import normalize_loudness
+
+    quiet, sr = _read_wav(FIXTURE_DIR / "quiet_speech_component.wav")
+    normalized = normalize_loudness(quiet, sr)
+
+    def coverage(signal, threshold) -> float:
+        ts = vad.get_speech_timestamps(
+            signal, vad.VadOptions(threshold=threshold, min_speech_duration_ms=100)
+        )
+        return sum(seg["end"] - seg["start"] for seg in ts) / sr
+
+    for threshold in (0.5, 0.35, 0.2, 0.1):
+        raw_cov = coverage(quiet, threshold)
+        norm_cov = coverage(normalized, threshold)
+        assert norm_cov >= raw_cov, (
+            f"normalize_loudness() should not reduce VAD retention at "
+            f"threshold={threshold}: raw={raw_cov:.2f}s, normalized={norm_cov:.2f}s"
+        )
+
+    # And at 0.35 -- above the project's default of 0.2, but still a threshold
+    # Silero's own retention curve is sensitive to on this fixture -- it
+    # should be a clear win (raw drops this fixture entirely at 0.35; see
+    # test_default_silero_threshold_drops_quiet_speech_component).
+    assert coverage(normalized, 0.35) > coverage(quiet, 0.35)
 
 
 # ─── 2. Full pipeline: Transcriber.transcribe_file() with the real model ───
@@ -144,11 +185,11 @@ class TestTranscribeFileRecoversQuietSpeaker:
         assert meta["b_text"].rstrip(".").lower() not in result.text.lower()
 
     def test_after_fix_recovers_speaker_b(self):
-        """With the chosen defaults (normalize_loudness=True, vad_threshold=0.35,
+        """With the chosen defaults (normalize_loudness=True, vad_threshold=0.2,
         vad_min_speech_ms=100), speaker B's sentence is recovered."""
         config = self._build_config()  # project defaults
         assert config.transcription.normalize_loudness is True
-        assert config.transcription.vad_threshold == pytest.approx(0.35)
+        assert config.transcription.vad_threshold == pytest.approx(0.2)
         assert config.transcription.vad_min_speech_ms == 100
 
         result = self._transcribe_with_cpu_threads_1(config, str(FIXTURE_DIR / "two_speaker.wav"))
