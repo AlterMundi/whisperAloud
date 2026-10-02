@@ -29,6 +29,13 @@ reverb/band-limiting) was too easy: it didn't catch that the first
 *worse* than doing nothing on a real recording (see stt/normalize.py's
 docstring). The reverb+band-limit coloration reproduces that failure mode
 in a small, fast, deterministic fixture.
+
+`quiet_speech_component.wav` additionally has synthetic low-frequency rumble
+(30-60Hz, `_add_rumble`) added under it: on the real 36-minute recording,
+this -- not loudness -- turned out to be the actual lever behind Silero's
+retention loss (removing it with a plain high-pass filter was a clear win;
+dynamic loudness normalization was not, and even made it worse). Without the
+rumble, this fixture did not reproduce that either.
 """
 import json
 import os
@@ -59,9 +66,22 @@ COLORATION_SEED = 123  # separate RNG stream for the synthetic room/speaker impu
 # above, applied standalone (no preceding loud speaker A in the file) and
 # attenuated further, since without that preceding loud context Silero
 # tolerates somewhat more attenuation before its default threshold drops it.
-COMPONENT_ATTEN_DB = -15.0
+COMPONENT_ATTEN_DB = -18.0
 COMPONENT_NOISE_DB = -45.0
 COMPONENT_RNG_SEED = 2024
+
+# Low-frequency rumble (HVAC, handling noise, room hum) added on top of the
+# above -- this, not loudness, is what the real 36-minute meeting recording's
+# VAD-retention problem actually turned out to be (see stt/normalize.py's
+# module docstring). -20dB (the level a first guess at "quiet background
+# rumble" suggests) measured as having no effect on this particular fixture;
+# -15dB is the level that actually reproduces default-threshold Silero
+# retention dropping while a plain 80Hz high-pass recovers it -- tuned
+# empirically against this fixture, the same way every other level in this
+# file was, rather than assumed.
+RUMBLE_DB = -15.0
+RUMBLE_BAND_HZ = (30.0, 60.0)
+RUMBLE_SEED = 777
 
 
 def _read_wav_mono16k(path: str) -> np.ndarray:
@@ -99,6 +119,20 @@ def _room_coloration(signal: np.ndarray, sample_rate: int, rng: np.random.Genera
     if peak > 0:
         colored = colored * (np.max(np.abs(signal)) / peak)  # restore original peak level
     return colored.astype(np.float32)
+
+
+def _add_rumble(
+    signal: np.ndarray, sample_rate: int, rng: np.random.Generator,
+    band_hz: tuple = RUMBLE_BAND_HZ, level_db: float = RUMBLE_DB,
+) -> np.ndarray:
+    """Add band-limited low-frequency noise (HVAC/handling/room hum) under
+    `signal`, normalized so its peak sits at `level_db` relative to full
+    scale."""
+    noise = rng.normal(0, 1, size=len(signal)).astype(np.float32)
+    sos = ss.butter(4, list(band_hz), btype="bandpass", fs=sample_rate, output="sos")
+    rumble = ss.sosfiltfilt(sos, noise).astype(np.float32)
+    rumble = rumble / (np.max(np.abs(rumble)) + 1e-9) * (10 ** (level_db / 20.0))
+    return (signal + rumble).astype(np.float32)
 
 
 def _save_wav(audio: np.ndarray, path: str) -> None:
@@ -165,6 +199,7 @@ def main() -> None:
         10 ** (COMPONENT_NOISE_DB / 20.0)
     )
     comp = (comp_quiet + comp_noise).astype(np.float32)
+    comp = _add_rumble(comp, SAMPLE_RATE, np.random.default_rng(RUMBLE_SEED))
     _save_wav(comp, os.path.join(OUT_DIR, "quiet_speech_component.wav"))
 
     # Near-silence fixture: low-level noise only, no speech at all. Used to

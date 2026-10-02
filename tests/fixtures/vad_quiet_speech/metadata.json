@@ -8,7 +8,7 @@
   "b_text": "Ask what you can do for your country.",
   "b_attenuation_db": -15.0,
   "b_noise_floor_db": -40.0,
-  "quiet_speech_component_attenuation_db": -15.0,
+  "quiet_speech_component_attenuation_db": -18.0,
   "quiet_speech_component_noise_floor_db": -45.0,
   "quiet_speech_component_duration_s": 1.7450625,
   "source": "bench/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/test_wavs/en.wav, split at 2.1s: first half is speaker A at normal level, second half (speaker B) is plain-attenuated + noised for two_speaker.wav (used for full-pipeline content-recovery testing), or additionally run through a synthetic room-reverb + 300-3400Hz band-limiting (_room_coloration) for quiet_speech_component.wav (used for VAD-retention-only testing) -- see module docstring (WHISP-77)."
