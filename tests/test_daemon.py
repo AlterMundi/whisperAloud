@@ -1,6 +1,7 @@
 """Tests for WhisperAloud D-Bus daemon service."""
 import importlib
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -648,6 +649,126 @@ class TestDaemonMethods:
             result = daemon.GetStatus()
         assert "hotkey_backend" in result
         assert result["hotkey_backend"] == "keybinder"
+
+
+class TestDownloadModel:
+    """Tests for DownloadModel/CancelDownload (WHISP-68)."""
+
+    @pytest.fixture
+    def daemon(self):
+        return _make_daemon()
+
+    def test_get_status_includes_downloading_key(self, daemon):
+        result = daemon.GetStatus()
+        assert "downloading" in result
+
+    def test_download_model_unknown_model_refused(self, daemon):
+        result = daemon.DownloadModel("faster-whisper", "does-not-exist", False)
+        assert result is False
+        daemon.Error.assert_called_once()
+        code, _message = daemon.Error.call_args[0]
+        assert code == "download_invalid_model"
+
+    def test_download_model_needs_review_refused_without_accept_license(self, daemon):
+        result = daemon.DownloadModel(
+            "nemotron-streaming", "nemotron-3.5-streaming-560ms", False
+        )
+        assert result is False
+        daemon.Error.assert_called_once()
+        code, _message = daemon.Error.call_args[0]
+        assert code == "download_license_review_required"
+        assert daemon._downloading is False
+
+    def test_download_model_needs_review_accepted_with_accept_license(self, daemon, monkeypatch):
+        from whisper_aloud.stt import model_download
+
+        # nemotron-streaming isn't a downloadable engine today -- this only
+        # proves the needs_review gate itself is bypassed by accept_license,
+        # not that the download succeeds.
+        result = daemon.DownloadModel(
+            "nemotron-streaming", "nemotron-3.5-streaming-560ms", True
+        )
+        assert result is True
+        daemon._download_thread.join(timeout=2)
+        assert daemon.DownloadFinished.call_args[0][:3] == (
+            "nemotron-streaming", "nemotron-3.5-streaming-560ms", False,
+        )
+
+    def test_download_model_starts_thread_and_emits_finished_on_success(self, daemon, monkeypatch):
+        from whisper_aloud.stt import model_download
+
+        monkeypatch.setattr(
+            model_download, "download_model",
+            lambda name, progress_cb=None, cancel_event=None: progress_cb(10, 10),
+        )
+        result = daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False)
+        assert result is True
+        daemon._download_thread.join(timeout=2)
+        daemon.DownloadFinished.assert_called_once_with(
+            "parakeet", "parakeet-tdt-0.6b-v3", True, ""
+        )
+        assert daemon._downloading is False
+
+    def test_download_model_refuses_concurrent_call(self, daemon, monkeypatch):
+        from whisper_aloud.stt import model_download
+
+        release = threading.Event()
+        started = threading.Event()
+
+        def _blocking_download(name, progress_cb=None, cancel_event=None):
+            started.set()
+            release.wait(timeout=2)
+
+        monkeypatch.setattr(model_download, "download_model", _blocking_download)
+
+        first = daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False)
+        assert first is True
+        assert started.wait(timeout=2)
+
+        second = daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False)
+        assert second is False
+
+        release.set()
+        daemon._download_thread.join(timeout=2)
+
+    def test_cancel_download_returns_false_when_nothing_downloading(self, daemon):
+        assert daemon.CancelDownload() is False
+
+    def test_cancel_download_sets_event_and_reports_cancelled(self, daemon, monkeypatch):
+        from whisper_aloud.stt import model_download
+
+        release = threading.Event()
+
+        def _blocking_download(name, progress_cb=None, cancel_event=None):
+            release.wait(timeout=2)
+            if cancel_event.is_set():
+                raise model_download.DownloadCancelled("cancelled")
+
+        monkeypatch.setattr(model_download, "download_model", _blocking_download)
+
+        assert daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False) is True
+        assert daemon.CancelDownload() is True
+        release.set()
+        daemon._download_thread.join(timeout=2)
+
+        daemon.DownloadFinished.assert_called_once_with(
+            "parakeet", "parakeet-tdt-0.6b-v3", False, "cancelled"
+        )
+        assert daemon._downloading is False
+
+    def test_download_model_failure_reports_error_message(self, daemon, monkeypatch):
+        from whisper_aloud.stt import model_download
+
+        def _failing_download(name, progress_cb=None, cancel_event=None):
+            raise RuntimeError("network exploded")
+
+        monkeypatch.setattr(model_download, "download_model", _failing_download)
+
+        assert daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False) is True
+        daemon._download_thread.join(timeout=2)
+        daemon.DownloadFinished.assert_called_once_with(
+            "parakeet", "parakeet-tdt-0.6b-v3", False, "network exploded"
+        )
 
 
 class TestDaemonIntrospection:

@@ -190,6 +190,7 @@ Valid in any state. Returns a dict of GLib variants:
 | `device` | `s` | Configured inference device (`config.model.device`), e.g. `cpu`, `cuda` |
 | `hotkey_backend` | `s` | Active global-hotkey backend: `xdg-portal`, `libkeybinder3`, or `none` |
 | `uptime` | `d` | Seconds since the daemon process started |
+| `downloading` | `b` | True while a `DownloadModel()` job is in flight (WHISP-68) |
 
 ### GetHistory
 
@@ -350,6 +351,57 @@ a nonexistent loop (not reachable via `run()`) is the only path through
 `False` and only matters for unit tests that construct the service without
 calling `run()`.
 
+### DownloadModel
+
+```
+DownloadModel(s engine, s name, b accept_license) → (b started)
+```
+
+Valid in any state. Starts a background download of a `stt.catalog` `(engine,
+name)` model, so a model can be fetched ahead of time with progress feedback
+instead of blocking the daemon's next `ReloadConfig()`/`SetConfig()`-triggered
+model reload the way an undiscovered-ahead-of-time model switch does today
+(see `ReloadConfig`/`SetConfig` above).
+
+`started` is `true` only if a download was actually kicked off — it does not
+mean the download *succeeded*; watch `DownloadProgress`/`DownloadFinished` for
+that. Returns `false` (and starts nothing) when:
+
+- a download is already running — only one `DownloadModel()` job at a time;
+  call `CancelDownload()` first if you want to switch targets;
+- `(engine, name)` isn't a known catalog entry — emits
+  `Error("download_invalid_model", <message>)`;
+- the entry has `needs_review=True` (a license pending human legal review,
+  e.g. WHISP-56's `nemotron-streaming`) and `accept_license` is not `true` —
+  emits `Error("download_license_review_required", <message>)`. This mirrors
+  the Settings UI's existing convention of hiding such entries from the
+  default model picker, enforced here too so a scripted/CLI caller can't
+  silently fetch a model nobody has reviewed. Passing `accept_license=true`
+  is the caller's explicit acknowledgement of that model's license.
+
+Only `engine in {"parakeet", "faster-whisper"}` are downloadable today (the
+only two backends `DownloadModel` wires up); any other engine raises
+internally and is reported via `DownloadFinished(..., ok=false, error=...)`.
+
+### CancelDownload
+
+```
+CancelDownload() → (b success)
+```
+
+Valid in any state. Requests cancellation of the in-flight `DownloadModel()`
+job, if any. Returns `true` only if a cancellation was requested (i.e.
+something was downloading) — it does not block until the download actually
+stops. The eventual `DownloadFinished(..., ok=false, error="cancelled")`
+signal is the authoritative completion notice.
+
+Cancellation granularity differs by engine (see `DownloadProgress` below for
+why): a Parakeet (sherpa-onnx) download is a single file and stops
+essentially immediately; a faster-whisper (Hugging Face Hub) download can
+only stop between chunks of whichever file(s) are in flight at the moment of
+the request, since `huggingface_hub.snapshot_download()` has no public
+per-file-boundary cancellation hook.
+
 ## Properties
 
 ### ApiVersion
@@ -469,9 +521,48 @@ can fail (see each method's "Error behaviour" above for the specific
 `code` values in use: `recorder_error`, `recording_failed`,
 `component_error`, `stop_failed`, `history_search_failed`,
 `history_fetch_failed`, `history_update_failed`, `history_delete_failed`,
-`config_invalid`, `reload_failed`). `code` values are stable identifiers
+`config_invalid`, `reload_failed`, `download_invalid_model`,
+`download_license_review_required`). `code` values are stable identifiers
 intended for programmatic matching; `message` is a free-form, untranslated
 diagnostic string not intended for parsing.
+
+### DownloadProgress
+
+```
+DownloadProgress(s engine, s name, t bytes_done, t bytes_total)
+```
+
+Emitted from the download's background thread (via `GLib.idle_add`-safe
+signal emission, like `TranscriptionReady`) while a `DownloadModel()` job is
+in flight, throttled to roughly 4Hz (the first update and the
+completed/boundary update are always let through unthrottled, so clients see
+an immediate "started" and a crisp "100%" even under throttling).
+
+`bytes_total == 0` means the total size is not known yet:
+
+- **sherpa-onnx (Parakeet)**: the server didn't report a `Content-Length`.
+- **faster-whisper**: the installed `huggingface_hub` predates per-file
+  progress-hook support (`tqdm_class` on `snapshot_download`); progress is
+  reported as a single indeterminate `(0, 0)` start and end event in that
+  case. When `tqdm_class` *is* supported, `bytes_total` is the sum of only
+  the per-file totals known so far — it can briefly under-report right at
+  the start of a multi-file download before converging to the true total;
+  treat an increasing `bytes_total` as normal, not a shrinking download.
+
+Clients should render an indeterminate/pulsing progress indicator whenever
+`bytes_total == 0`.
+
+### DownloadFinished
+
+```
+DownloadFinished(s engine, s name, b ok, s error)
+```
+
+Emitted exactly once per `DownloadModel()` job, when it finishes — whether
+successfully, with an error, or because `CancelDownload()` was called
+(`ok == false` and `error == "cancelled"` in that case). Clients should treat
+this as the point to re-check the model's downloaded state (e.g. re-query
+`stt.catalog`/refresh a model picker row) rather than polling.
 
 ## Activation
 
@@ -693,6 +784,41 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.3.0 — 2026-10-02
+
+Minor (additive), WHISP-68: in-app model download with progress and cancel.
+
+**Versioning/ordering note**: this bump was coordinated with `fix/WHISP-72`,
+which independently took `1.2.0` for an unrelated additive change (see that
+entry below) — `1.3.0` here is additive on top of `1.2.0`, confirmed by
+rebasing this branch onto `1.2.0` after it merged to `master`, so the two
+entries form a consistent, monotonically additive sequence rather than two
+sibling branches disagreeing about what `1.2.0` contains.
+
+- **New method** `DownloadModel(s engine, s name, b accept_license) → (b
+  started)`: starts a background download of a `stt.catalog` `(engine, name)`
+  model. Refuses (returns `false`, no-op) when a download is already
+  running, the model is unknown, or the entry is `needs_review` and
+  `accept_license` isn't `true`.
+- **New method** `CancelDownload() → (b success)`: requests cancellation of
+  the in-flight download, if any.
+- **New signal** `DownloadProgress(s engine, s name, t bytes_done, t
+  bytes_total)`: throttled to ~4Hz; `bytes_total == 0` means indeterminate
+  (unknown total size).
+- **New signal** `DownloadFinished(s engine, s name, b ok, s error)`:
+  terminal event for a `DownloadModel()` job (success, failure, or
+  cancellation — `error == "cancelled"` in the latter case).
+- **`GetStatus`'s `a{sv}` return value gains a new key**: `"downloading"`
+  (`b`) — true while a download is in flight.
+- **`Error`'s `code` values gain two new entries**: `download_invalid_model`,
+  `download_license_review_required`.
+- **Known limitation, documented rather than fixed here**: `CancelDownload()`
+  for a faster-whisper (Hugging Face Hub) download can only take effect
+  between chunks of whichever file(s) are downloading at the moment of the
+  request — `huggingface_hub.snapshot_download()` has no public per-file-
+  boundary cancellation hook. A Parakeet (sherpa-onnx) download is always a
+  single file and cancels essentially immediately.
 
 ### 1.2.0 — 2026-10-02
 

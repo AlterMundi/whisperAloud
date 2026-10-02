@@ -23,6 +23,7 @@ from ..clipboard import (  # noqa: F401 -- ClipboardManager/TestClipboardStub ke
 from ..config import WhisperAloudConfig, detect_config_changes
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
+from ..stt import catalog, model_download
 from ..stt.engine import SpeechEngine, create_engine
 from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
@@ -47,7 +48,15 @@ EXIT_ALREADY_RUNNING = 3
 # (additive = minor, breaking = major + a new Control2 interface) and
 # record the change in that document's Changelog section, in the same
 # commit as the interface change.
-API_VERSION = "1.2.0"
+#
+# 1.3.0 (WHISP-68, this branch) is additive on top of 1.2.0 (fix/WHISP-72,
+# now merged to master) -- see docs/dbus-api.md's Changelog for both entries.
+API_VERSION = "1.3.0"
+
+# Throttle for DownloadProgress emissions (WHISP-68): a fast/cached download
+# can otherwise flood the session bus with one signal per urllib/tqdm chunk
+# callback. ~4Hz is frequent enough to feel live in a progress bar.
+_DOWNLOAD_PROGRESS_MIN_INTERVAL_S = 0.25
 
 # Polling cadence for PartialTranscript while a streaming engine is recording
 # (WHISP-57): docs/dbus-api.md's "Planned" entry says 3-10Hz; 5Hz is a
@@ -183,6 +192,15 @@ class WhisperAloudService:
         <method name="Quit">
           <arg direction="out" type="b" name="success"/>
         </method>
+        <method name="DownloadModel">
+          <arg direction="in" type="s" name="engine"/>
+          <arg direction="in" type="s" name="name"/>
+          <arg direction="in" type="b" name="accept_license"/>
+          <arg direction="out" type="b" name="started"/>
+        </method>
+        <method name="CancelDownload">
+          <arg direction="out" type="b" name="success"/>
+        </method>
         <signal name="RecordingStarted"/>
         <signal name="RecordingStopped"/>
         <signal name="TranscriptionReady">
@@ -208,6 +226,18 @@ class WhisperAloudService:
           <arg type="s" name="code"/>
           <arg type="s" name="message"/>
         </signal>
+        <signal name="DownloadProgress">
+          <arg type="s" name="engine"/>
+          <arg type="s" name="name"/>
+          <arg type="t" name="bytes_done"/>
+          <arg type="t" name="bytes_total"/>
+        </signal>
+        <signal name="DownloadFinished">
+          <arg type="s" name="engine"/>
+          <arg type="s" name="name"/>
+          <arg type="b" name="ok"/>
+          <arg type="s" name="error"/>
+        </signal>
         <property name="ApiVersion" type="s" access="read"/>
       </interface>
     </node>
@@ -222,6 +252,8 @@ class WhisperAloudService:
     StatusChanged = signal()
     ConfigChanged = signal()
     Error = signal()
+    DownloadProgress = signal()
+    DownloadFinished = signal()
 
     def __init__(
         self,
@@ -300,6 +332,16 @@ class WhisperAloudService:
         self._streaming_session = False
         self._partial_timer_id = None
         self._last_partial_seq = None
+
+        # WHISP-68: in-app model download state. Only one DownloadModel() job
+        # may be in flight at a time; `_download_lock` guards the three
+        # fields below across the D-Bus-calling thread and the background
+        # download thread.
+        self._download_lock = threading.Lock()
+        self._downloading = False
+        self._download_cancel_event: Optional[threading.Event] = None
+        self._download_thread: Optional[threading.Thread] = None
+        self._last_download_progress_emit = 0.0
 
         # GNOME integration
         self.notifications: Optional[NotificationManager] = None
@@ -781,6 +823,7 @@ class WhisperAloudService:
             "device": GLib.Variant("s", self.config.model.device),
             "hotkey_backend": GLib.Variant("s", self.hotkey_manager.backend if self.hotkey_manager else "none"),
             "uptime": GLib.Variant("d", time.monotonic() - self._start_time),
+            "downloading": GLib.Variant("b", self._downloading),
         }
 
     def GetHistory(self, limit: int) -> list:
@@ -1003,6 +1046,128 @@ class WhisperAloudService:
             import os
             os._exit(0)
         return True
+
+    # ─── WHISP-68: in-app model download ───────────────────────────────────
+
+    def DownloadModel(self, engine: str, name: str, accept_license: bool) -> bool:
+        """Start a background download of a catalog (engine, name) model.
+
+        Returns `False` (and starts nothing) when:
+        - a download is already in progress (only one at a time),
+        - `(engine, name)` isn't a known `stt.catalog` entry, or
+        - the entry has `needs_review=True` (a license pending human legal
+          review, e.g. WHISP-56's nemotron-streaming) and `accept_license`
+          is not `True` -- mirroring the UI convention of hiding such
+          entries from the default picker, enforced here too so a scripted/
+          CLI caller can't silently fetch a model nobody has reviewed.
+
+        Progress and completion are reported asynchronously via
+        `DownloadProgress`/`DownloadFinished`, not this method's return
+        value -- `True` only means "started", not "succeeded".
+        """
+        with self._download_lock:
+            if self._downloading:
+                return False
+            entry = catalog.get(engine, name)
+            if entry is None:
+                self.Error("download_invalid_model", f"Unknown model {engine}/{name}")
+                return False
+            if entry.needs_review and not accept_license:
+                self.Error(
+                    "download_license_review_required",
+                    f"{entry.label}'s license ({entry.license}) requires explicit "
+                    "acceptance -- retry with accept_license=True",
+                )
+                return False
+            self._downloading = True
+            self._download_cancel_event = threading.Event()
+            cancel_event = self._download_cancel_event
+
+        self._last_download_progress_emit = 0.0
+        self._download_thread = threading.Thread(
+            target=self._run_download,
+            args=(entry, cancel_event),
+            name="whisper-aloud-download",
+            daemon=True,
+        )
+        self._download_thread.start()
+        return True
+
+    def CancelDownload(self) -> bool:
+        """Request cancellation of the in-flight DownloadModel() job, if any.
+
+        Returns `True` if a cancellation was requested, `False` if nothing
+        was downloading. Does not block for the download to actually stop --
+        the eventual `DownloadFinished(..., ok=False, error="cancelled")`
+        signal is the authoritative completion notice.
+        """
+        with self._download_lock:
+            if not self._downloading or self._download_cancel_event is None:
+                return False
+            self._download_cancel_event.set()
+        return True
+
+    def _run_download(self, entry, cancel_event: threading.Event) -> None:
+        """Background-thread worker for DownloadModel(). Performs the actual
+        download via the right backend for `entry.engine`, then emits
+        DownloadFinished via idle_add (WHISP-68)."""
+        ok = False
+        error = ""
+        try:
+            def _progress(bytes_done: int, bytes_total: int) -> None:
+                self._emit_download_progress(entry.engine, entry.name, bytes_done, bytes_total)
+
+            # WHISP-46-style test-only escape hatch, mirrors stt.engine's
+            # engine=="fake": only reachable with BOTH WHISPER_ALOUD_TEST_MODE=1
+            # and WHISPER_ALOUD_FAKE_DOWNLOAD=1 set, so e2e tests can exercise
+            # this whole flow with no real network access.
+            if self._test_mode and os.environ.get("WHISPER_ALOUD_FAKE_DOWNLOAD") == "1":
+                from ..stt import fake_download
+
+                fake_download.download_model(
+                    entry.name, progress_cb=_progress, cancel_event=cancel_event
+                )
+            elif entry.engine == "parakeet":
+                model_download.download_model(
+                    entry.name, progress_cb=_progress, cancel_event=cancel_event
+                )
+            elif entry.engine == "faster-whisper":
+                from ..stt import hf_download
+
+                hf_download.download_model(
+                    entry.name, progress_cb=_progress, cancel_event=cancel_event
+                )
+            else:
+                raise ValueError(f"Downloading is not supported for engine {entry.engine!r}")
+            ok = True
+        except Exception as e:
+            if cancel_event.is_set():
+                error = "cancelled"
+                logger.info("model download for %s/%s cancelled", entry.engine, entry.name)
+            else:
+                error = str(e)
+                logger.error(
+                    "model download failed for %s/%s: %s", entry.engine, entry.name, e
+                )
+        finally:
+            with self._download_lock:
+                self._downloading = False
+                self._download_cancel_event = None
+            GLib.idle_add(lambda: self.DownloadFinished(entry.engine, entry.name, ok, error))
+
+    def _emit_download_progress(
+        self, engine: str, name: str, bytes_done: int, bytes_total: int
+    ) -> None:
+        """Throttle DownloadProgress to ~4Hz (always letting the first and the
+        completed/boundary update through unthrottled), then emit it on the
+        main loop via idle_add -- called from the background download
+        thread's progress callback, never the main thread."""
+        now = time.monotonic()
+        is_boundary = bytes_total > 0 and bytes_done >= bytes_total
+        if not is_boundary and (now - self._last_download_progress_emit) < _DOWNLOAD_PROGRESS_MIN_INTERVAL_S:
+            return
+        self._last_download_progress_emit = now
+        GLib.idle_add(lambda: self.DownloadProgress(engine, name, bytes_done, bytes_total))
 
     def _serialize_history_entry(self, entry) -> dict:
         """Convert a HistoryEntry instance to a D-Bus-friendly dictionary."""
