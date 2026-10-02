@@ -1695,29 +1695,40 @@ class SettingsDialog(Gtk.Window):
         logger.info("Settings dialog cancelled")
         self.close()
 
-    def _show_message(self, message: str, message_type: Gtk.MessageType, on_close: Optional[callable] = None) -> None:
+    def _show_message(self, message: str, message_type: Gtk.MessageType, on_close: Optional[callable] = None):
         """
         Show a message dialog.
 
+        Uses dialogs.show_dialog (WHISP-80) -- Adw.AlertDialog on libadwaita
+        >= 1.5, falling back to the deprecated Adw.MessageDialog on older
+        libadwaita, same as confirm()/_show_discard_confirmation(). Note
+        ``message_type`` no longer changes the dialog's icon/styling: neither
+        AlertDialog nor MessageDialog expose the Gtk.MessageType concept
+        Gtk.MessageDialog had; it is kept for API compatibility with callers.
+
         Args:
             message: Message to display
-            message_type: Type of message (INFO, WARNING, ERROR)
+            message_type: Type of message (INFO, WARNING, ERROR; currently
+                unused for styling)
             on_close: Optional callback to run when dialog closes
+
+        Returns the constructed dialog (useful for tests).
         """
-        dialog = Gtk.MessageDialog(
-            transient_for=self,
-            modal=True,
-            message_type=message_type,
-            buttons=Gtk.ButtonsType.OK,
-            text=message,
-        )
+        del message_type  # kept for API compatibility; no Adw equivalent to apply it to
+
         self._child_dialog_open = True
 
-        def on_response(d, r):
+        def _on_response(_response: str) -> None:
             self._child_dialog_open = False
-            d.close()
             if on_close:
                 on_close()
 
-        dialog.connect("response", on_response)
-        dialog.present()
+        return dialogs.show_dialog(
+            parent=self,
+            heading=message,
+            body="",
+            responses=[("ok", "OK", Adw.ResponseAppearance.DEFAULT)],
+            default_response="ok",
+            close_response="ok",
+            on_response=_on_response,
+        )
