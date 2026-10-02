@@ -221,8 +221,127 @@ def cmd_quit(args) -> int:
         return _error(str(e))
 
 
+def _resolve_transcribe_model(args, catalog):
+    """Resolve (engine, model_name) for `transcribe` from --engine/--model/--language.
+
+    Mirrors `cmd_download_model`'s needs_review gate: an entry pending license
+    review is only reachable with an explicit, matching --model/--engine plus
+    --accept-license (WHISP-76 item 3). The no-args default and an --engine-only
+    selection both go through `catalog.recommended()`, which never returns a
+    needs_review entry on its own.
+    """
+    accept_license = getattr(args, "accept_license", False)
+    language = getattr(args, "language", "auto")
+
+    def _check_review(entry):
+        if entry.needs_review and not accept_license:
+            raise ValueError(
+                f"model '{entry.name}' is pending license review (license: {entry.license}); "
+                "re-run with --accept-license to proceed"
+            )
+
+    if args.engine and args.model:
+        entry = catalog.get(args.engine, args.model)
+        if entry is None:
+            raise ValueError(f"no model '{args.model}' for engine '{args.engine}'")
+        _check_review(entry)
+        return entry.engine, entry.name
+
+    if args.engine:
+        try:
+            entry = catalog.recommended(engine=args.engine, language=language)
+        except LookupError as e:
+            raise ValueError(str(e))
+        return entry.engine, entry.name
+
+    if args.model:
+        matches = [
+            e for e in catalog.entries() if e.name == args.model or args.model in e.aliases
+        ]
+        if not matches:
+            raise ValueError(f"no model named '{args.model}' in the catalog")
+        entry = matches[0]
+        _check_review(entry)
+        return entry.engine, entry.name
+
+    entry = catalog.recommended(language=language)
+    return entry.engine, entry.name
+
+
+def _segments_from_result(result):
+    """Segment list from a native (faster-whisper) TranscriptionResult.
+
+    Defensive about `result.segments` not being a real list (e.g. an
+    unconfigured MagicMock in a test double) -- treated as "no segments".
+    """
+    from .stt.formatters import Segment
+
+    raw = getattr(result, "segments", None)
+    if not isinstance(raw, list):
+        return []
+    return [
+        Segment(start=float(s.get("start", 0.0)), end=float(s.get("end", 0.0)), text=str(s.get("text", "")))
+        for s in raw
+    ]
+
+
+def _transcribe_chunked(engine, samples, sample_rate, language, *, verbose=False):
+    """Chunked transcription for engines without native long-form support.
+
+    Splits `samples` at silence-aware cut points (`stt.chunking`), transcribes
+    each chunk, and assembles absolute-timestamp segments: chunk offset plus
+    intra-chunk timestamps when the engine provides them, otherwise the chunk's
+    own start/end (WHISP-76 item 4). Returns (whole_text, segments).
+    """
+    from .stt.chunking import iter_chunks
+    from .stt.formatters import Segment
+
+    chunks = iter_chunks(samples, sample_rate)
+    total = len(chunks)
+    texts: list[str] = []
+    segments: list[Segment] = []
+    run_start = time.time()
+
+    for i, (a, b) in enumerate(chunks, start=1):
+        chunk_offset = a / sample_rate
+        chunk_duration = (b - a) / sample_rate
+        chunk_t0 = time.time()
+        result = engine.transcribe_numpy(samples[a:b], sample_rate, language=language)
+        chunk_elapsed = time.time() - chunk_t0
+
+        text = (result.text or "").strip()
+        if text:
+            texts.append(text)
+
+        inner = getattr(result, "segments", None)
+        if isinstance(inner, list) and inner:
+            for s in inner:
+                segments.append(Segment(
+                    start=chunk_offset + float(s.get("start", 0.0)),
+                    end=chunk_offset + float(s.get("end", 0.0)),
+                    text=str(s.get("text", "")),
+                ))
+        elif text:
+            segments.append(Segment(start=chunk_offset, end=chunk_offset + chunk_duration, text=text))
+
+        if verbose:
+            rtf = chunk_elapsed / chunk_duration if chunk_duration > 0 else 0.0
+            print(
+                f"chunk {i}/{total}  elapsed={time.time() - run_start:.1f}s  rtf={rtf:.3f}",
+                file=sys.stderr,
+            )
+
+    return " ".join(texts).strip(), segments
+
+
 def cmd_transcribe(args) -> int:
-    """Transcribe an audio file."""
+    """Transcribe an audio file.
+
+    Chooses an engine/model from the catalog (--engine/--model, or the
+    catalog's recommendation for --language), chunks long audio for engines
+    without native long-form support, and writes plain or timestamped
+    (srt/vtt/json) output to stdout or --output (WHISP-76).
+    """
     if args.verbose:
         logging.basicConfig(
             level=logging.DEBUG,
@@ -236,35 +355,94 @@ def cmd_transcribe(args) -> int:
     if not audio_file.exists():
         return _error(f"file not found: {audio_file}")
 
-    try:
-        global Transcriber
-        if Transcriber is None:
-            from .transcriber import Transcriber as _Transcriber
-            Transcriber = _Transcriber
+    from .stt import catalog as stt_catalog
+    from .stt.formatters import format_json, format_srt, format_txt, format_vtt
 
+    try:
+        engine_name, model_name = _resolve_transcribe_model(args, stt_catalog)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
         config = WhisperAloudConfig.load()
-        config.model.name = args.model
+        config.model.name = model_name
+        config.model.engine = engine_name
         config.model.device = args.device
         config.transcription.language = args.language
+        if args.no_vad:
+            config.transcription.vad_filter = False
+
+        if engine_name == "faster-whisper":
+            # Resolved lazily via the module-level `Transcriber` global so
+            # existing tests can patch `whisper_aloud.__main__.Transcriber`.
+            global Transcriber
+            if Transcriber is None:
+                from .transcriber import Transcriber as _Transcriber
+                Transcriber = _Transcriber
+            engine = Transcriber(config)
+        else:
+            from .stt.engine import create_engine
+            engine = create_engine(config)
 
         if args.verbose:
-            print(f"Loading model: {args.model} on {args.device}...", file=sys.stderr)
+            print(f"Loading model: {model_name} ({engine_name}) on {args.device}...", file=sys.stderr)
 
-        transcriber = Transcriber(config)
-        transcriber.load_model()
+        engine.load_model()
 
         if args.verbose:
             print(f"Transcribing: {audio_file}...", file=sys.stderr)
 
-        result = transcriber.transcribe_file(str(audio_file))
-        print(result.text)
+        t0 = time.time()
+        result = None
+
+        if engine_name == "faster-whisper":
+            # faster-whisper handles long audio natively -- no chunking needed.
+            vad_kwargs = {"vad_filter": False} if args.no_vad else {}
+            result = engine.transcribe_file(str(audio_file), **vad_kwargs)
+            whole_text = result.text
+            segments = _segments_from_result(result)
+            duration = result.duration
+        else:
+            from .stt.audio_io import load_audio_16k_mono
+            from .stt.normalize import normalize_loudness
+
+            samples = load_audio_16k_mono(str(audio_file))
+            if args.normalize:
+                samples = normalize_loudness(samples, 16000)
+            duration = len(samples) / 16000
+            whole_text, segments = _transcribe_chunked(
+                engine, samples, 16000, args.language, verbose=args.verbose,
+            )
+
+        elapsed = time.time() - t0
+
+        if args.format == "txt" and not args.timestamps:
+            # Backward compatible with the pre-WHISP-76 output exactly.
+            output_text = (whole_text or "") + "\n"
+        elif args.format == "txt":
+            output_text = format_txt(segments, timestamps=True)
+        elif args.format == "srt":
+            output_text = format_srt(segments)
+        elif args.format == "vtt":
+            output_text = format_vtt(segments)
+        else:
+            language = result.language if engine_name == "faster-whisper" else args.language
+            output_text = format_json(segments, meta={"language": language, "duration": duration})
+
+        if args.output:
+            Path(args.output).write_text(output_text)
+        else:
+            sys.stdout.write(output_text)
 
         if args.verbose:
+            rtf = elapsed / duration if duration else 0.0
             print(f"\n--- Metadata ---", file=sys.stderr)
-            print(f"Language: {result.language}", file=sys.stderr)
-            print(f"Duration: {result.duration:.2f}s", file=sys.stderr)
-            print(f"Processing time: {result.processing_time:.2f}s", file=sys.stderr)
-            print(f"Confidence: {result.confidence:.2%}", file=sys.stderr)
+            print(f"Engine: {engine_name} / {model_name}", file=sys.stderr)
+            print(f"Duration: {duration:.2f}s", file=sys.stderr)
+            print(f"Processing time: {elapsed:.2f}s (rtf={rtf:.3f})", file=sys.stderr)
+            if engine_name == "faster-whisper":
+                print(f"Language: {result.language}", file=sys.stderr)
+                print(f"Confidence: {result.confidence:.2%}", file=sys.stderr)
 
         return 0
 
@@ -600,15 +778,29 @@ examples:
     )
 
     # ── Transcribe ────────────────────────────────────────────────────────
+    from .stt import catalog as _catalog
+
+    engine_choices = _catalog.engines()
+    model_choices = sorted({
+        alias for entry in _catalog.entries() for alias in (entry.name, *entry.aliases)
+    })
+
     p_transcribe = sub.add_parser(
         "transcribe", help="transcribe an audio file",
-        description="Transcribe an audio file using the Whisper model.",
+        description="Transcribe an audio file, choosing an engine/model from the catalog.",
     )
     p_transcribe.add_argument("file", help="path to audio file")
     p_transcribe.add_argument(
-        "--model", "-m", default="base",
-        choices=["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"],
-        help="model size (default: base)",
+        "--engine", default=None, choices=engine_choices,
+        help="STT engine (default: the catalog's recommendation for --language)",
+    )
+    p_transcribe.add_argument(
+        "--model", "-m", default=None, choices=model_choices,
+        help="model name (default: the catalog's recommendation for --engine/--language)",
+    )
+    p_transcribe.add_argument(
+        "--accept-license", action="store_true",
+        help="confirm acceptance of a pending-review model's license (required for some models)",
     )
     p_transcribe.add_argument(
         "--language", "-l", default="auto",
@@ -620,8 +812,28 @@ examples:
         help="compute device (default: auto)",
     )
     p_transcribe.add_argument(
+        "--format", choices=["txt", "srt", "vtt", "json"], default="txt",
+        help="output format (default: txt)",
+    )
+    p_transcribe.add_argument(
+        "--timestamps", action="store_true",
+        help="include timestamps in txt output (implied by srt/vtt/json)",
+    )
+    p_transcribe.add_argument(
+        "--output", "-o", default=None,
+        help="write output to FILE instead of stdout",
+    )
+    p_transcribe.add_argument(
+        "--no-vad", action="store_true",
+        help="disable voice-activity-detection filtering for this run",
+    )
+    p_transcribe.add_argument(
+        "--normalize", action="store_true",
+        help="apply dynamic loudness normalization to the audio before transcribing",
+    )
+    p_transcribe.add_argument(
         "--verbose", "-v", action="store_true", default=argparse.SUPPRESS,
-        help="show detailed output",
+        help="show detailed output, including per-chunk progress",
     )
 
     # ── Config ────────────────────────────────────────────────────────────

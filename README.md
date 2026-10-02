@@ -106,8 +106,60 @@ For distro-specific variants, see `INSTALL.md` and `DEPENDENCIES.md`.
 ### File transcription (legacy single-shot mode)
 
 ```bash
-whisper-aloud path/to/audio.wav --model base --language es --device auto
+whisper-aloud transcribe path/to/audio.wav --model base --language es --device auto
 ```
+
+### Choosing an engine and model
+
+`--engine`/`--model` pick from the STT catalog (`whisper-aloud models` lists it).
+With neither flag, the catalog's recommended model for `--language` is used
+(faster-whisper's `base` for "auto", matching the historical default):
+
+```bash
+# Explicit engine + model
+whisper-aloud transcribe meeting.wav --engine parakeet --model parakeet-tdt-0.6b-v3
+
+# Just a model name -- its engine is resolved automatically
+whisper-aloud transcribe meeting.wav --model parakeet-tdt-0.6b-v3
+```
+
+A model pending license review (shown as "(pending license review)" by
+`whisper-aloud models --all`) is never auto-selected and is rejected unless
+passed explicitly together with `--accept-license`.
+
+### Output formats and timestamps
+
+`--format` writes `txt` (default, plain text -- unchanged from before unless
+`--timestamps` is also given), `srt`, `vtt`, or `json`, to stdout or to
+`--output FILE`:
+
+```bash
+whisper-aloud transcribe meeting.wav --format srt --output meeting.srt
+whisper-aloud transcribe meeting.wav --timestamps          # txt with [hh:mm:ss] lines
+```
+
+### Transcribing a long meeting
+
+faster-whisper decodes long audio natively. Other engines (Parakeet and other
+sherpa-onnx backends) take one bounded clip per call, so `transcribe`
+automatically splits long input into ~25s chunks, cutting at the quietest
+100ms frame near each chunk boundary so words aren't split, and stitches the
+timestamps back together:
+
+```bash
+# A 30+ minute recording, decoded via ffmpeg/PyAV if it's not a WAV (m4a, mp3, ...),
+# transcribed in chunks with Parakeet (~20x realtime on CPU vs. ~1x for
+# faster-whisper large-v3), written as a timestamped SRT:
+whisper-aloud transcribe meeting.m4a \
+  --engine parakeet --model parakeet-tdt-0.6b-v3 \
+  --format srt --output meeting.srt --verbose
+```
+
+`--verbose` prints per-chunk progress (`chunk i/N elapsed=... rtf=...`) to
+stderr. `--no-vad` disables faster-whisper's VAD filter for a single run
+without touching daemon/GUI VAD settings, and `--normalize` applies a dynamic
+loudness pass (reusing the daemon's own AGC) before transcription, useful for
+quiet or unevenly leveled recordings.
 
 ### Config validation
 
