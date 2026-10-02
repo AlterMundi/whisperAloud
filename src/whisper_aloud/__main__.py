@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import WhisperAloudConfig
-from .exceptions import WhisperAloudError
+from .exceptions import ConfigurationError, WhisperAloudError
 
 # Kept for test patch compatibility; resolved lazily in handle_file_transcription.
 Transcriber = None
@@ -292,25 +292,55 @@ def cmd_config(args) -> int:
 
 
 def _config_validate(args) -> int:
-    """Validate configuration file."""
+    """Validate configuration file.
+
+    Uses load(strict=True) (WHISP-75) so a config file that exists but is
+    malformed (invalid JSON, or unreadable) is reported as an error here,
+    instead of being silently swallowed and reported as "valid" while
+    actually falling back to in-memory defaults. Never writes the file.
+    """
+    config_path = Path.home() / ".config" / "whisper_aloud" / "config.json"
     try:
-        config = WhisperAloudConfig.load()
-        print("Configuration is valid.")
-        print(f"  Model:       {config.model.name} on {config.model.device}")
-        print(f"  Language:    {config.transcription.language}")
-        print(f"  Sample rate: {config.audio.sample_rate} Hz")
-        print(f"  VAD:         {'enabled' if config.audio.vad_enabled else 'disabled'}")
-        if config.persistence:
-            print(f"  Persistence: {'enabled' if config.persistence.save_audio else 'disabled'}")
-        return 0
+        config = WhisperAloudConfig.load(strict=True)
+    except ConfigurationError as e:
+        return _error(f"{config_path} is invalid: {e}")
     except Exception as e:
         return _error(f"configuration error: {e}")
 
+    print("Configuration is valid.")
+    print(f"  Model:       {config.model.name} on {config.model.device}")
+    print(f"  Language:    {config.transcription.language}")
+    print(f"  Sample rate: {config.audio.sample_rate} Hz")
+    print(f"  VAD:         {'enabled' if config.audio.vad_enabled else 'disabled'}")
+    if config.persistence:
+        print(f"  Persistence: {'enabled' if config.persistence.save_audio else 'disabled'}")
+    return 0
+
 
 def _config_show(args) -> int:
-    """Show current configuration values."""
+    """Show current configuration values.
+
+    If the config file exists but is malformed, this falls back to
+    defaults (like load()'s lenient default) but, unlike before WHISP-75,
+    warns on stderr that it is doing so instead of silently presenting
+    defaults as if they were read from the file. Never writes the file.
+    """
+    config_path = Path.home() / ".config" / "whisper_aloud" / "config.json"
     try:
-        config = WhisperAloudConfig.load()
+        config = WhisperAloudConfig.load(strict=True)
+    except ConfigurationError as e:
+        print(
+            f"{PROG}: warning: {config_path} is malformed ({e}); showing defaults instead.",
+            file=sys.stderr,
+        )
+        try:
+            config = WhisperAloudConfig.load()
+        except Exception as e2:
+            return _error(f"configuration error: {e2}")
+    except Exception as e:
+        return _error(f"configuration error: {e}")
+
+    try:
         print("WhisperAloud Configuration")
         print()
         print("[Model]")
@@ -339,7 +369,6 @@ def _config_show(args) -> int:
             print("[Persistence]")
             print(f"  save_audio:   {config.persistence.save_audio}")
         print()
-        config_path = Path.home() / ".config" / "whisper_aloud" / "config.json"
         if config_path.exists():
             print(f"Config file: {config_path}")
         else:
