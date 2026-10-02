@@ -1,5 +1,7 @@
 """Tests for CLI functionality."""
 
+import json
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -7,6 +9,15 @@ import pytest
 
 from whisper_aloud.__main__ import daemon_main, main, _format_uptime, _format_time_ago, _error
 from whisper_aloud.exceptions import WhisperAloudError
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch, tmp_path):
+    """Isolate every test in this module from the real $HOME/.config --
+    cmd_config() (and WhisperAloudConfig.load() underneath it) read
+    ~/.config/whisper_aloud/config.json by default, and these tests must
+    never touch the real one."""
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 # ─── Utility tests ────────────────────────────────────────────────────────────
@@ -419,7 +430,7 @@ def test_config_validate_reports_error_on_failure(capsys, monkeypatch):
     """A broken config load surfaces as a CLI error from `config validate`."""
     import whisper_aloud.__main__ as cli
 
-    def _boom():
+    def _boom(*args, **kwargs):
         raise RuntimeError("config.json is not valid JSON")
 
     monkeypatch.setattr(cli.WhisperAloudConfig, "load", staticmethod(_boom))
@@ -433,7 +444,7 @@ def test_config_show_reports_error_on_failure(capsys, monkeypatch):
     """A broken config load surfaces as a CLI error from `config show`."""
     import whisper_aloud.__main__ as cli
 
-    def _boom():
+    def _boom(*args, **kwargs):
         raise RuntimeError("config.json is not valid JSON")
 
     monkeypatch.setattr(cli.WhisperAloudConfig, "load", staticmethod(_boom))
@@ -441,6 +452,79 @@ def test_config_show_reports_error_on_failure(capsys, monkeypatch):
         exit_code = main()
         assert exit_code == 1
         assert "configuration error" in capsys.readouterr().err
+
+
+# ─── WHISP-75: validate/show on a malformed config file ──────────────────────
+
+
+def _write_malformed_config():
+    """Write an unparseable config.json under the isolated $HOME (see
+    isolated_home above) and return its path."""
+    config_dir = Path(os.environ["HOME"]) / ".config" / "whisper_aloud"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.json"
+    config_path.write_text("{ not valid json")
+    return config_path
+
+
+def test_config_validate_fails_on_malformed_json(capsys):
+    """WHISP-75: `config validate` must use load(strict=True) so a config
+    file that exists but is malformed JSON is reported as invalid, not
+    silently treated as valid defaults."""
+    config_path = _write_malformed_config()
+    with patch('sys.argv', ['whisper-aloud', 'config', 'validate']):
+        exit_code = main()
+        assert exit_code != 0
+        output = capsys.readouterr()
+        assert "valid" not in output.out.lower()
+        # The error must name the file and the underlying parse error.
+        assert str(config_path) in output.err
+        assert "json" in output.err.lower() or "expecting" in output.err.lower()
+
+
+def test_config_validate_never_writes_the_file(capsys):
+    """`config validate` must never write back to config.json, even when
+    reporting it as invalid."""
+    config_path = _write_malformed_config()
+    original_bytes = config_path.read_bytes()
+    with patch('sys.argv', ['whisper-aloud', 'config', 'validate']):
+        main()
+    assert config_path.read_bytes() == original_bytes
+
+
+def test_config_show_warns_and_falls_back_to_defaults_on_malformed_json(capsys):
+    """WHISP-75: `config show` must warn on stderr that it is falling back
+    to defaults because the file is malformed, rather than silently
+    displaying defaults as if they came from a valid file."""
+    config_path = _write_malformed_config()
+    with patch('sys.argv', ['whisper-aloud', 'config', 'show']):
+        exit_code = main()
+        assert exit_code == 0
+        output = capsys.readouterr()
+        assert "[Model]" in output.out
+        assert str(config_path) in output.err
+        assert "malformed" in output.err.lower() or "invalid" in output.err.lower()
+
+
+def test_config_show_never_writes_the_file(capsys):
+    """`config show` must never write back to config.json, even when
+    falling back to defaults because it is malformed."""
+    config_path = _write_malformed_config()
+    original_bytes = config_path.read_bytes()
+    with patch('sys.argv', ['whisper-aloud', 'config', 'show']):
+        main()
+    assert config_path.read_bytes() == original_bytes
+
+
+def test_config_validate_still_succeeds_on_a_well_formed_file(capsys):
+    """Sanity check: the strict load change must not break the happy path."""
+    config_dir = Path(os.environ["HOME"]) / ".config" / "whisper_aloud"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(json.dumps({"transcription": {"language": "fr"}}))
+    with patch('sys.argv', ['whisper-aloud', 'config', 'validate']):
+        exit_code = main()
+        assert exit_code == 0
+        assert "valid" in capsys.readouterr().out.lower()
 
 
 # ─── Bus name ─────────────────────────────────────────────────────────────────
