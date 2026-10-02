@@ -51,9 +51,18 @@ class _FakeHarness:
 
         self.mock_bus = MagicMock(name="bus")
         self.mock_bus.get_unique_name.return_value = ":1.50"
+        self.mock_bus.call_sync.side_effect = self._bus_call_sync
         self.mock_proxy = MagicMock(name="proxy")
         self.mock_proxy.call_sync.side_effect = self._proxy_call_sync
         self._stack = ExitStack()
+
+    def _bus_call_sync(
+        self, bus_name, path, iface, method, args, reply_type, flags, timeout, cancellable
+    ):
+        if iface == "org.freedesktop.host.portal.Registry" and method == "Register":
+            self.call_log.append("Register")
+            return None
+        raise AssertionError(f"unexpected bus.call_sync: {iface}.{method}")
 
     def _proxy_call_sync(self, method_name, args, flags, timeout, cancellable):
         if method_name == "NotifyKeyboardKeysym":
@@ -113,7 +122,7 @@ class TestSessionCreationOrder:
         with harness as sim:
             assert sim.simulate_paste("ctrl+v") is True
 
-        assert harness.call_log[:3] == ["CreateSession", "SelectDevices", "Start"]
+        assert harness.call_log[:4] == ["Register", "CreateSession", "SelectDevices", "Start"]
         notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
         assert notify_calls == [
             ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_PRESSED),
@@ -121,6 +130,15 @@ class TestSessionCreationOrder:
             ("NotifyKeyboardKeysym", XK_v, KEY_STATE_RELEASED),
             ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_RELEASED),
         ]
+
+    def test_register_called_before_create_session(self):
+        """Registry.Register (stable app_id handshake, WHISP-64 pattern)
+        must happen before CreateSession, same as PortalHotkeys."""
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.simulate_paste("ctrl+v")
+
+        assert harness.call_log.index("Register") < harness.call_log.index("CreateSession")
 
     def test_select_devices_requests_keyboard_only_and_persistent_mode(self):
         harness = _FakeHarness()

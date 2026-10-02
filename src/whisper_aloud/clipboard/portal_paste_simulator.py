@@ -45,6 +45,7 @@ _PORTAL_BUS = "org.freedesktop.portal.Desktop"
 _PORTAL_PATH = "/org/freedesktop/portal/desktop"
 _IFACE_RD = "org.freedesktop.portal.RemoteDesktop"
 _IFACE_REQ = "org.freedesktop.portal.Request"
+_IFACE_REGISTRY = "org.freedesktop.host.portal.Registry"
 
 # RemoteDesktop DeviceType bitmask (portal spec).
 DEVICE_KEYBOARD = 1
@@ -134,6 +135,31 @@ class PortalPasteSimulator:
         self._Gio = Gio
         self._GLib = GLib
         self._bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+        # Must happen before any other portal call on this connection (same
+        # handshake as service.hotkey_portal.PortalHotkeys._register_app_id,
+        # see WHISP-64): associates this connection with a stable app_id so
+        # persist_mode/restore_token actually survive across daemon
+        # restarts instead of being scoped to a one-off systemd scope name.
+        # Safe to fail: portals older than 1.19 simply lack this interface.
+        try:
+            self._bus.call_sync(
+                _PORTAL_BUS,
+                _PORTAL_PATH,
+                _IFACE_REGISTRY,
+                "Register",
+                GLib.Variant.new_tuple(
+                    GLib.Variant("s", self._app_id),
+                    GLib.Variant("a{sv}", {}),
+                ),
+                None,
+                Gio.DBusCallFlags.NONE,
+                2000,
+                None,
+            )
+        except Exception as e:
+            logger.debug("Registry.Register unavailable or failed (pre-1.19 portal?): %s", e)
+
         self._proxy = Gio.DBusProxy.new_sync(
             self._bus,
             Gio.DBusProxyFlags.NONE,
