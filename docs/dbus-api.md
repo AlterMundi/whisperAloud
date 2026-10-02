@@ -130,16 +130,23 @@ ToggleRecording() → (s state)
 
 Convenience wrapper: calls `StopRecording()` if currently recording,
 otherwise `StartRecording()`. Valid in any state; semantics otherwise match
-whichever of the two methods it dispatches to. Returns `"recording"` when it
-started a recording (regardless of `StartRecording`'s own success — see
-caveat below), or `StopRecording`'s return value when it stopped one.
+whichever of the two methods it dispatches to.
 
-> Caveat: the current implementation returns the literal string
-> `"recording"` after calling `StartRecording()` without checking its
-> return value. If `StartRecording()` failed, `ToggleRecording()` still
-> reports `"recording"` even though an `Error` signal was also emitted.
-> Clients should watch `StatusChanged`/`Error` rather than trust this
-> return value alone.
+- Returns `"recording"` when `StartRecording()` actually started a session.
+- Returns `"transcribing"` when `StartRecording()` refused because a
+  previous transcription is still in flight (see `StartRecording`'s own
+  caveat); no new recording starts and no `RecordingStarted` signal is
+  emitted in this case.
+- Returns `"error"` when `StartRecording()` refused for any other reason
+  (e.g. the recorder isn't initialized, or starting raised); an `Error`
+  signal was also emitted.
+- Returns `StopRecording()`'s return value (`"transcribing"` or `"error"`)
+  when it stopped a recording.
+
+> As of API 1.2.0, `ToggleRecording()`'s return value always reflects the
+> real resulting state (see `GetStatus()["state"]`). Before 1.2.0, it
+> unconditionally returned the literal string `"recording"` after calling
+> `StartRecording()`, even when `StartRecording()` had refused.
 
 ### CancelRecording
 
@@ -686,6 +693,26 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.2.0 — 2026-10-02
+
+Minor (observable return-value change), WHISP-72:
+
+- **ToggleRecording**: now returns the real resulting state instead of
+  unconditionally returning the literal string `"recording"` after calling
+  `StartRecording()`. When `StartRecording()` refuses because a previous
+  transcription is still in flight, `ToggleRecording()` now returns
+  `"transcribing"`; for any other refusal it returns `"error"`. The
+  pre-1.2.0 value in this refusal branch was already documented as an
+  unreliable literal (the caveat this entry removes) that callers were
+  told not to trust and to instead watch `StatusChanged`/`Error` -- no
+  client could have correctly relied on `"recording"` meaning a recording
+  actually started there. Treated as a minor bump rather than a patch
+  because the string a caller receives for that call does change; treated
+  as a minor bump rather than a major/`Control2` bump because the
+  documented, reliable part of the contract (`"recording"` on an actual
+  start, `StopRecording()`'s return value when stopping) is unchanged and
+  no method/signal/argument shape or type changed.
 
 ### 1.1.1 — 2026-10-01
 
