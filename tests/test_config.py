@@ -292,6 +292,53 @@ def test_invalid_highpass_hz():
         os.environ.pop('WHISPER_ALOUD_HIGHPASS_HZ', None)
 
 
+def test_audio_processing_highpass_hz_default():
+    """WHISP-83: the live AudioPipeline's high-pass knob defaults to 80Hz,
+    same as the file-transcription path's TranscriptionConfig.highpass_hz --
+    but as its own separate field, since live audio and file audio go
+    through different code paths (see AudioProcessingConfig.highpass_hz's
+    docstring)."""
+    config = WhisperAloudConfig.load()
+    assert config.audio_processing.highpass_hz == pytest.approx(80.0)
+
+
+def test_audio_processing_highpass_hz_env_override():
+    os.environ['WHISPER_ALOUD_AUDIO_HIGHPASS_HZ'] = '120'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.audio_processing.highpass_hz == pytest.approx(120.0)
+    finally:
+        os.environ.pop('WHISPER_ALOUD_AUDIO_HIGHPASS_HZ', None)
+
+
+def test_audio_processing_highpass_hz_zero_disables():
+    os.environ['WHISPER_ALOUD_AUDIO_HIGHPASS_HZ'] = '0'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.audio_processing.highpass_hz == 0
+    finally:
+        os.environ.pop('WHISPER_ALOUD_AUDIO_HIGHPASS_HZ', None)
+
+
+def test_invalid_audio_processing_highpass_hz():
+    os.environ['WHISPER_ALOUD_AUDIO_HIGHPASS_HZ'] = '9000'
+    try:
+        with pytest.raises(ConfigurationError, match="highpass_hz"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_AUDIO_HIGHPASS_HZ', None)
+
+
+def test_audio_processing_highpass_hz_round_trips():
+    config = WhisperAloudConfig.load()
+    config.audio_processing.highpass_hz = 100.0
+    data = config.to_dict()
+    assert data["audio_processing"]["highpass_hz"] == pytest.approx(100.0)
+
+    restored = WhisperAloudConfig.from_dict(data)
+    assert restored.audio_processing.highpass_hz == pytest.approx(100.0)
+
+
 def test_invalid_vad_threshold_transcription():
     """validate() rejects an out-of-range transcription.vad_threshold (Silero
     speech probability, distinct from audio.vad_threshold's RMS gate)."""

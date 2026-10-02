@@ -335,8 +335,13 @@ def test_hook_receives_chunks_in_order(mock_stream, mock_validate):
 
     received = []
     config = AudioConfig(sample_rate=16000)
+    # highpass_hz=0: these chunks are constant-value level markers, not
+    # speech -- the default 80Hz high-pass (WHISP-83) would otherwise block
+    # their DC content, which is irrelevant to what this test checks (chunk
+    # delivery order).
     proc_config = AudioProcessingConfig(
-        noise_gate_enabled=False, agc_enabled=False, denoising_enabled=False, limiter_enabled=False
+        noise_gate_enabled=False, agc_enabled=False, denoising_enabled=False, limiter_enabled=False,
+        highpass_hz=0,
     )
     recorder = AudioRecorder(
         config, processing_config=proc_config, on_processed_chunk=lambda c: received.append(c.copy())
@@ -537,8 +542,11 @@ def test_slow_hook_does_not_leak_into_next_session(mock_stream, mock_validate):
             block_old_hook.wait(timeout=5.0)
 
     config = AudioConfig()
+    # highpass_hz=0: same reasoning as test_hook_receives_chunks_in_order --
+    # these are constant-value level markers, not speech.
     proc_config = AudioProcessingConfig(
-        noise_gate_enabled=False, agc_enabled=False, denoising_enabled=False, limiter_enabled=False
+        noise_gate_enabled=False, agc_enabled=False, denoising_enabled=False, limiter_enabled=False,
+        highpass_hz=0,
     )
     recorder = AudioRecorder(config, processing_config=proc_config, on_processed_chunk=hook)
     recorder.chunk_worker_join_timeout_s = 0.05  # keep the test fast

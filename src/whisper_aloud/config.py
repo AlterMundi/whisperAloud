@@ -225,6 +225,23 @@ class AudioProcessingConfig:
     denoising_strength: float = 0.5
     limiter_enabled: bool = True
     limiter_ceiling_db: float = -1.0
+    # WHISP-83: causal high-pass (audio.audio_processor.HighPass), run first
+    # in AudioPipeline, ahead of NoiseGate, for *live* dictation. 0 disables.
+    # Deliberately a separate knob from TranscriptionConfig.highpass_hz (the
+    # file-transcription path's equivalent, applied non-causally via
+    # stt.normalize.apply_highpass_filter): live audio already goes through
+    # this pipeline before transcriber.transcribe_numpy ever sees it, and
+    # transcribe_numpy applies no filtering of its own, so sharing one knob
+    # across both paths would either double-filter live audio (if the file
+    # path's pre-processing were reused there) or require transcribe_numpy
+    # to special-case its caller -- two fields, each owned by the path that
+    # actually runs it, keeps that boundary explicit. Same 80Hz default and
+    # rationale as TranscriptionConfig.highpass_hz: removes low-frequency
+    # rumble (HVAC, handling noise, room hum) that otherwise raises the
+    # noise floor NoiseGate's RMS-based open/close decision reacts to (see
+    # WHISP-77's real-recording finding, same lever, file path).
+    # Env override: WHISPER_ALOUD_AUDIO_HIGHPASS_HZ.
+    highpass_hz: float = 80.0
 
 
 @dataclass
@@ -324,6 +341,7 @@ class WhisperAloudConfig:
                 "denoising_strength": self.audio_processing.denoising_strength,
                 "limiter_enabled": self.audio_processing.limiter_enabled,
                 "limiter_ceiling_db": self.audio_processing.limiter_ceiling_db,
+                "highpass_hz": self.audio_processing.highpass_hz,
             },
             "hotkey": {
                 "toggle_recording": self.hotkey.toggle_recording,
@@ -560,6 +578,11 @@ class WhisperAloudConfig:
             'WHISPER_ALOUD_GAIN_RESTORE_ON_CRASH', self.recording_flow.gain_restore_on_crash
         )
 
+        # Audio processing pipeline (WHISP-83)
+        self.audio_processing.highpass_hz = parse_float_env(
+            'WHISPER_ALOUD_AUDIO_HIGHPASS_HZ', self.audio_processing.highpass_hz
+        )
+
     def _sanitize(self) -> None:
         """Sanitize configuration values."""
         # Keep a stable representation for auto-detected language.
@@ -647,6 +670,16 @@ class WhisperAloudConfig:
 
         if not (0.01 <= self.audio.chunk_duration <= 1.0):
             raise ConfigurationError(f"Invalid chunk duration {self.audio.chunk_duration}. Must be 0.01-1.0s")
+
+        # Validate audio processing pipeline configuration (WHISP-83).
+        # Same bound as transcription.highpass_hz above (0 disables, or a
+        # cutoff comfortably below Nyquist for 16kHz audio).
+        hp = self.audio_processing.highpass_hz
+        if hp != 0 and not (0 < hp < 4000):
+            raise ConfigurationError(
+                f"Invalid audio_processing highpass_hz {self.audio_processing.highpass_hz}. "
+                "Must be 0 (disabled) or 0-4000"
+            )
 
         # Validate clipboard configuration
         if self.clipboard.timeout_seconds <= 0:

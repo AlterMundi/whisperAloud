@@ -28,6 +28,7 @@ from whisper_aloud.audio.audio_processor import (
     AudioPipeline,
     AudioProcessor,
     Denoiser,
+    HighPass,
     NoiseGate,
     PeakLimiter,
     StreamingResampler,
@@ -126,6 +127,16 @@ class TestNoLookahead:
         out2 = PeakLimiter().process(self._mutated_tail(audio))
         np.testing.assert_allclose(out1[:cut], out2[:cut], atol=1e-9)
 
+    def test_highpass_no_lookahead(self):
+        """HighPass (WHISP-83) is a causal IIR (sosfilt + persistent zi):
+        mutating everything after a cut point must not change the output
+        before the cut."""
+        audio = make_signal()
+        cut = int(self.CUT_S * SR)
+        out1 = HighPass(cutoff_hz=80.0).process(audio.copy(), SR)
+        out2 = HighPass(cutoff_hz=80.0).process(self._mutated_tail(audio), SR)
+        np.testing.assert_allclose(out1[:cut], out2[:cut], atol=1e-9)
+
     def test_resample_has_lookahead_xfail(self):
         """scipy.signal.resample (used in AudioProcessor.resample, and by
         AudioRecorder.stop() whenever config.audio.sample_rate != 16000) is
@@ -191,6 +202,20 @@ class TestChunkInvariance:
         assert max_abs_diff(one_shot, chunked) < 0.03
 
     @pytest.mark.parametrize("chunk_ms", CHUNK_SIZES_MS)
+    def test_highpass_is_chunk_invariant(self, chunk_ms):
+        """HighPass (WHISP-83) carries its sosfilt ``zi`` state exactly
+        across process() calls -- like PeakLimiter and the fixed AGC, this
+        makes chunked and one-shot output match to floating-point precision
+        at every tested chunk size, not just approximately.
+        """
+        audio = make_signal()
+        make_stage = lambda: HighPass(cutoff_hz=80.0)
+        call = lambda stage, chunk: stage.process(chunk, SR)
+        one_shot = run_one_shot(make_stage, call, audio)
+        chunked = run_chunked(make_stage, call, audio, chunk_ms)
+        assert max_abs_diff(one_shot, chunked) < 1e-6
+
+    @pytest.mark.parametrize("chunk_ms", CHUNK_SIZES_MS)
     def test_agc_is_chunk_invariant(self, chunk_ms):
         """WHISP-65 fix: AGC now carries a rolling history of raw samples
         across process() calls (``AGC._history``, seeded with up to
@@ -214,23 +239,27 @@ class TestChunkInvariance:
 
     @pytest.mark.parametrize("chunk_ms", CHUNK_SIZES_MS)
     def test_full_streaming_pipeline_is_chunk_invariant(self, chunk_ms):
-        """End-to-end streaming AudioPipeline (gate -> AGC -> limiter, no
-        denoiser) is now chunk-invariant within a tolerance dominated
-        entirely by NoiseGate's own boundary-dependent approximation (see
-        ``test_noise_gate_is_approximately_chunk_invariant``, bounded at
-        0.03 for the gate alone) — now that AGC is exact (previous test),
-        the gate's small hysteresis-boundary error is the only remaining
-        source of divergence, amplified by subsequent AGC gain and the
-        limiter's tanh saturation to an observed max abs diff of ~0.056 at
-        80/160ms chunk sizes on this signal (0.0 at 560/1120ms, where no
-        gate transition lands near a chunk boundary). Uses the new
+        """End-to-end streaming AudioPipeline (highpass -> gate -> AGC ->
+        limiter, no denoiser) is now chunk-invariant within a tolerance
+        dominated entirely by NoiseGate's own boundary-dependent
+        approximation (see ``test_noise_gate_is_approximately_chunk_invariant``,
+        bounded at 0.03 for the gate alone) — now that AGC is exact (previous
+        test) and HighPass is exact (WHISP-83, its own test above), the
+        gate's small hysteresis-boundary error is the only remaining source
+        of divergence, amplified by subsequent AGC gain and the limiter's
+        tanh saturation to an observed max abs diff of ~0.056 at 80/160ms
+        chunk sizes on this signal (0.0 at 560/1120ms, where no gate
+        transition lands near a chunk boundary). Uses the new
         ``AudioPipeline(..., streaming=True)`` / ``process_chunk()`` entry
         point (WHISP-65), which is what a streaming ASR caller would use
-        instead of ``process()``.
+        instead of ``process()``. ``highpass_hz=80`` is passed explicitly so
+        this test's intent (and tolerance) stays correct even if the
+        config's own default ever changes.
         """
         audio = make_signal()
         config = AudioProcessingConfig(
-            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=True, limiter_enabled=True
+            noise_gate_enabled=True, agc_enabled=True, denoising_enabled=True,
+            limiter_enabled=True, highpass_hz=80.0,
         )
         call = lambda stage, chunk: stage.process_chunk(chunk, SR)
         one_shot = run_one_shot(lambda: AudioPipeline(config, streaming=True), call, audio)
