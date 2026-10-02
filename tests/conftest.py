@@ -11,26 +11,6 @@ from whisper_aloud.persistence.database import TranscriptionDatabase
 from whisper_aloud.persistence.models import HistoryEntry
 
 
-@pytest.fixture(autouse=True)
-def _isolated_home(monkeypatch, tmp_path):
-    """Autouse, repo-wide: never let a test read or write the real
-    ~/.config/whisper_aloud/config.json or ~/.local/share/whisper_aloud.
-
-    WhisperAloudConfig.load()/save() resolve their paths via Path.home(), so
-    any in-process test that builds a WhisperAloudService (e.g. via
-    tests/_daemon_harness.py) and calls SetConfig() -- which unconditionally
-    calls self.config.save() (service/daemon.py) -- persists the test's
-    config to the real user's file unless HOME is isolated first. This was
-    an existing, repo-wide gap (most test files never set HOME at all); it
-    surfaced concretely when a WHISP-77 CI run corrupted a real
-    ~/.config/whisper_aloud/config.json with that run's in-memory config.
-    tests/e2e/ daemons run as subprocesses with their own explicit env (see
-    tests/e2e/conftest.py's build_daemon_env) and are unaffected by this
-    process's HOME.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-
 @pytest.fixture
 def temp_db_path():
     """Temporary database path."""
