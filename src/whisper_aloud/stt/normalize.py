@@ -1,27 +1,67 @@
-"""Loudness normalization for CLI `transcribe --normalize` (WHISP-76) and for
-the faster-whisper file-transcription path (WHISP-77).
+"""Loudness normalization and high-pass filtering for CLI `transcribe
+--normalize` (WHISP-76) and the faster-whisper file-transcription path
+(WHISP-77).
 
-WHISP-77 real-recording finding: the first implementation of this function
-wrapped the daemon's own `AGC` (a *causal* sliding-window RMS automatic gain
-control meant for live, streaming audio). On a real 36-minute meeting
-recording, that made Silero VAD retention *worse* than doing nothing at every
-threshold tested (e.g. 55% vs 58% raw at threshold=0.5) -- AGC's attack/release
-dynamics pump the noise floor and compress transients in a way that confuses
-VAD on real (reverberant, "captured over speakers") audio, even though it
-looked correct on short synthetic fixtures.
+WHISP-77 investigation summary (see config.py's TranscriptionConfig for the
+settings this backs): on a real 36-minute meeting recording, the lever that
+actually improved Silero VAD retention was removing low-frequency rumble
+(HVAC, handling noise, room hum) with a simple high-pass filter -- NOT
+loudness normalization:
 
-This is reimplemented as a non-causal, frame-based "dynaudnorm-style" window
-normalizer -- the same algorithm family as ffmpeg's `dynaudnorm` filter
-(`dynaudnorm=f=150:g=15:p=0.95:m=20`, which was used to validate this fix
-against the real recording): peak-normalize each ~150ms frame toward a target
-level, smooth the per-frame gain curve with a Gaussian window so gain doesn't
-jump abruptly between adjacent frames, cap the maximum boost, and leave
-frames at/below the noise floor alone so silence does not get amplified into
-audible (and VAD-confusing, or decoder-hallucinated) noise.
+    measured on the real file (threshold 0.35 / 0.2 / 0.1):
+      raw                    71% / 87% / 93%
+      highpass(80Hz) only    75% / 96% / 99%   <- the actual fix
+      dynaudnorm only        65% / 77% / 82%   <- makes it WORSE
+      highpass + dynaudnorm  68% / 85% / 92%   <- dynaudnorm still hurts
+
+`normalize_loudness()` (below) went through two implementations during this
+investigation -- first an AGC wrapper, then a non-causal dynaudnorm-style
+frame normalizer -- and *both* measured as a net negative for VAD retention
+on real audio, despite each looking like a clear win on short synthetic
+fixtures (a clean quiet speaker against silence). The underlying lesson:
+loudness-domain fixes validated only on clean synthetic clips do not
+necessarily transfer to real, reverberant recordings, where a meaningful
+fraction of what is quantitatively "quiet" is room tone/low-frequency rumble
+rather than quiet speech, and boosting it doesn't help. The function and
+CLI's `--normalize` flag are kept for anyone who wants to opt in (and it
+still helps the narrower "clean quiet speaker" case), but it defaults to off
+for file transcription -- see `TranscriptionConfig.normalize_loudness`.
+`apply_highpass_filter()` is the function file transcription actually uses by
+default (`TranscriptionConfig.highpass_hz`).
 """
 from __future__ import annotations
 
 import numpy as np
+import scipy.signal as ss
+
+
+def apply_highpass_filter(
+    samples: np.ndarray, sample_rate: int, cutoff_hz: float = 80.0, order: int = 2
+) -> np.ndarray:
+    """Remove content below `cutoff_hz` with a zero-phase Butterworth high-pass.
+
+    Offline file transcription can afford a non-causal filter (`sosfiltfilt`,
+    forward-backward, zero phase-distortion) -- there is no streaming/latency
+    constraint here, unlike the daemon's live pipeline. This is what measurably
+    improved Silero VAD retention on a real recording (see module docstring):
+    low-frequency rumble (HVAC, handling noise, room hum) sits well below
+    speech's fundamental frequency range and otherwise raises the broadband
+    noise floor VAD scores frames against.
+
+    `cutoff_hz <= 0` is a no-op (returns `samples` unchanged) so callers don't
+    need to branch on whether filtering is enabled.
+    """
+    samples = np.asarray(samples, dtype=np.float32)
+    if cutoff_hz <= 0 or samples.size == 0:
+        return samples
+
+    nyquist = sample_rate / 2.0
+    if cutoff_hz >= nyquist:
+        return samples
+
+    sos = ss.butter(order, cutoff_hz, btype="highpass", fs=sample_rate, output="sos")
+    filtered = ss.sosfiltfilt(sos, samples)
+    return filtered.astype(np.float32)
 
 # Modeled on ffmpeg's dynaudnorm filter (f=150:g=15:p=0.95:m=20 -- frame
 # length ms, Gaussian smoothing window in frames, target peak, max linear gain

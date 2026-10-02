@@ -283,23 +283,38 @@ class Transcriber:
 
         # WHISP-77: unlike transcribe_numpy (which backs live dictation and
         # already ran through the daemon's AGC), the file path has had no
-        # loudness treatment at all -- a quiet speaker (e.g. a remote meeting
-        # participant captured over speakers) can otherwise fall below VAD's
-        # speech threshold and get dropped entirely. Pre-decoding to samples
-        # here (instead of handing faster-whisper the raw path) is what lets
-        # us normalize before transcription.
-        audio_input = audio_path  # str, or ndarray once normalized below
+        # audio treatment at all -- a quiet speaker (e.g. a remote meeting
+        # participant captured over speakers), or just low-frequency rumble
+        # raising the noise floor, can otherwise push VAD into dropping real
+        # speech. Pre-decoding to samples here (instead of handing
+        # faster-whisper the raw path) is what lets us filter/normalize
+        # before transcription.
+        #
+        # highpass_hz (default on) is the change that actually measured as a
+        # clear win on a real recording's VAD retention; normalize_loudness
+        # (default off) measured as a net negative there despite helping on
+        # clean synthetic fixtures -- see stt/normalize.py's module docstring
+        # for the full investigation. Both are kept configurable.
+        highpass_hz = kwargs.get("highpass_hz", self.config.transcription.highpass_hz)
         normalize = kwargs.get("normalize_loudness", self.config.transcription.normalize_loudness)
-        if normalize:
+        audio_input = audio_path  # str, or ndarray once filtered/normalized below
+        if highpass_hz or normalize:
             try:
                 from .stt.audio_io import load_audio_16k_mono
-                from .stt.normalize import normalize_loudness
 
                 samples = load_audio_16k_mono(audio_path)
-                audio_input = normalize_loudness(samples, 16000)
+                if highpass_hz:
+                    from .stt.normalize import apply_highpass_filter
+
+                    samples = apply_highpass_filter(samples, 16000, cutoff_hz=highpass_hz)
+                if normalize:
+                    from .stt.normalize import normalize_loudness
+
+                    samples = normalize_loudness(samples, 16000)
+                audio_input = samples
             except Exception as e:
                 logger.warning(
-                    "Loudness normalization failed for '%s', transcribing raw audio instead: %s",
+                    "Audio pre-processing failed for '%s', transcribing raw audio instead: %s",
                     audio_path, e,
                 )
                 audio_input = audio_path

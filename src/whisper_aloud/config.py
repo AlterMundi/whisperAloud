@@ -122,7 +122,22 @@ class TranscriptionConfig:
     # already runs through the daemon's AudioPipeline (NoiseGate -> AGC ->
     # Denoiser -> PeakLimiter) before reaching the engine, so this must not be
     # (and is not) applied a second time there -- see Transcriber.transcribe_numpy.
-    normalize_loudness: bool = True
+    #
+    # Default False: measured on a real 36-minute meeting recording, dynamic
+    # normalization (both this project's dynaudnorm-style implementation and
+    # literal ffmpeg dynaudnorm) *reduced* Silero VAD retention versus doing
+    # nothing at every threshold tested. The function and the CLI's
+    # `--normalize` flag are kept for anyone who wants to opt in, but it is
+    # not the lever that actually helped on real audio -- see highpass_hz.
+    normalize_loudness: bool = False
+    # High-pass filter (Hz) applied before VAD/transcription in the file path,
+    # removing low-frequency rumble (HVAC, handling noise, room hum) that
+    # otherwise raises the noise floor Silero VAD scores against. 0 disables.
+    # This -- not loudness normalization -- was the change that actually
+    # mattered on a real 36-minute meeting recording: a plain 80Hz high-pass
+    # alone took Silero retention from 87%/93% to 96%/99% at threshold
+    # 0.2/0.1, while dynaudnorm (with or without the high-pass) made it worse.
+    highpass_hz: float = 80.0
 
 
 # Language change may trigger model reload (for optimization)
@@ -258,6 +273,7 @@ class WhisperAloudConfig:
                 "vad_threshold": self.transcription.vad_threshold,
                 "vad_min_speech_ms": self.transcription.vad_min_speech_ms,
                 "normalize_loudness": self.transcription.normalize_loudness,
+                "highpass_hz": self.transcription.highpass_hz,
             },
             "audio": {
                 "sample_rate": self.audio.sample_rate,
@@ -464,6 +480,9 @@ class WhisperAloudConfig:
         self.transcription.normalize_loudness = parse_bool_env(
             'WHISPER_ALOUD_TRANSCRIPTION_NORMALIZE', self.transcription.normalize_loudness
         )
+        self.transcription.highpass_hz = parse_float_env(
+            'WHISPER_ALOUD_HIGHPASS_HZ', self.transcription.highpass_hz
+        )
 
         # Audio
         self.audio.sample_rate = parse_int_env('WHISPER_ALOUD_SAMPLE_RATE', self.audio.sample_rate)
@@ -609,6 +628,12 @@ class WhisperAloudConfig:
             raise ConfigurationError(
                 f"Invalid vad_min_speech_ms {self.transcription.vad_min_speech_ms}. Must be 0-5000"
             )
+        # 0 disables the high-pass; otherwise must be a valid cutoff strictly
+        # below Nyquist for 16kHz audio (8000 Hz) with headroom for the filter.
+        if self.transcription.highpass_hz != 0 and not (0 < self.transcription.highpass_hz < 4000):
+            raise ConfigurationError(
+                f"Invalid highpass_hz {self.transcription.highpass_hz}. Must be 0 (disabled) or 0-4000"
+            )
 
         # Validate audio configuration
         if not (8000 <= self.audio.sample_rate <= 48000):
@@ -714,6 +739,8 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
         trans_changes.add("vad_min_speech_ms")
     if old.transcription.normalize_loudness != new.transcription.normalize_loudness:
         trans_changes.add("normalize_loudness")
+    if old.transcription.highpass_hz != new.transcription.highpass_hz:
+        trans_changes.add("highpass_hz")
 
     if trans_changes:
         changes.changed_sections.add("transcription")

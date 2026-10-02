@@ -1,6 +1,7 @@
 """Tests for configuration management."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -232,9 +233,13 @@ def test_clipboard_config_default_paste_shortcut():
 
 def test_default_vad_and_normalize_loudness_settings():
     """Sensible defaults: VAD is more permissive than Silero's own defaults,
-    and file transcription normalizes loudness before VAD/decoding."""
+    file transcription removes low-frequency rumble before VAD/decoding
+    (highpass_hz), and loudness normalization defaults to off (it measured as
+    a net negative for VAD retention on a real recording -- see
+    stt/normalize.py's docstring)."""
     config = WhisperAloudConfig.load()
-    assert config.transcription.normalize_loudness is True
+    assert config.transcription.normalize_loudness is False
+    assert config.transcription.highpass_hz == pytest.approx(80.0)
     assert config.transcription.vad_threshold == pytest.approx(0.2)
     assert config.transcription.vad_min_speech_ms == 100
 
@@ -252,12 +257,39 @@ def test_vad_threshold_and_min_speech_env_overrides():
 
 
 def test_normalize_loudness_env_override():
-    os.environ['WHISPER_ALOUD_TRANSCRIPTION_NORMALIZE'] = 'false'
+    os.environ['WHISPER_ALOUD_TRANSCRIPTION_NORMALIZE'] = 'true'
     try:
         config = WhisperAloudConfig.load()
-        assert config.transcription.normalize_loudness is False
+        assert config.transcription.normalize_loudness is True
     finally:
         os.environ.pop('WHISPER_ALOUD_TRANSCRIPTION_NORMALIZE', None)
+
+
+def test_highpass_hz_env_override():
+    os.environ['WHISPER_ALOUD_HIGHPASS_HZ'] = '120'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.highpass_hz == pytest.approx(120.0)
+    finally:
+        os.environ.pop('WHISPER_ALOUD_HIGHPASS_HZ', None)
+
+
+def test_highpass_hz_zero_disables():
+    os.environ['WHISPER_ALOUD_HIGHPASS_HZ'] = '0'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.transcription.highpass_hz == 0
+    finally:
+        os.environ.pop('WHISPER_ALOUD_HIGHPASS_HZ', None)
+
+
+def test_invalid_highpass_hz():
+    os.environ['WHISPER_ALOUD_HIGHPASS_HZ'] = '9000'
+    try:
+        with pytest.raises(ConfigurationError, match="highpass_hz"):
+            WhisperAloudConfig.load()
+    finally:
+        os.environ.pop('WHISPER_ALOUD_HIGHPASS_HZ', None)
 
 
 def test_invalid_vad_threshold_transcription():
@@ -288,9 +320,11 @@ def test_vad_fields_not_in_model_reload_or_transcription_reload_fields():
     assert "vad_threshold" not in MODEL_RELOAD_FIELDS
     assert "vad_min_speech_ms" not in MODEL_RELOAD_FIELDS
     assert "normalize_loudness" not in MODEL_RELOAD_FIELDS
+    assert "highpass_hz" not in MODEL_RELOAD_FIELDS
     assert "vad_threshold" not in TRANSCRIPTION_RELOAD_FIELDS
     assert "vad_min_speech_ms" not in TRANSCRIPTION_RELOAD_FIELDS
     assert "normalize_loudness" not in TRANSCRIPTION_RELOAD_FIELDS
+    assert "highpass_hz" not in TRANSCRIPTION_RELOAD_FIELDS
 
 
 def test_detect_config_changes_tracks_vad_and_normalize_without_reload():
@@ -300,11 +334,12 @@ def test_detect_config_changes_tracks_vad_and_normalize_without_reload():
     new.transcription.vad_threshold = 0.15
     new.transcription.vad_min_speech_ms = 50
     new.transcription.normalize_loudness = not old.transcription.normalize_loudness
+    new.transcription.highpass_hz = 120.0
 
     changes = detect_config_changes(old, new)
     assert "transcription" in changes.changed_sections
     assert changes.changed_fields["transcription"] >= {
-        "vad_threshold", "vad_min_speech_ms", "normalize_loudness",
+        "vad_threshold", "vad_min_speech_ms", "normalize_loudness", "highpass_hz",
     }
     assert changes.requires_model_reload is False
 
@@ -313,16 +348,19 @@ def test_round_trip_vad_and_normalize_fields():
     config = WhisperAloudConfig.load()
     config.transcription.vad_threshold = 0.22
     config.transcription.vad_min_speech_ms = 75
-    config.transcription.normalize_loudness = False
+    config.transcription.normalize_loudness = True
+    config.transcription.highpass_hz = 100.0
     data = config.to_dict()
     assert data["transcription"]["vad_threshold"] == pytest.approx(0.22)
     assert data["transcription"]["vad_min_speech_ms"] == 75
-    assert data["transcription"]["normalize_loudness"] is False
+    assert data["transcription"]["normalize_loudness"] is True
+    assert data["transcription"]["highpass_hz"] == pytest.approx(100.0)
 
     restored = WhisperAloudConfig.from_dict(data)
     assert restored.transcription.vad_threshold == pytest.approx(0.22)
     assert restored.transcription.vad_min_speech_ms == 75
-    assert restored.transcription.normalize_loudness is False
+    assert restored.transcription.highpass_hz == pytest.approx(100.0)
+    assert restored.transcription.normalize_loudness is True
 
 
 def test_clipboard_config_paste_shortcut_roundtrip():
@@ -516,3 +554,38 @@ def test_load_strict_with_no_file_still_uses_defaults():
     must not raise -- there is nothing malformed to report."""
     config = WhisperAloudConfig.load(strict=True)
     assert config.model.name == "base"
+
+
+def test_load_never_writes_the_config_file():
+    """WhisperAloudConfig.load() must be read-only: a real config.json's
+    mtime and contents must be unchanged after load(), whether or not the
+    file already exists.
+
+    This guards against the kind of regression found during WHISP-77: not in
+    load() itself (which was and remains read-only -- confirmed by this
+    test), but in test infrastructure (tests/_daemon_harness.py-based tests
+    calling the daemon's SetConfig, which unconditionally calls
+    self.config.save()) that could write a real user's config.json if HOME
+    were ever left unisolated. See tests/conftest.py's autouse
+    `_isolated_home` fixture, which is what actually prevents that now.
+    """
+    config_path = Path(os.environ["HOME"]) / ".config" / "whisper_aloud" / "config.json"
+
+    # Case 1: no file yet -- load() with defaults must not create one.
+    assert not config_path.exists()
+    WhisperAloudConfig.load()
+    assert not config_path.exists()
+
+    # Case 2: a file already exists -- load() must not touch its mtime/content.
+    config = WhisperAloudConfig()
+    config.transcription.language = "fr"
+    config.save()
+    assert config_path.exists()
+    mtime_before = config_path.stat().st_mtime_ns
+    content_before = config_path.read_text()
+
+    for _ in range(3):
+        WhisperAloudConfig.load()
+
+    assert config_path.stat().st_mtime_ns == mtime_before
+    assert config_path.read_text() == content_before
