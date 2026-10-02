@@ -20,6 +20,17 @@ def _is_wayland() -> bool:
     return session_type == "wayland" or bool(wayland_display)
 
 
+def _is_sandboxed() -> bool:
+    """Return True inside a Flatpak sandbox (WHISP-59).
+
+    Named/importable separately (like `_try_import_portal`) so tests can
+    patch it without touching real env vars/files.
+    """
+    from whisper_aloud.sandbox import is_flatpak_sandbox
+
+    return is_flatpak_sandbox()
+
+
 def _try_import_portal():
     """Check whether the XDG Desktop Portal GlobalShortcuts backend is usable.
 
@@ -97,6 +108,16 @@ class HotkeyManager:
                 return "portal"
         except Exception as e:
             logger.debug("Portal detection failed: %s", e)
+
+        try:
+            if _is_sandboxed():
+                logger.info(
+                    "Running inside a Flatpak sandbox: portal unavailable and "
+                    "libkeybinder3 is not permitted; no automatic hotkey backend"
+                )
+                return "none"
+        except Exception as e:
+            logger.debug("Sandbox detection failed: %s", e)
 
         try:
             kb = _try_import_keybinder()

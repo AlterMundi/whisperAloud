@@ -178,6 +178,49 @@ class TestKeybinderBackendDetection:
                 mock_kb.init.assert_called_once()
 
 
+class TestFlatpakSandboxGating:
+    """WHISP-59: inside a Flatpak sandbox, hotkeys must be portal-only --
+    never libkeybinder3, which is not available/permitted there."""
+
+    def test_keybinder_skipped_when_sandboxed_even_if_importable(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_kb = MagicMock()
+
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
+            with patch("whisper_aloud.service.hotkey._is_sandboxed", return_value=True):
+                with patch(
+                    "whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb
+                ) as mock_try_kb:
+                    manager = HotkeyManager()
+                    assert manager.backend == "none"
+                    mock_try_kb.assert_not_called()
+                    mock_kb.init.assert_not_called()
+
+    def test_portal_still_used_when_sandboxed_and_available(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_xdp = MagicMock()
+
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=mock_xdp):
+            with patch("whisper_aloud.service.hotkey._is_sandboxed", return_value=True):
+                manager = HotkeyManager()
+                assert manager.backend == "portal"
+
+    def test_keybinder_used_when_not_sandboxed(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_kb = MagicMock()
+
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
+            with patch("whisper_aloud.service.hotkey._is_sandboxed", return_value=False):
+                with patch(
+                    "whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb
+                ):
+                    manager = HotkeyManager()
+                    assert manager.backend == "keybinder"
+
+
 class TestNoneBackend:
     """Tests for the fallback 'none' backend."""
 
