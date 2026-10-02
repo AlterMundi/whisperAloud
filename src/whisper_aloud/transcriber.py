@@ -176,6 +176,23 @@ class Transcriber:
                 f"Failed to load model '{self.config.model.name}' on device '{requested_device}': {e}.{device_hint}"
             ) from e
 
+    def _build_vad_parameters(self, kwargs: dict) -> Optional[dict]:
+        """Build faster-whisper's `vad_parameters` from config (or a kwarg
+        override), when `vad_filter` is enabled.
+
+        WHISP-77: Silero VAD's own defaults (threshold=0.5, min_speech_duration_ms=250)
+        can drop a quiet speaker entirely; `config.transcription.vad_threshold` /
+        `vad_min_speech_ms` let that be tuned without a model reload (they are
+        per-call `transcribe()` kwargs, not model-construction parameters --
+        see MODEL_RELOAD_FIELDS / TRANSCRIPTION_RELOAD_FIELDS in config.py).
+        """
+        if "vad_parameters" in kwargs:
+            return kwargs["vad_parameters"]
+        return {
+            "threshold": self.config.transcription.vad_threshold,
+            "min_speech_duration_ms": self.config.transcription.vad_min_speech_ms,
+        }
+
     def _process_segments(self, segments, duration: float) -> tuple[str, List[dict], float, bool]:
         """
         Process transcription segments into result components.
@@ -261,6 +278,31 @@ class Transcriber:
             "vad_filter": kwargs.get("vad_filter", self.config.transcription.vad_filter),
             "task": kwargs.get("task", self.config.transcription.task),
         }
+        if transcribe_kwargs["vad_filter"]:
+            transcribe_kwargs["vad_parameters"] = self._build_vad_parameters(kwargs)
+
+        # WHISP-77: unlike transcribe_numpy (which backs live dictation and
+        # already ran through the daemon's AGC), the file path has had no
+        # loudness treatment at all -- a quiet speaker (e.g. a remote meeting
+        # participant captured over speakers) can otherwise fall below VAD's
+        # speech threshold and get dropped entirely. Pre-decoding to samples
+        # here (instead of handing faster-whisper the raw path) is what lets
+        # us normalize before transcription.
+        audio_input = audio_path  # str, or ndarray once normalized below
+        normalize = kwargs.get("normalize_loudness", self.config.transcription.normalize_loudness)
+        if normalize:
+            try:
+                from .stt.audio_io import load_audio_16k_mono
+                from .stt.normalize import normalize_loudness
+
+                samples = load_audio_16k_mono(audio_path)
+                audio_input = normalize_loudness(samples, 16000)
+            except Exception as e:
+                logger.warning(
+                    "Loudness normalization failed for '%s', transcribing raw audio instead: %s",
+                    audio_path, e,
+                )
+                audio_input = audio_path
 
         try:
             # Reset cancellation flag before starting
@@ -269,7 +311,7 @@ class Transcriber:
             logger.info("Starting transcription of file: %s", audio_path)
             start_time = time.time()
 
-            segments, info = self._model.transcribe(audio_path, **transcribe_kwargs)
+            segments, info = self._model.transcribe(audio_input, **transcribe_kwargs)
 
             processing_time = time.time() - start_time
             text, segment_list, confidence, was_cancelled = self._process_segments(segments, info.duration)
@@ -345,6 +387,17 @@ class Transcriber:
             "vad_filter": kwargs.get("vad_filter", self.config.transcription.vad_filter),
             "task": kwargs.get("task", self.config.transcription.task),
         }
+        if transcribe_kwargs["vad_filter"]:
+            transcribe_kwargs["vad_parameters"] = self._build_vad_parameters(kwargs)
+
+        # WHISP-77: deliberately NOT applying loudness normalization here.
+        # transcribe_numpy() backs the daemon's live-dictation path (see
+        # service/daemon.py's _transcribe_audio -> engine.transcribe_numpy),
+        # and that audio has already passed through AudioPipeline's AGC stage
+        # before it ever reaches this method. Normalizing again here would
+        # double-apply gain on top of an already-normalized signal. Loudness
+        # normalization for quiet speech is applied only in transcribe_file(),
+        # which is the file/CLI-only path WHISP-77 is actually about.
 
         try:
             # Reset cancellation flag before starting
