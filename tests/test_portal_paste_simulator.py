@@ -248,3 +248,96 @@ class TestFailureFallback:
             assert sim.simulate_paste("ctrl+v") is False  # first notify fails
             assert sim._session_path is not None  # session must survive
             assert sim.simulate_paste("ctrl+v") is True  # retried, succeeds
+
+
+class TestStuckModifierRelease:
+    """Audit fix: a mid-sequence NotifyKeyboardKeysym failure must not leave
+    a modifier key (Ctrl/Shift) held down forever on the user's keyboard --
+    already-pressed-but-not-yet-released keys must get a best-effort
+    release, in reverse order, in a `finally` block."""
+
+    def _harness_failing_on_notify_call(self, fail_on_call_number: int):
+        """Build a harness whose Nth NotifyKeyboardKeysym call (1-indexed)
+        raises, every other call (including the release retries the
+        `finally` block issues) succeeds and is recorded in call order."""
+        harness = _FakeHarness()
+        state = {"n": 0}
+        sent: list = []
+
+        def flaky_proxy_call_sync(method_name, args, flags, timeout, cancellable):
+            if method_name != "NotifyKeyboardKeysym":
+                raise AssertionError(method_name)
+            state["n"] += 1
+            _session, _opts, keysym_v, state_v = args.unpack()
+            if state["n"] == fail_on_call_number:
+                raise RuntimeError(f"simulated D-Bus failure on call {state['n']}")
+            sent.append((keysym_v, state_v))
+            return None
+
+        harness.mock_proxy.call_sync.side_effect = flaky_proxy_call_sync
+        return harness, sent
+
+    def test_v_press_fails_releases_ctrl_only(self):
+        """ctrl+v sequence: [Ctrl-press, V-press, V-release, Ctrl-release].
+        Failing on the 2nd call (V-press) means only Ctrl is held; the
+        finally block must send exactly one extra release: Ctrl."""
+        harness, sent = self._harness_failing_on_notify_call(fail_on_call_number=2)
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False
+
+        # Call 1 (Ctrl-press) succeeded and was recorded; call 2 (V-press)
+        # raised and is not recorded; the finally block then retries exactly
+        # one release: Ctrl.
+        assert sent == [
+            (XK_CONTROL_L, KEY_STATE_PRESSED),
+            (XK_CONTROL_L, KEY_STATE_RELEASED),
+        ]
+
+    def test_v_release_fails_releases_v_then_ctrl(self):
+        """Failing on the 3rd call (V-release) means both Ctrl and V are
+        still considered held (the failed release never confirmed); the
+        finally block must retry V's release, then Ctrl's, in that
+        (innermost-first) order."""
+        harness, sent = self._harness_failing_on_notify_call(fail_on_call_number=3)
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False
+
+        assert sent == [
+            (XK_CONTROL_L, KEY_STATE_PRESSED),
+            (XK_v, KEY_STATE_PRESSED),
+            # finally block's best-effort releases, innermost-first:
+            (XK_v, KEY_STATE_RELEASED),
+            (XK_CONTROL_L, KEY_STATE_RELEASED),
+        ]
+
+    def test_release_retry_failure_is_swallowed_not_raised(self):
+        """If even the finally block's best-effort release fails, that
+        error must be swallowed -- simulate_paste() must still return False
+        cleanly rather than raising or masking the original error."""
+        harness = _FakeHarness()
+
+        def always_failing(method_name, args, flags, timeout, cancellable):
+            if method_name == "NotifyKeyboardKeysym":
+                raise RuntimeError("D-Bus is gone")
+            raise AssertionError(method_name)
+
+        harness.mock_proxy.call_sync.side_effect = always_failing
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False  # must not raise
+
+    def test_fallback_emitted_once_even_with_stuck_modifier_cleanup(self):
+        harness, _sent = self._harness_failing_on_notify_call(fail_on_call_number=2)
+        fallback_reasons = []
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+            patch.object(PortalPasteSimulator, "_call_request", harness._fake_call_request),
+        ):
+            sim = PortalPasteSimulator(
+                on_fallback=fallback_reasons.append,
+                restore_token_loader=lambda: None,
+                restore_token_saver=lambda token: None,
+            )
+            assert sim.simulate_paste("ctrl+v") is False
+
+        assert len(fallback_reasons) == 1

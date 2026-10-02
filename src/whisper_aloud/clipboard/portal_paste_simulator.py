@@ -35,9 +35,9 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
-from .portal_keysyms import keysym_sequence_for_shortcut
+from .portal_keysyms import KEY_STATE_PRESSED, KEY_STATE_RELEASED, keysym_sequence_for_shortcut
 
 logger = logging.getLogger(__name__)
 
@@ -359,15 +359,48 @@ class PortalPasteSimulator:
         Returns True on success, False on any failure (never raises). A
         session-setup failure is permanent for this instance's lifetime; a
         NotifyKeyboardKeysym failure only fails this one call.
+
+        If a press/release in the middle of the sequence fails (e.g. Ctrl
+        pressed OK, then the V press fails), any modifier keys already
+        pressed but not yet released are released best-effort, in reverse
+        (innermost-first) order, in a `finally` block -- otherwise the
+        user's keyboard is left with a "stuck" Ctrl/Shift held down.
+        Errors from these best-effort releases are swallowed (logged, not
+        raised): this path only runs when something is already wrong, and
+        failing harder here would not help.
         """
         if not self._ensure_session():
             return False
 
+        held: List[int] = []
+        error: Optional[Exception] = None
         try:
             for keysym, state in keysym_sequence_for_shortcut(paste_shortcut):
                 self._notify_keysym(keysym, state)
+                if state == KEY_STATE_PRESSED:
+                    held.append(keysym)
+                elif keysym in held:
+                    held.remove(keysym)
             return True
         except Exception as e:
-            logger.warning("RemoteDesktop NotifyKeyboardKeysym failed: %s", e)
-            self._emit_fallback(str(e))
+            error = e
             return False
+        finally:
+            if error is not None and held:
+                logger.warning(
+                    "RemoteDesktop NotifyKeyboardKeysym failed mid-sequence (%s); "
+                    "releasing %d stuck key(s): %s",
+                    error,
+                    len(held),
+                    list(reversed(held)),
+                )
+                for keysym in reversed(held):
+                    try:
+                        self._notify_keysym(keysym, KEY_STATE_RELEASED)
+                    except Exception as release_error:
+                        logger.warning(
+                            "Failed to release stuck keysym 0x%x: %s", keysym, release_error
+                        )
+            if error is not None:
+                logger.warning("RemoteDesktop NotifyKeyboardKeysym failed: %s", error)
+                self._emit_fallback(str(error))
