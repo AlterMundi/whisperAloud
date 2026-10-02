@@ -690,8 +690,22 @@ names.
 ### 1.1.1 — 2026-10-01
 
 Patch (documentation/behavior clarification, no wire-format change),
-WHISP-73/WHISP-74:
+WHISP-70/WHISP-73/WHISP-74:
 
+- **SetConfig/ConfigChanged** (WHISP-70): fixed a real bug where a non-empty
+  `SetConfig(a{sv} changes)` call always failed end-to-end. `client.py`'s
+  `set_config()` forwarded a plain Python dict straight to the pydbus proxy
+  instead of wrapping each value as a `GLib.Variant`, so pydbus rejected the
+  call client-side before it ever reached the daemon
+  ("Expected GLib.Variant, but got <type>"); fixing that then exposed a
+  second, previously-dormant instance of the same bug on the daemon side --
+  `SetConfig()`/`ReloadConfig()` re-emitted `ConfigChanged`'s `a{sv}` payload
+  with bare, unwrapped values, which raised the identical error inside the
+  daemon's own call. Both are now wrapped via a shared
+  `_wrap_flat_config_as_variants()` helper (also used by `GetConfig()`). The
+  `a{sv}` *wire signature* itself never changed -- GLib.Variant-wrapped
+  values are what `a{sv}` always meant; the bug was that neither side's
+  Python code actually produced them for a non-empty payload.
 - **CancelRecording** (WHISP-73): clarified that "without producing a
   transcript" is an absolute guarantee, not best-effort -- a transcription
   job already in flight when `CancelRecording()` is called can no longer
@@ -712,15 +726,18 @@ WHISP-73/WHISP-74:
   still persists the config and emits `ConfigChanged` immediately in all
   cases -- only the engine object swap itself is deferred.
 
-Considered and rejected a minor (1.2.0) bump for the `SetConfig`/
-`ReloadConfig` change: no method signature, argument shape, or return value
-changed, and the previously-published 1.0.0/1.1.0 documentation already
-stated this exact ordering ("once the current operation completes") --
-the implementation was simply not honouring its own documented contract.
-Treating a bug fix that brings behavior in line with already-published
-documentation as a patch, not a minor feature bump, is consistent with this
-section's own definition of a patch bump above ("corrected documentation of
-existing behaviour with no change to the wire format").
+Considered and rejected a minor (1.2.0) bump for any of these three fixes:
+in each case no method signature, argument shape, or return value changed.
+`SetConfig`/`ReloadConfig`'s deferred-reload behavior brings the
+implementation in line with wording the 1.0.0/1.1.0 docs already published
+("once the current operation completes"); `SetConfig`/`ConfigChanged`'s
+Variant-wrapping fix makes `a{sv}` arguments/payloads actually conform to
+what `a{sv}` has always meant on the wire, rather than introducing a new
+shape. Treating a bug fix that brings behavior in line with an
+already-published (or always-implied) contract as a patch, not a minor
+feature bump, is consistent with this section's own definition of a patch
+bump above ("corrected documentation of existing behaviour with no change
+to the wire format").
 
 ### 1.1.0 — 2026-10-01
 
