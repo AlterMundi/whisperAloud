@@ -263,17 +263,18 @@ def test_transcription_error_path_returns_to_idle(daemon):
 def test_toggle_during_transcribing_is_refused_then_succeeds_after(daemon, audio_fixture):
     """Scenario: ToggleRecording() while the daemon is "transcribing" (the
     recorder itself is already idle) dispatches to StartRecording(), which
-    now refuses to start a new session while a previous transcription is
-    still in flight (WHISP-67/WHISP-57: starting a new session while the
-    executor still touches the same engine instance can corrupt a streaming
-    session). ToggleRecording()'s return value doesn't reflect this --
-    it unconditionally returns the literal "recording" without checking
-    StartRecording()'s result (a pre-existing, documented caveat in
-    docs/dbus-api.md) -- so this test asserts the real observable effect
-    instead: no RecordingStarted fires and the state stays "transcribing"
-    while the refusal is in force, and a fresh toggle after TranscriptionReady
-    succeeds normally. WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S keeps the first
-    transcription in flight long enough to toggle during it deterministically.
+    refuses to start a new session while a previous transcription is still
+    in flight (WHISP-67/WHISP-57: starting a new session while the executor
+    still touches the same engine instance can corrupt a streaming session).
+    As of WHISP-72 (API 1.2.0), ToggleRecording() reports this refusal
+    accurately -- it returns the real resulting state ("transcribing")
+    instead of the previous versions' unconditional, incorrect "recording"
+    literal. This test asserts both: the return value and the real
+    observable effect -- no RecordingStarted fires and the state stays
+    "transcribing" while the refusal is in force -- and a fresh toggle after
+    TranscriptionReady succeeds normally. WHISPER_ALOUD_FAKE_ENGINE_LATENCY_S
+    keeps the first transcription in flight long enough to toggle during it
+    deterministically.
     """
     fixture = audio_fixture("tone")
     handle = daemon(
@@ -293,8 +294,9 @@ def test_toggle_during_transcribing_is_refused_then_succeeds_after(daemon, audio
 
     # The first transcription is now sleeping for ~1s. ToggleRecording()
     # dispatches to StartRecording(), which must refuse (no new recording
-    # starts, no RecordingStarted signal) while that job is still in flight.
-    client.toggle_recording()
+    # starts, no RecordingStarted signal) while that job is still in flight,
+    # and must now report that refusal accurately (WHISP-72).
+    assert client.toggle_recording() == "transcribing"
     with pytest.raises(AssertionError):
         started.wait(timeout=0.3)
     assert client.get_status()["state"] == "transcribing"
