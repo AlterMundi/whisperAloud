@@ -521,3 +521,57 @@ def test_discard_confirmation_discard_sets_allow_close(config, monkeypatch):
     dialog._on_discard_confirmed()
 
     assert dialog._allow_close is True
+
+
+# ─── WHISP-80: _show_message migrated off Gtk.MessageDialog ───────────────
+
+
+def test_show_message_dialog_appears_with_message_as_heading(config, monkeypatch):
+    """Real dialog construction (Adw.AlertDialog on this libadwaita, or the
+    Adw.MessageDialog fallback on older libadwaita, per WHISP-78/80) --
+    confirms the single-OK message dialog actually appears with the message
+    as its heading and a single "OK" response."""
+    from gi.repository import Gtk
+
+    dialog = _make_dialog(config, monkeypatch)
+    assert dialog._child_dialog_open is False
+
+    built = dialog._show_message("Settings saved successfully", Gtk.MessageType.INFO)
+
+    assert built.get_heading() == "Settings saved successfully"
+    assert dialog._child_dialog_open is True
+
+
+def test_show_message_ok_response_clears_child_dialog_flag_and_calls_on_close(
+    config, monkeypatch
+):
+    """The single "ok" response must clear _child_dialog_open and run
+    on_close -- the same bookkeeping the old Gtk.MessageDialog version did in
+    its "response" handler, regardless of which response ends up firing."""
+    from gi.repository import Gtk
+
+    dialog = _make_dialog(config, monkeypatch)
+    on_close_calls = []
+
+    built = dialog._show_message(
+        "Error saving settings: boom", Gtk.MessageType.ERROR, on_close=lambda: on_close_calls.append(True)
+    )
+    assert dialog._child_dialog_open is True
+
+    built.emit("response", "ok")
+
+    assert dialog._child_dialog_open is False
+    assert on_close_calls == [True]
+
+
+def test_show_message_without_on_close_does_not_raise_on_response(config, monkeypatch):
+    """_show_message's on_close is optional -- firing the "ok" response with
+    none given (the common validation-error path) must not raise."""
+    from gi.repository import Gtk
+
+    dialog = _make_dialog(config, monkeypatch)
+
+    built = dialog._show_message("Invalid input: bad value", Gtk.MessageType.ERROR)
+    built.emit("response", "ok")  # must not raise
+
+    assert dialog._child_dialog_open is False
