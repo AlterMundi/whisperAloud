@@ -192,6 +192,9 @@ def test_first_method_call_activates_the_daemon(tmp_path):
         stdout, _ = proc.communicate(timeout=30)
     except subprocess.TimeoutExpired:
         pgid = os.getpgid(proc.pid)
+        # start_new_session made proc its own group leader; never signal any
+        # other group (e.g. pytest's or the user's session).
+        assert pgid == proc.pid, f"refusing to signal foreign process group {pgid}"
         os.killpg(pgid, signal.SIGTERM)
         try:
             stdout, _ = proc.communicate(timeout=5)
