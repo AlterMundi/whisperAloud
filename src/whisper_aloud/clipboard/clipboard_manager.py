@@ -196,8 +196,8 @@ class ClipboardManager:
             - reason (str): Reason if not available
             - fix (str): Instructions to enable paste
         """
-        from .paste_simulator import PasteSimulator
-        simulator = PasteSimulator(self._session_type, self.config)
+        from .paste_selection import build_paste_simulator
+        simulator = build_paste_simulator(self._session_type, self.config)
         return simulator.check_availability()
 
 
