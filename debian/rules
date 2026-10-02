@@ -1,3 +1,14 @@
 #!/usr/bin/make -f
 %:
 	dh $@ --with python3 --buildsystem=pybuild
+
+# NOTE (WHISP-81 packaging audit): dh_auto_test is intentionally left at
+# its pybuild default (no override) rather than wired to run our pytest
+# suite. debian/control's Build-Depends only pulls in python3-all/
+# python3-setuptools -- none of the runtime deps the tests need (numpy,
+# pydbus, sounddevice, python3-gi/GTK4, ...) are Build-Depends, so running
+# `pytest` here would fail in a clean build chroot (e.g. sbuild/pbuilder)
+# regardless of Xvfb. Because no tests run during the build, xvfb is not
+# needed as a Build-Depends either. If a future change wires up
+# override_dh_auto_test to actually run the suite, add the runtime
+# packages as Build-Depends and, for tests/gui specifically, xvfb.

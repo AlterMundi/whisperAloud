@@ -919,7 +919,7 @@ done
 main() {
     echo ""
     echo -e "${BLUE}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║       WhisperAloud Installer v0.2.0        ║${NC}"
+    echo -e "${BLUE}║       WhisperAloud Installer v0.3.0        ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
     echo ""
 

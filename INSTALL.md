@@ -227,8 +227,8 @@ git clone https://github.com/AlterMundi/whisperAloud.git
 cd whisperAloud
 
 # Or download and extract the release tarball:
-tar -xzf whisperAloud-0.2.0.tar.gz
-cd whisperAloud-0.2.0
+tar -xzf whisperAloud-0.3.0.tar.gz
+cd whisperAloud-0.3.0
 ```
 
 ### Step 4: Install WhisperAloud
@@ -752,7 +752,17 @@ After successful installation:
 
 ## Version History
 
-### v0.2.0 (Current target)
+### v0.3.0 (Current target)
+- Catalog-driven speech engines (faster-whisper, Parakeet, Nemotron streaming)
+- In-app model download with license consent, and a Settings model selector
+- Live partial transcripts while recording (`PartialTranscript` D-Bus signal)
+- `transcribe` CLI gains `--engine`, chunking, SRT/VTT/JSON output, m4a input
+- History list/export over CLI and D-Bus (`ExportHistory`, API 1.4.0)
+- D-Bus activation with an Exec fallback; single daemon-start mechanism
+- Portal-based paste support in Flatpak
+- Expanded e2e/GUI/private-bus test infrastructure and CI jobs
+
+### v0.2.0
 - Refactored daemon-first architecture on `master`
 - D-Bus lifecycle commands and reconnect logic consolidated
 - Documentation refresh (README + install + troubleshooting alignment)

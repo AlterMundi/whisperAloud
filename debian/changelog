@@ -1,3 +1,18 @@
+whisper-aloud (0.3.0-1) unstable; urgency=medium
+
+  * Catalog-driven speech engines (faster-whisper, Parakeet, Nemotron
+    streaming) with in-app model download and license consent.
+  * Live partial transcripts during recording (PartialTranscript signal).
+  * transcribe CLI: --engine selection, chunking, srt/vtt/json output,
+    m4a input via ffmpeg/PyAV.
+  * History list/export over CLI and D-Bus (ExportHistory, API 1.4.0).
+  * D-Bus activation for org.fede.whisperaloud with an Exec fallback;
+    single daemon-start mechanism, no shortcut re-prompt.
+  * Portal-based paste support under Flatpak.
+  * Expanded e2e/GUI/private-bus test infrastructure and CI jobs.
+
+ -- Federico <fede@example.com>  Fri, 02 Oct 2026 16:29:32 +0000
+
 whisper-aloud (0.2.0-1) unstable; urgency=medium
 
   * Prepare daemon-first migration release.

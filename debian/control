@@ -21,12 +21,14 @@ Depends: ${python3:Depends}, ${misc:Depends},
  dbus-user-session
 Recommends: gir1.2-ayatanaappindicator3-0.1,
  xdg-desktop-portal, xdg-desktop-portal-gtk,
- wl-clipboard, gnome-shell-extension-appindicator
-Suggests: python3-noisereduce, ydotool
+ wl-clipboard, gnome-shell-extension-appindicator,
+ ffmpeg
+Suggests: python3-noisereduce, ydotool, xclip
 Description: Offline voice transcription for Linux desktop
  WhisperAloud provides offline speech-to-text transcription using
- OpenAI Whisper. It runs as a D-Bus daemon with system tray integration,
- global hotkeys, and a GTK4 GUI.
+ OpenAI Whisper (via faster-whisper), with optional Parakeet and
+ Nemotron (streaming) engines. It runs as a D-Bus daemon with system
+ tray integration, global hotkeys, and a GTK4 GUI.
  .
  Features include automatic gain control, noise gating, clipboard
- integration, and transcription history.
+ integration, live partial transcripts, and transcription history.

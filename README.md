@@ -15,13 +15,25 @@ Personal note: this project is designed for real day-to-day writing on Linux, no
 
 ## Core Features
 
-- Offline transcription with Whisper models (`tiny` to `large-v3`)
+- Offline transcription with Whisper models (`tiny` to `large-v3`), plus
+  catalog-driven Parakeet and Nemotron (streaming) engines
+- Live partial transcripts in the main window while recording
+- In-app model download with progress, cancel, and license consent
 - Real-time audio level updates while recording
 - Voice activity handling and audio processing pipeline
-- D-Bus control API (`org.fede.whisperaloud`)
-- CLI commands for daemon lifecycle and recording control
-- GTK4 client UI with settings and history panel
+- D-Bus control API (`org.fede.whisperaloud`), with on-demand activation
+- CLI commands for daemon lifecycle, recording control, file transcription
+  (with chunking and SRT/VTT/JSON output), and history list/export
+- GTK4 client UI with settings, model picker, and history panel
 - Systemd user service support
+
+## What's New in 0.3.0
+
+See `CHANGELOG.md` for the full list. Highlights: selectable speech engines
+(Parakeet, Nemotron streaming) with in-app model download, live partial
+transcripts, a `transcribe` CLI with chunking/format/engine options and m4a
+input, history export, D-Bus activation with a single start mechanism, and
+Flatpak portal paste.
 
 ## Architecture At A Glance
 
@@ -324,7 +336,7 @@ tests/           # unit + integration tests
 ## Release Notes
 
 - `release-0.1.0` tag freezes the pre-refactor `master` snapshot.
-- Current codebase targets the `0.2.0` daemon-first migration release.
+- Current codebase targets the `0.3.0` release.
 
 ## Contributing
 
