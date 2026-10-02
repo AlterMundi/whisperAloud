@@ -260,6 +260,29 @@ class WhisperAloudClient:
             logger.warning(f"update_history_entry failed: {e}")
             return False
 
+    def export_history(self, format: str, filters: Optional[Dict[str, Any]] = None) -> str:
+        """Export history entries as a string via the daemon's ExportHistory.
+
+        `format` is one of "md"/"json"/"csv"/"txt". `filters` may include
+        "since"/"until" (ISO date/datetime strings), "favorites_only" (bool),
+        "query" (str), and "limit" (int) -- see docs/dbus-api.md. Values are
+        wrapped as GLib.Variant the same way SetConfig's `changes` are
+        (ExportHistory's `filters` is also an a{sv} argument).
+
+        Returns the exported content, or "" if not connected or the daemon
+        call failed/was refused (see the Error signal for why). The caller
+        is responsible for writing the result to disk -- the daemon never
+        writes to a path itself (see docs/dbus-api.md's ExportHistory
+        section for the rationale).
+        """
+        if not self._connected or not self._proxy:
+            return ""
+        try:
+            return self._proxy.ExportHistory(format, _wrap_config_changes(filters or {}))
+        except Exception as e:
+            logger.warning(f"export_history failed: {e}")
+            return ""
+
     def get_config(self) -> dict:
         """Get current configuration."""
         if not self._connected or not self._proxy:
