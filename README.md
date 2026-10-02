@@ -167,6 +167,34 @@ quiet or unevenly leveled recordings.
 whisper-aloud config validate
 ```
 
+### Browsing and exporting history
+
+These go through the running daemon over D-Bus, like every other `history`
+command (`whisper-aloud --daemon` must already be running):
+
+```bash
+# Most recent entries (default limit: 10)
+whisper-aloud history list
+whisper-aloud history list --limit 25
+whisper-aloud history list --favorites
+
+# Full-text search (same FTS5 engine as the GUI's history panel)
+whisper-aloud history search "budget meeting"
+
+# Export -- the daemon renders the content and returns it; this command
+# writes it to --output (or prints it to stdout if --output is omitted)
+whisper-aloud history export --format md --output history.md
+whisper-aloud history export --format json --query "budget" --favorites
+whisper-aloud history export --format csv --since 2026-01-01 --until 2026-01-31
+```
+
+`--format` is one of `md`/`json`/`csv`/`txt`. Filters (`--since`/`--until`,
+ISO dates; `--favorites`; `--query`; `--limit`) all compose. `--limit`
+defaults to 500 and is capped at 5000 entries per export -- see
+[`docs/dbus-api.md`](docs/dbus-api.md#exporthistory) for the exact
+semantics and why `ExportHistory` returns content instead of accepting an
+output path itself.
+
 ## System Integration
 
 After package-style installation, the project ships data for:
