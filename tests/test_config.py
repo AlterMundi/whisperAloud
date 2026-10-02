@@ -235,7 +235,7 @@ def test_default_vad_and_normalize_loudness_settings():
     and file transcription normalizes loudness before VAD/decoding."""
     config = WhisperAloudConfig.load()
     assert config.transcription.normalize_loudness is True
-    assert config.transcription.vad_threshold == pytest.approx(0.35)
+    assert config.transcription.vad_threshold == pytest.approx(0.2)
     assert config.transcription.vad_min_speech_ms == 100
 
 
@@ -297,7 +297,7 @@ def test_detect_config_changes_tracks_vad_and_normalize_without_reload():
     from whisper_aloud.config import detect_config_changes
     old = WhisperAloudConfig.load()
     new = WhisperAloudConfig.load()
-    new.transcription.vad_threshold = 0.2
+    new.transcription.vad_threshold = 0.15
     new.transcription.vad_min_speech_ms = 50
     new.transcription.normalize_loudness = not old.transcription.normalize_loudness
 

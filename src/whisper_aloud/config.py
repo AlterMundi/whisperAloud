@@ -108,7 +108,14 @@ class TranscriptionConfig:
     # deliberately more permissive. Distinct from audio.vad_threshold, which is
     # an RMS amplitude gate for the live-recording noise gate/trim, not a
     # Silero speech-probability threshold.
-    vad_threshold: float = 0.35
+    #
+    # 0.35 (tried first) was not permissive enough on a real 36-minute meeting
+    # recording -- measured Silero retention there was 58%/66%/85%/92% at
+    # threshold 0.5/0.35/0.2/0.1 respectively (see tests/test_vad_quiet_speech.py
+    # and stt/normalize.py's docstring for the full investigation). 0.2 is the
+    # smallest threshold that gets close to full retention on that file without
+    # going as low as 0.1, which is more likely to pick up noise as speech.
+    vad_threshold: float = 0.2
     vad_min_speech_ms: int = 100
     # Apply a one-shot loudness normalization pass (see stt.normalize) before
     # VAD/transcription in the *file* transcription path. Live dictation
