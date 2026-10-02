@@ -2,6 +2,7 @@
 import importlib
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -768,6 +769,128 @@ class TestDownloadModel:
         daemon._download_thread.join(timeout=2)
         daemon.DownloadFinished.assert_called_once_with(
             "parakeet", "parakeet-tdt-0.6b-v3", False, "network exploded"
+        )
+
+    # ─── WHISP-68 audit HIGH #3: Quit() during an in-flight download ────────
+
+    def test_quit_sets_download_cancel_event_when_downloading(self, daemon, monkeypatch):
+        from whisper_aloud.stt import model_download
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def _blocking_download(name, progress_cb=None, cancel_event=None):
+            started.set()
+            release.wait(timeout=2)
+            if cancel_event.is_set():
+                raise model_download.DownloadCancelled("cancelled")
+
+        monkeypatch.setattr(model_download, "download_model", _blocking_download)
+        assert daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False) is True
+        assert started.wait(timeout=2)
+        cancel_event = daemon._download_cancel_event
+        assert cancel_event is not None
+        assert cancel_event.is_set() is False
+
+        daemon._loop = MagicMock()
+        daemon.Quit()
+
+        assert cancel_event.is_set() is True
+        release.set()
+        daemon._download_thread.join(timeout=2)
+
+    def test_quit_with_no_download_in_flight_does_not_raise(self, daemon):
+        daemon._loop = MagicMock()
+        assert daemon.Quit() is True
+
+    def test_cleanup_joins_download_thread_after_quit_cancels_it(self, daemon, monkeypatch):
+        from whisper_aloud.stt import model_download
+
+        started = threading.Event()
+
+        def _responsive_download(name, progress_cb=None, cancel_event=None):
+            started.set()
+            # Poll cancel_event like the real _download_with_progress hook
+            # does, instead of blocking on an external release() the test
+            # would otherwise have to pair with Quit() -- this is the
+            # "responds promptly to cancellation" case _cleanup()'s bounded
+            # join() is meant to succeed against.
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if cancel_event.is_set():
+                    raise model_download.DownloadCancelled("cancelled")
+                time.sleep(0.01)
+            raise AssertionError("cancel_event was never set")
+
+        monkeypatch.setattr(model_download, "download_model", _responsive_download)
+        assert daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False) is True
+        assert started.wait(timeout=2)
+
+        daemon._loop = MagicMock()
+        daemon.Quit()
+        daemon._cleanup()
+
+        assert daemon._download_thread.is_alive() is False
+        assert daemon._downloading is False
+
+    def test_quit_mid_download_leaves_no_partial_model_dir(self, daemon, monkeypatch, tmp_path):
+        """End-to-end (within this mocked-daemon fixture) through the real
+        model_download.download_model: Quit() mid-download must result in no
+        on-disk model directory at all, not a partial one."""
+        from whisper_aloud.stt import model_download
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        target_dir = model_download.model_dir("parakeet-tdt-0.6b-v3")
+        started = threading.Event()
+
+        def _fake_transfer(url, dest, progress_cb=None, cancel_event=None):
+            started.set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise model_download.DownloadCancelled("cancelled")
+                time.sleep(0.01)
+            raise AssertionError("cancel_event was never set")
+
+        monkeypatch.setattr(model_download, "_download_with_progress", _fake_transfer)
+        assert daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False) is True
+        assert started.wait(timeout=2)
+
+        daemon._loop = MagicMock()
+        daemon.Quit()
+        daemon._cleanup()
+
+        assert daemon._download_thread.is_alive() is False
+        assert not target_dir.exists(), "Quit() mid-download must not leave a partial model dir"
+
+    # ─── WHISP-68 audit MEDIUM #4: final DownloadProgress reaches 100% ──────
+
+    def test_last_download_progress_of_a_completed_download_reaches_total(
+        self, daemon, monkeypatch
+    ):
+        """The final DownloadProgress emitted for a successful download must
+        report bytes_done == bytes_total -- a throttled-away final update
+        would otherwise leave clients' progress bars stuck short of 100%."""
+        from whisper_aloud.stt import model_download
+
+        def _fake_download(name, progress_cb=None, cancel_event=None):
+            # Several rapid updates (would normally be throttled at ~4Hz)
+            # followed by the completed/boundary one.
+            progress_cb(10, 100)
+            progress_cb(50, 100)
+            progress_cb(100, 100)
+
+        monkeypatch.setattr(model_download, "download_model", _fake_download)
+        assert daemon.DownloadModel("parakeet", "parakeet-tdt-0.6b-v3", False) is True
+        daemon._download_thread.join(timeout=2)
+
+        assert daemon.DownloadProgress.call_count >= 1
+        last_call_args = daemon.DownloadProgress.call_args_list[-1][0]
+        last_engine, last_name, bytes_done, bytes_total = last_call_args
+        assert bytes_total > 0
+        assert bytes_done == bytes_total, (
+            f"last DownloadProgress was {last_call_args!r}, expected bytes_done == "
+            "bytes_total for a completed download"
         )
 
 

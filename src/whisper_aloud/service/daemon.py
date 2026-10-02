@@ -1040,6 +1040,20 @@ class WhisperAloudService:
         # history after the daemon has already announced shutdown.
         self._job_id += 1
 
+        # WHISP-68 audit HIGH #3: a download still running at shutdown must
+        # be told to cancel too, so _cleanup()'s bounded join() below has a
+        # real chance of finishing quickly instead of waiting out the full
+        # download. Note: once self._loop.quit() below stops the main loop,
+        # any DownloadFinished this cancellation triggers can no longer be
+        # delivered (GLib.idle_add has nothing left to run it on) -- the
+        # download thread still exits cleanly and _run_download's finally
+        # block still clears self._downloading/_download_cancel_event, but
+        # no client ever sees that final signal. This is expected for a
+        # shutdown, not a bug.
+        with self._download_lock:
+            if self._download_cancel_event is not None:
+                self._download_cancel_event.set()
+
         if self._loop:
             self._loop.quit()
         else:
@@ -1161,12 +1175,25 @@ class WhisperAloudService:
         """Throttle DownloadProgress to ~4Hz (always letting the first and the
         completed/boundary update through unthrottled), then emit it on the
         main loop via idle_add -- called from the background download
-        thread's progress callback, never the main thread."""
+        thread's progress callback, never the main thread.
+
+        WHISP-68 audit LOW #5: the read-then-write of
+        `_last_download_progress_emit` happens under `_download_lock` (the
+        same lock guarding `_downloading`/`_download_cancel_event`/
+        `_download_thread`) rather than as an unguarded plain attribute --
+        only one download runs at a time, but this removes any doubt about
+        a race between this background-thread bookkeeping and anything else
+        that might read/reset it.
+        """
         now = time.monotonic()
-        is_boundary = bytes_total > 0 and bytes_done >= bytes_total
-        if not is_boundary and (now - self._last_download_progress_emit) < _DOWNLOAD_PROGRESS_MIN_INTERVAL_S:
-            return
-        self._last_download_progress_emit = now
+        with self._download_lock:
+            is_boundary = bytes_total > 0 and bytes_done >= bytes_total
+            if (
+                not is_boundary
+                and (now - self._last_download_progress_emit) < _DOWNLOAD_PROGRESS_MIN_INTERVAL_S
+            ):
+                return
+            self._last_download_progress_emit = now
         GLib.idle_add(lambda: self.DownloadProgress(engine, name, bytes_done, bytes_total))
 
     def _serialize_history_entry(self, entry) -> dict:
@@ -1625,6 +1652,26 @@ class WhisperAloudService:
         # Unregister hotkeys
         if self.hotkey_manager:
             self.hotkey_manager.unregister()
+
+        # WHISP-68 audit HIGH #3: Quit() already set _download_cancel_event
+        # above; join the background download thread with a bounded timeout
+        # rather than leaving it running past process shutdown (which would
+        # otherwise keep a model's temp-dir cleanup and final os.replace()
+        # racing a process exit). ~10s is generous for even a slow
+        # cancellation to land (sherpa: a single file, stops almost
+        # immediately; faster-whisper: between chunks of in-flight files --
+        # see hf_download.py). If it's still running after the timeout, it's
+        # a daemon thread (`daemon=True` at creation) so the process can
+        # still exit; it simply won't finish its cleanup/rename.
+        download_thread = self._download_thread
+        if download_thread is not None and download_thread.is_alive():
+            download_thread.join(timeout=10.0)
+            if download_thread.is_alive():
+                logger.warning(
+                    "download thread still running %.0fs after Quit(); "
+                    "proceeding with shutdown anyway (it is a daemon thread)",
+                    10.0,
+                )
 
         # Shutdown executor
         self.executor.shutdown(wait=True)
