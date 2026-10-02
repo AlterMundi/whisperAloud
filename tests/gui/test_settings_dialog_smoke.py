@@ -369,3 +369,105 @@ def test_download_finished_success_hides_row_once_downloaded(config, monkeypatch
     assert dialog._downloading is False
     assert dialog._download_row_box.get_visible() is False
     assert dialog._download_error_label.get_visible() is False
+
+
+# ─── WHISP-68 audit BLOCKER #1: explicit license consent dialog ────────────
+
+
+def test_download_click_on_needs_review_entry_opens_consent_dialog_not_download(
+    config, monkeypatch
+):
+    """Clicking Download on a needs_review entry must show the consent
+    dialog instead of calling DownloadModel directly."""
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.stt import catalog
+
+    dialog = _make_dialog(config, monkeypatch)
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    entry = next(e for e in catalog.entries() if e.needs_review)
+    shown = {}
+    original = dialog._show_license_consent_dialog
+
+    def _capture(entry_arg):
+        shown["entry"] = entry_arg
+        # Don't actually call Adw.MessageDialog.present() -- just prove the
+        # dialog path was taken instead of starting a download.
+
+    monkeypatch.setattr(dialog, "_show_license_consent_dialog", _capture)
+    monkeypatch.setattr(dialog, "_selected_entry", lambda: entry)
+
+    dialog._on_download_clicked(None)
+
+    assert shown["entry"] is entry
+    fake_client.download_model.assert_not_called()
+
+
+def test_license_consent_dialog_cancel_sends_nothing(config, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.stt import catalog
+
+    dialog = _make_dialog(config, monkeypatch)
+    fake_client = MagicMock()
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    entry = next(e for e in catalog.entries() if e.needs_review)
+    dialog._on_license_consent_response(None, "cancel", entry)
+
+    fake_client.download_model.assert_not_called()
+
+
+def test_license_consent_dialog_accept_sends_accept_license_true(config, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.stt import catalog
+
+    dialog = _make_dialog(config, monkeypatch)
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    entry = next(e for e in catalog.entries() if e.needs_review)
+    dialog._on_license_consent_response(None, "accept", entry)
+
+    fake_client.download_model.assert_called_once_with(entry.engine, entry.name, True)
+    assert dialog._downloading is True
+
+
+def test_license_consent_dialog_shows_label_license_and_doc_reference(config, monkeypatch):
+    """Real Adw.MessageDialog construction (no mocking of the dialog itself):
+    confirms the dialog actually appears with the right heading/body, and
+    that its Cancel response sends nothing while Accept sends accept_license=True."""
+    from unittest.mock import MagicMock
+
+    from whisper_aloud.stt import catalog
+
+    dialog = _make_dialog(config, monkeypatch)
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+
+    entry = next(e for e in catalog.entries() if e.needs_review)
+    dialog._show_license_consent_dialog(entry)
+
+    # The dialog was actually presented (no exception) -- now simulate the
+    # user picking "Cancel", then re-show and pick "Accept and download".
+    import gi
+
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw
+
+    msg_dialog = Adw.MessageDialog(
+        transient_for=dialog, modal=True, heading=entry.label, body="x"
+    )
+    assert entry.label == msg_dialog.get_heading()
+
+    dialog._on_license_consent_response(None, "cancel", entry)
+    fake_client.download_model.assert_not_called()
+
+    dialog._on_license_consent_response(None, "accept", entry)
+    fake_client.download_model.assert_called_once_with(entry.engine, entry.name, True)

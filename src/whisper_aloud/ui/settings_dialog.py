@@ -17,7 +17,7 @@ from ..config import (
     WhisperAloudConfig,
 )
 from ..stt import catalog
-from .download_logic import compute_ui_state, should_accept_license
+from .download_logic import compute_ui_state, requires_license_consent
 from .error_handler import InputValidator, ValidationError
 from .model_picker_logic import (
     badges_for,
@@ -790,8 +790,78 @@ class SettingsDialog(Gtk.Window):
         entry = self._selected_entry()
         if entry is None:
             return
+        if requires_license_consent(entry):
+            # WHISP-68 audit BLOCKER #1: a needs_review or non-standard-license
+            # entry must never start downloading from a plain click -- show an
+            # explicit consent dialog first. Only its "Accept and download"
+            # response calls _start_download(..., accept_license=True); every
+            # other outcome (Cancel, Esc, closing the dialog) sends nothing at
+            # all, not even accept_license=False.
+            self._show_license_consent_dialog(entry)
+            return
+        self._start_download(entry, accept_license=False)
+
+    # Findings doc referenced by the license-consent dialog for the one
+    # catalog entry that needs it today (nemotron-streaming's OpenMDW-1.1
+    # pending-review license). Relative to the repo root (settings_dialog.py
+    # lives at src/whisper_aloud/ui/, three parents up).
+    _LICENSE_FINDINGS_DOC = "docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md"
+
+    def _license_findings_doc_markup(self) -> str:
+        """A clickable `file://` link to the findings doc when it can be
+        resolved on disk (a source checkout), else just its repo-relative
+        path as plain text (e.g. an installed package without docs/) --
+        never a broken link."""
+        repo_root = Path(__file__).resolve().parents[3]
+        doc_path = repo_root / self._LICENSE_FINDINGS_DOC
+        escaped_rel = GLib.markup_escape_text(self._LICENSE_FINDINGS_DOC)
+        if doc_path.is_file():
+            return f'<a href="file://{doc_path}">{escaped_rel}</a>'
+        return escaped_rel
+
+    def _show_license_consent_dialog(self, entry: "catalog.ModelEntry") -> None:
+        """Explicit license-consent dialog for a needs_review/non-standard-
+        license entry (WHISP-68 audit BLOCKER #1). Shows the model label, the
+        license id, the pending-review status, and a link to the findings doc
+        (or the license itself) -- never started implicitly from a notice
+        merely being visible."""
+        status = (
+            "This model's license is pending human legal review."
+            if entry.needs_review
+            else "This model's license is non-standard for this app (MIT)."
+        )
+        label = GLib.markup_escape_text(entry.label)
+        license_id = GLib.markup_escape_text(entry.license)
+        body = (
+            f"<b>{label}</b>\n"
+            f"License: {license_id}\n"
+            f"{status}\n\n"
+            f"See {self._license_findings_doc_markup()} for details."
+        )
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading=entry.label,
+            body=body,
+            body_use_markup=True,
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("accept", "Accept and download")
+        dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_license_consent_response, entry)
+        dialog.present()
+
+    def _on_license_consent_response(
+        self, _dialog: "Adw.MessageDialog", response: str, entry: "catalog.ModelEntry"
+    ) -> None:
+        if response != "accept":
+            return  # Cancel/Esc/close: nothing is sent to the daemon at all.
+        self._start_download(entry, accept_license=True)
+
+    def _start_download(self, entry: "catalog.ModelEntry", accept_license: bool) -> None:
         client = self._get_download_client()
-        accept_license = should_accept_license(self._license_notice.get_visible())
         self._download_error = None
         started = client.download_model(entry.engine, entry.name, accept_license)
         if not started:
