@@ -210,3 +210,49 @@ def test_intermediate_failure_schedules_auto_retry_without_showing_dialog():
     from gi.repository import GLib
 
     GLib.source_remove(window._retry_timeout_id)
+
+
+def test_daemon_vanishing_offers_actionable_retry():
+    """Field bug 4: a daemon that vanishes after being connected (e.g.
+    `whisper-aloud quit`) must offer the same clickable "Retry Connection"
+    dialog as a daemon that was never reachable -- not just a non-clickable
+    status message that only recovers if something else restarts it."""
+    window = _make_window()
+    before = _toplevels_snapshot()
+
+    window._handle_disconnection()
+    _pump_main_loop()
+
+    assert window._daemon_available is False
+    new_windows = _new_toplevels_since(before)
+    assert len(new_windows) == 1, "expected exactly one new window (the unavailable dialog)"
+    dialog = new_windows[0]
+    retry_button = _find_button_by_label(dialog, "Retry Connection")
+    assert retry_button is not None, "disconnection dialog must offer a retry button"
+
+
+def test_disconnection_dialog_is_not_duplicated_on_repeated_loss():
+    window = _make_window()
+    before = _toplevels_snapshot()
+
+    window._handle_disconnection()
+    _pump_main_loop()
+    window._handle_disconnection()
+    _pump_main_loop()
+
+    assert len(_new_toplevels_since(before)) == 1, "a second loss must not stack a new dialog"
+
+
+def test_reconnecting_closes_the_unavailable_dialog():
+    window = _make_window()
+    before = _toplevels_snapshot()
+
+    window._handle_disconnection()
+    _pump_main_loop()
+    assert len(_new_toplevels_since(before)) == 1
+
+    window._handle_reconnection()
+    _pump_main_loop()
+
+    assert window._unavailable_dialog is None
+    assert _new_toplevels_since(before) == []
