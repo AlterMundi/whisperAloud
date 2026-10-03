@@ -124,3 +124,16 @@ existing window instead of opening a duplicate one. Closing the window only
 calls `MainWindow.cleanup()` → `client.disconnect()`; it never calls
 `client.quit_daemon()`, so the daemon (and its tray icon, which it owns, not
 the GUI process) keeps running after the window closes.
+
+## Inside Flatpak (WHISP-61)
+
+The Flatpak build installs a variant of this file at
+`/app/share/dbus-1/services/org.fede.whisperaloud.service`, with
+`SystemdService=` and the comments removed and with `Exec=whisper-aloud --daemon`
+(no `/usr/bin/`). The removal is belt and braces: Flatpak's exporter only keeps
+`Name` and `Exec` in exported D-Bus service files, and drops `SystemdService`
+explicitly (`allowed_dbus_service_keys` in flatpak's `common/flatpak-dir.c`).
+On install, Flatpak rewrites `Exec` to
+`flatpak run --branch=stable --arch=x86_64 --command=whisper-aloud org.fede.whisperaloud --daemon`.
+GUI-triggered activation therefore works exactly as described above, with no
+systemd unit involved. See `docs/flatpak.md`.
