@@ -11,6 +11,8 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GLib, Gtk
 
 from ..config import WhisperAloudConfig
+from ..daemon_hints import gui_daemon_unavailable_hint
+from ..sandbox import is_flatpak_sandbox
 from ..service.history_client import DaemonHistoryManager
 from .daemon_connect_logic import ConnectPhase, decide_after_attempt
 from .error_handler import (
@@ -59,6 +61,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # auto-retry-with-backoff decision (WHISP-60).
         self._connect_attempt: int = 0
         self._retry_timeout_id: int = 0
+        # The currently-open "daemon unavailable" dialog (field bug 4), or
+        # None. Shared by _on_daemon_unavailable() and _handle_disconnection()
+        # via _show_daemon_unavailable_dialog() so a vanished daemon offers
+        # the same actionable retry as a daemon that was never reachable.
+        self._unavailable_dialog: Optional[Gtk.Window] = None
         self._current_entry_id: Optional[int] = None
         self._edit_save_timer_id: int = 0
         self._buffer_changed_handler_id: int = 0
@@ -367,7 +374,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 if client.is_connected:
                     GLib.idle_add(self._on_daemon_connected, client)
                 else:
-                    GLib.idle_add(self._on_connect_attempt_failed, attempt)
+                    GLib.idle_add(
+                        self._on_connect_attempt_failed, attempt, client.is_starting
+                    )
             except Exception as e:
                 logger.error(f"Failed to connect to daemon: {e}", exc_info=True)
                 GLib.idle_add(self._on_load_error, str(e))
@@ -375,20 +384,32 @@ class MainWindow(Gtk.ApplicationWindow):
         threading.Thread(target=_connect_in_thread, daemon=True).start()
         return False
 
-    def _on_connect_attempt_failed(self, attempt: int) -> bool:
+    def _on_connect_attempt_failed(self, attempt: int, starting: bool = False) -> bool:
         """
         Called on the main thread after a failed D-Bus activation attempt.
 
-        Delegates to the pure decide_after_attempt() policy (WHISP-60): either
-        schedule another automatic attempt with backoff, or give up and show
-        the "daemon unavailable" state with a manual retry button.
+        Delegates to the pure decide_after_attempt() policy (WHISP-60/field
+        bug 1): either schedule another automatic attempt with backoff, or
+        give up and show the "daemon unavailable" state with a manual retry
+        button. `starting` (from WhisperAloudClient.is_starting) means the
+        bus name is owned but the daemon hasn't published its D-Bus object
+        yet -- a much longer, steady retry budget applies in that case (see
+        daemon_connect_logic.DEFAULT_STARTING_MAX_AUTO_RETRIES) instead of
+        the short exponential-backoff one used for a plain "nothing there at
+        all" failure.
 
         Returns:
             False to remove this idle callback
         """
-        decision = decide_after_attempt(connected=False, attempt=attempt)
+        decision = decide_after_attempt(connected=False, attempt=attempt, starting=starting)
 
-        if decision.phase is ConnectPhase.WAITING_RETRY:
+        if decision.phase is ConnectPhase.STARTING:
+            self._hide_loading_dialog()
+            self.status_bar.set_status("Daemon is starting, please wait...")
+            self._retry_timeout_id = GLib.timeout_add(
+                int(decision.retry_delay_seconds * 1000), self._init_components_async
+            )
+        elif decision.phase is ConnectPhase.WAITING_RETRY:
             self._hide_loading_dialog()
             self.status_bar.set_status(
                 f"Daemon not available, retrying in {decision.retry_delay_seconds:.0f}s..."
@@ -413,6 +434,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         self.client = client
         self._daemon_available = True
+        self._close_unavailable_dialog()
         logger.info("Connected to WhisperAloud daemon")
 
         # Subscribe to daemon signals
@@ -472,6 +494,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _handle_reconnection(self) -> bool:
         """Re-establish daemon connection on the main thread."""
         self._daemon_available = True
+        self._close_unavailable_dialog()
         self.status_bar.set_status("Reconnecting...")
         daemon_state = "idle"
 
@@ -501,13 +524,25 @@ class MainWindow(Gtk.ApplicationWindow):
         GLib.idle_add(self._handle_disconnection)
 
     def _handle_disconnection(self) -> bool:
-        """Update UI for lost daemon connection on the main thread."""
+        """Update UI for lost daemon connection on the main thread.
+
+        Field bug 4: previously this only set a transient, non-clickable
+        status message ("Daemon disconnected - waiting for restart...") and
+        relied entirely on watch_name()'s NameOwnerChanged callback to
+        reconnect -- if nothing else on the bus restarted the daemon (e.g.
+        the user ran `whisper-aloud quit` with no systemd auto-restart), the
+        GUI gave the user no way to restart it. Show the same "daemon
+        unavailable" dialog _on_daemon_unavailable() uses, with a working
+        Retry Connection button, since retrying is also what triggers D-Bus
+        activation (and the bug-1 startup wait) to bring the daemon back.
+        """
         self._daemon_available = False
         self._timer_active = False
         self.record_button.set_sensitive(False)
         self.settings_button.set_sensitive(False)
-        self.status_bar.set_status("Daemon disconnected - waiting for restart...")
+        self.status_bar.set_status("Daemon disconnected")
         self.set_state(AppState.ERROR)
+        self._show_daemon_unavailable_dialog("WhisperAloud daemon disconnected")
         return False
 
     def _on_daemon_unavailable(self) -> bool:
@@ -526,7 +561,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.settings_button.set_sensitive(False)
         self.set_state(AppState.ERROR)
 
-        # Show diagnostic dialog with retry option
+        self._show_daemon_unavailable_dialog("WhisperAloud daemon not running")
+
+        return False
+
+    def _show_daemon_unavailable_dialog(self, title_text: str) -> None:
+        """Present the "daemon unavailable" dialog with a Retry Connection
+        button, reused by both _on_daemon_unavailable() (never connected)
+        and _handle_disconnection() (field bug 4: daemon vanished after
+        being connected). If the dialog is already open (e.g. a second
+        disconnection event while the user hasn't dismissed it yet), just
+        bring the existing one to the front instead of stacking a duplicate.
+        """
+        if self._unavailable_dialog is not None:
+            self._unavailable_dialog.present()
+            return
+
         dialog = Gtk.Window()
         dialog.set_modal(True)
         dialog.set_transient_for(self)
@@ -540,26 +590,14 @@ class MainWindow(Gtk.ApplicationWindow):
         box.set_margin_top(24)
         box.set_margin_bottom(24)
 
-        title = Gtk.Label(label="WhisperAloud daemon not running")
+        title = Gtk.Label(label=title_text)
         title.add_css_class("title-2")
         box.append(title)
 
         has_user_service = (Path.home() / ".config/systemd/user/whisper-aloud.service").exists()
-        if has_user_service:
-            hint_text = (
-                "Start the daemon with:\n\n"
-                "  systemctl --user start whisper-aloud\n\n"
-                "Or run directly:\n\n"
-                "  whisper-aloud-daemon\n"
-                "  whisper-aloud --daemon"
-            )
-        else:
-            hint_text = (
-                "Start the daemon with:\n\n"
-                "  whisper-aloud-daemon\n"
-                "  whisper-aloud --daemon\n\n"
-                "Tip: run ./install.sh to enable systemd user service integration."
-            )
+        hint_text = gui_daemon_unavailable_hint(
+            is_flatpak=is_flatpak_sandbox(), has_user_service=has_user_service
+        )
 
         hint = Gtk.Label(label=hint_text)
         hint.set_wrap(True)
@@ -577,9 +615,21 @@ class MainWindow(Gtk.ApplicationWindow):
 
         box.append(button_box)
         dialog.set_child(box)
+
+        def _on_close_request(_win) -> bool:
+            self._unavailable_dialog = None
+            return False  # allow the close to proceed
+
+        dialog.connect("close-request", _on_close_request)
+
+        self._unavailable_dialog = dialog
         dialog.present()
 
-        return False
+    def _close_unavailable_dialog(self) -> None:
+        """Close and forget the "daemon unavailable" dialog, if open."""
+        if self._unavailable_dialog is not None:
+            self._unavailable_dialog.close()
+            self._unavailable_dialog = None
 
     def _retry_daemon_connection(self, dialog: Gtk.Window) -> None:
         """

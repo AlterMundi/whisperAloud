@@ -83,3 +83,50 @@ class TestDecideAfterAttempt:
         decision = decide_after_attempt(connected=True, attempt=1)
         with pytest.raises(AttributeError):
             decision.attempt = 99
+
+
+class TestDecideAfterAttemptStarting:
+    """Field bug 1: a "daemon is mid-startup" classification gets a much
+    longer, steady retry budget than a plain connection failure."""
+
+    def test_starting_schedules_retry_with_fixed_delay(self):
+        decision = decide_after_attempt(connected=False, attempt=1, starting=True)
+        assert decision.phase is ConnectPhase.STARTING
+        assert decision.retry_delay_seconds == 1.0
+
+    def test_starting_retry_delay_does_not_grow(self):
+        first = decide_after_attempt(connected=False, attempt=1, starting=True)
+        second = decide_after_attempt(connected=False, attempt=10, starting=True)
+        assert first.retry_delay_seconds == second.retry_delay_seconds
+
+    def test_starting_survives_past_the_plain_retry_budget(self):
+        """Attempt 3 would be UNAVAILABLE for a plain failure (default
+        max_auto_retries=3), but starting=True should still be retrying."""
+        decision = decide_after_attempt(connected=False, attempt=3, starting=True)
+        assert decision.phase is ConnectPhase.STARTING
+
+    def test_starting_eventually_gives_up(self):
+        decision = decide_after_attempt(
+            connected=False, attempt=30, starting=True, starting_max_auto_retries=30
+        )
+        assert decision.phase is ConnectPhase.UNAVAILABLE
+
+    def test_connected_short_circuits_even_when_starting_flag_set(self):
+        decision = decide_after_attempt(connected=True, attempt=1, starting=True)
+        assert decision.phase is ConnectPhase.CONNECTED
+
+    def test_starting_never_gives_up_by_default(self):
+        """Maintainer design directive: no fixed "wait N seconds then
+        declare unavailable forever" window while the daemon still owns the
+        bus name. Default starting_max_auto_retries is unlimited."""
+        decision = decide_after_attempt(connected=False, attempt=10_000, starting=True)
+        assert decision.phase is ConnectPhase.STARTING
+
+    def test_custom_starting_budget(self):
+        decision = decide_after_attempt(
+            connected=False,
+            attempt=2,
+            starting=True,
+            starting_max_auto_retries=2,
+        )
+        assert decision.phase is ConnectPhase.UNAVAILABLE

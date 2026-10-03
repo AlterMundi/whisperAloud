@@ -2,8 +2,8 @@
 
 Inside a Flatpak sandbox there is no ydotool/xdotool: the only sanctioned
 way to synthesize a keypress is the ``org.freedesktop.portal.RemoteDesktop``
-portal. This mirrors the Request/Response + bounded-timeout pattern already
-used by ``service/hotkey_portal.py`` for GlobalShortcuts (see WHISP-64).
+portal. This mirrors the fully-async Request/Response pattern used by
+``service/hotkey_portal.py`` for GlobalShortcuts (see WHISP-64).
 
 Portal call sequence (xdg-desktop-portal RemoteDesktop interface):
 
@@ -20,6 +20,21 @@ Portal call sequence (xdg-desktop-portal RemoteDesktop interface):
 4. ``NotifyKeyboardKeysym(session_handle, options, keysym, state)`` -- a
    plain (non-Request) method call, fire-and-forget, one call per key
    press/release in the sequence from ``portal_keysyms``.
+
+Design note (maintainer directive, field bug 2 second pass): all three
+Request-pattern calls above are fully asynchronous and continuation-based --
+no nested GLib.MainLoop, no background thread. ``_request_async()``
+subscribes to the predicted Request::Response path, issues the method call
+via ``Gio.DBusProxy.call()`` (the async, callback-based API), and returns
+immediately; the CreateSession -> SelectDevices -> Start chain resumes
+entirely from Response callbacks dispatched by the daemon's own main loop.
+``simulate_paste()`` therefore never blocks: if the session isn't ready yet
+(setup still pending, or not even started), it kicks off (idempotent) async
+setup and falls back to clipboard-only *for this call* immediately -- the
+caller already copied the text to the clipboard before this is ever
+reached (see service/daemon.py). Once Start's Response arrives with a
+restore_token, it's persisted and the session is marked ready; the *next*
+paste then uses NotifyKeyboardKeysym for real.
 
 The session (steps 1-3) is created lazily on the first paste and kept for
 the rest of the daemon's lifetime -- never recreated speculatively, since
@@ -46,6 +61,7 @@ _PORTAL_PATH = "/org/freedesktop/portal/desktop"
 _IFACE_RD = "org.freedesktop.portal.RemoteDesktop"
 _IFACE_REQ = "org.freedesktop.portal.Request"
 _IFACE_REGISTRY = "org.freedesktop.host.portal.Registry"
+_IFACE_SESSION = "org.freedesktop.portal.Session"
 
 # RemoteDesktop DeviceType bitmask (portal spec).
 DEVICE_KEYBOARD = 1
@@ -56,6 +72,13 @@ PERSIST_MODE_APPLICATION = 1
 PERSIST_MODE_PERSISTENT = 2
 
 _RESTORE_TOKEN_FILENAME = "portal_restore_token"
+
+# Non-interactive Request calls (CreateSession) never show a dialog, so the
+# portal normally answers in well under a second. A WARNING-only watchdog
+# after this long is a *diagnostic*, not a deadline: the Response
+# subscription stays alive and a late answer is still processed in full
+# (maintainer directive: never abandon the request).
+_SLOW_RESPONSE_WARNING_MS = 8000
 
 
 def _restore_token_path() -> Path:
@@ -139,7 +162,13 @@ class PortalPasteSimulator:
         self._proxy = None
         self._session_path = None
         self._session_failed = False
-        self._pending_handle_token: Optional[str] = None
+        # Guards against starting a second concurrent session-setup chain
+        # (e.g. two pastes requested back to back before the first consent
+        # dialog is resolved): a second caller falls back to clipboard-only
+        # for its own paste immediately instead of blocking behind, or
+        # duplicating, the first interactive request in flight.
+        self._session_pending = False
+        self._closed = False
 
     @staticmethod
     def _new_token(prefix: str) -> str:
@@ -158,6 +187,9 @@ class PortalPasteSimulator:
         # persist_mode/restore_token actually survive across daemon
         # restarts instead of being scoped to a one-off systemd scope name.
         # Safe to fail: portals older than 1.19 simply lack this interface.
+        # A plain method call with a direct, fast reply (not part of the
+        # Request/Response flow this module makes asynchronous), so
+        # call_sync here is fine.
         try:
             self._bus.call_sync(
                 _PORTAL_BUS,
@@ -186,163 +218,227 @@ class PortalPasteSimulator:
             None,
         )
 
-    def _call_request(self, method_name: str, args, timeout_ms: Optional[int] = None):
-        """Invoke a Request-pattern portal method and block for its Response.
+    # ─── Async Request/Response core (mirrors service.hotkey_portal) ───────
 
-        Same bounded-timeout Request/Response pattern as
-        `service.hotkey_portal.PortalHotkeys._call_request`. Never raises
-        on timeout -- returns (None, None).
+    def _request_async(
+        self, method_name: str, build_args, on_response, *, interactive: bool
+    ) -> None:
+        """Issue a Request-pattern portal method call without blocking.
+
+        See `service.hotkey_portal.PortalHotkeys._request_async`'s
+        docstring for the full rationale -- identical design here:
+        subscribe to the predicted Request::Response path, call
+        `self._proxy.call()` (async, never `call_sync`), return
+        immediately. `on_response` fires exactly once from the Response
+        signal callback. `interactive=True` (SelectDevices, Start) never
+        arms a deadline; `interactive=False` (CreateSession) arms a
+        one-shot diagnostic WARNING that never tears down the subscription.
         """
         Gio = self._Gio  # noqa: N806
         GLib = self._GLib  # noqa: N806
-        timeout_ms = self._timeout_ms if timeout_ms is None else timeout_ms
 
-        handle_token = self._pending_handle_token
+        handle_token = self._new_token("req")
+        args = build_args(handle_token)
         sender = self._bus.get_unique_name().lstrip(":").replace(".", "_")
         expected_req_path = f"/org/freedesktop/portal/desktop/request/{sender}/{handle_token}"
 
-        outcome = {"response": None, "results": None}
-        loop = GLib.MainLoop()
-        sub_id = [None]
+        state = {"sub_id": None, "warn_id": None, "responded": False}
 
-        def _on_response(_conn, _sender, _path, _iface, _signal, params):
+        def _finish(response, results):
+            if state["responded"]:
+                return
+            state["responded"] = True
+            if state["sub_id"] is not None:
+                self._bus.signal_unsubscribe(state["sub_id"])
+                state["sub_id"] = None
+            if state["warn_id"] is not None:
+                GLib.source_remove(state["warn_id"])
+                state["warn_id"] = None
+            if self._closed:
+                logger.debug("%s Response arrived after close(); ignoring", method_name)
+                return
+            on_response(response, results)
+
+        def _on_signal(_conn, _sender, _path, _iface, _signal, params):
             try:
                 response, results = params.unpack()
-                outcome["response"] = response
-                outcome["results"] = results
-            finally:
-                if sub_id[0] is not None:
-                    self._bus.signal_unsubscribe(sub_id[0])
-                    sub_id[0] = None
-                loop.quit()
+            except Exception:
+                logger.exception("Unparseable %s Response: %r", method_name, params)
+                response, results = None, None
+            _finish(response, results)
 
-        sub_id[0] = self._bus.signal_subscribe(
+        state["sub_id"] = self._bus.signal_subscribe(
             None,
             _IFACE_REQ,
             "Response",
             expected_req_path,
             None,
             Gio.DBusSignalFlags.NONE,
-            _on_response,
+            _on_signal,
         )
 
-        self._proxy.call_sync(method_name, args, Gio.DBusCallFlags.NONE, timeout_ms, None)
+        def _on_call_done(proxy, result, _user_data=None):
+            try:
+                proxy.call_finish(result)
+            except Exception as e:
+                logger.warning("%s call failed (no Request was created): %s", method_name, e)
+                _finish(None, None)
 
-        timeout_fired = [False]
+        self._proxy.call(
+            method_name,
+            args,
+            Gio.DBusCallFlags.NONE,
+            self._timeout_ms,
+            None,
+            _on_call_done,
+        )
 
-        def _timeout():
-            timeout_fired[0] = True
-            logger.warning(
-                "%s timed out waiting for Response on %s", method_name, expected_req_path
-            )
-            loop.quit()
-            return GLib.SOURCE_REMOVE
+        if not interactive:
 
-        timeout_id = GLib.timeout_add(timeout_ms, _timeout)
-        loop.run()
-        if not timeout_fired[0]:
-            GLib.source_remove(timeout_id)
-        elif sub_id[0] is not None:
-            self._bus.signal_unsubscribe(sub_id[0])
-            sub_id[0] = None
+            def _warn():
+                if not state["responded"]:
+                    logger.warning(
+                        "%s: no Response after %dms yet on %s -- still waiting, not giving up",
+                        method_name,
+                        _SLOW_RESPONSE_WARNING_MS,
+                        expected_req_path,
+                    )
+                return GLib.SOURCE_REMOVE
 
-        return outcome["response"], outcome["results"]
+            state["warn_id"] = GLib.timeout_add(_SLOW_RESPONSE_WARNING_MS, _warn)
 
-    def _create_session(self) -> None:
+        logger.debug("Issued %s, awaiting Response on %s", method_name, expected_req_path)
+
+    # ─── Session setup state machine ───────────────────────────────────────
+
+    def _start_session_setup_if_needed(self) -> None:
+        """Kick off CreateSession -> SelectDevices -> Start, async, unless
+        a session already exists, one permanently failed, or one is already
+        in flight. Always non-blocking; completion (success or failure) is
+        handled entirely by the chained callbacks below."""
+        if self._session_path is not None or self._session_failed or self._session_pending:
+            return
+        self._session_pending = True
+        try:
+            self._connect()
+        except Exception as e:
+            logger.warning("RemoteDesktop portal connect failed: %s", e)
+            self._finish_session_setup(False)
+            return
+        self._create_session_async(on_done=self._on_session_created)
+
+    def _create_session_async(self, on_done) -> None:
         GLib = self._GLib  # noqa: N806
-
         session_token = self._new_token("session")
-        handle_token = self._new_token("req")
-        self._pending_handle_token = handle_token
 
-        opts = GLib.Variant(
-            "a{sv}",
-            {
-                "session_handle_token": GLib.Variant("s", session_token),
+        def _build_args(handle_token):
+            opts = GLib.Variant(
+                "a{sv}",
+                {
+                    "session_handle_token": GLib.Variant("s", session_token),
+                    "handle_token": GLib.Variant("s", handle_token),
+                },
+            )
+            return GLib.Variant.new_tuple(opts)
+
+        def _on_response(response, results):
+            session = None
+            if response == 0 and isinstance(results, dict):
+                v = results.get("session_handle")
+                if v is not None:
+                    session = v.unpack() if hasattr(v, "unpack") else v
+
+            if response == 0 and session:
+                self._session_path = session
+                on_done(True)
+            else:
+                logger.warning("RemoteDesktop CreateSession failed (response=%s)", response)
+                on_done(False)
+
+        self._request_async("CreateSession", _build_args, _on_response, interactive=False)
+
+    def _on_session_created(self, ok: bool) -> None:
+        if not ok:
+            self._finish_session_setup(False)
+            return
+        self._select_devices_async(self._load_restore_token(), on_done=self._on_devices_selected)
+
+    def _select_devices_async(self, restore_token: Optional[str], on_done) -> None:
+        GLib = self._GLib  # noqa: N806
+
+        def _build_args(handle_token):
+            opts_dict = {
                 "handle_token": GLib.Variant("s", handle_token),
-            },
-        )
-        response, results = self._call_request("CreateSession", GLib.Variant.new_tuple(opts))
+                "types": GLib.Variant("u", DEVICE_KEYBOARD),
+                "persist_mode": GLib.Variant("u", PERSIST_MODE_PERSISTENT),
+            }
+            if restore_token:
+                opts_dict["restore_token"] = GLib.Variant("s", restore_token)
+            opts = GLib.Variant("a{sv}", opts_dict)
+            return GLib.Variant.new_tuple(GLib.Variant("o", self._session_path), opts)
 
-        session = None
-        if response == 0 and isinstance(results, dict):
-            v = results.get("session_handle")
-            if v is not None:
-                session = v.unpack() if hasattr(v, "unpack") else v
+        def _on_response(response, _results):
+            if response == 0:
+                on_done(True)
+            else:
+                logger.warning("RemoteDesktop SelectDevices failed (response=%s)", response)
+                on_done(False)
 
-        if response != 0 or not session:
-            raise RuntimeError(f"RemoteDesktop CreateSession failed (response={response})")
-        self._session_path = session
+        # SelectDevices can require user interaction on some compositors
+        # (device-selection consent) -- no fixed deadline.
+        self._request_async("SelectDevices", _build_args, _on_response, interactive=True)
 
-    def _select_devices(self, restore_token: Optional[str]) -> None:
+    def _on_devices_selected(self, ok: bool) -> None:
+        if not ok:
+            self._finish_session_setup(False)
+            return
+        self._start_async(on_done=self._on_started)
+
+    def _start_async(self, on_done) -> None:
         GLib = self._GLib  # noqa: N806
 
-        handle_token = self._new_token("req")
-        self._pending_handle_token = handle_token
-
-        opts_dict = {
-            "handle_token": GLib.Variant("s", handle_token),
-            "types": GLib.Variant("u", DEVICE_KEYBOARD),
-            "persist_mode": GLib.Variant("u", PERSIST_MODE_PERSISTENT),
-        }
-        if restore_token:
-            opts_dict["restore_token"] = GLib.Variant("s", restore_token)
-        opts = GLib.Variant("a{sv}", opts_dict)
-
-        response, _results = self._call_request(
-            "SelectDevices",
-            GLib.Variant.new_tuple(GLib.Variant("o", self._session_path), opts),
-        )
-        if response != 0:
-            raise RuntimeError(f"RemoteDesktop SelectDevices failed (response={response})")
-
-    def _start(self) -> Optional[str]:
-        """Returns the new restore_token, if the portal issued one."""
-        GLib = self._GLib  # noqa: N806
-
-        handle_token = self._new_token("req")
-        self._pending_handle_token = handle_token
-        opts = GLib.Variant("a{sv}", {"handle_token": GLib.Variant("s", handle_token)})
-
-        response, results = self._call_request(
-            "Start",
-            GLib.Variant.new_tuple(
+        def _build_args(handle_token):
+            opts = GLib.Variant("a{sv}", {"handle_token": GLib.Variant("s", handle_token)})
+            return GLib.Variant.new_tuple(
                 GLib.Variant("o", self._session_path),
                 GLib.Variant("s", ""),  # parent_window
                 opts,
-            ),
-        )
-        if response != 0:
-            raise RuntimeError(f"RemoteDesktop Start failed (response={response})")
+            )
 
-        new_token = None
-        if isinstance(results, dict):
-            v = results.get("restore_token")
-            if v is not None:
-                new_token = v.unpack() if hasattr(v, "unpack") else v
-        return new_token
+        def _on_response(response, results):
+            if response != 0:
+                logger.warning("RemoteDesktop Start failed (response=%s)", response)
+                on_done(False, None)
+                return
+            new_token = None
+            if isinstance(results, dict):
+                v = results.get("restore_token")
+                if v is not None:
+                    new_token = v.unpack() if hasattr(v, "unpack") else v
+            on_done(True, new_token)
 
-    def _ensure_session(self) -> bool:
-        if self._session_path is not None:
-            return True
-        if self._session_failed:
-            return False
+        # Start is the call that shows the "Share your screen" consent
+        # dialog on GNOME -- no fixed deadline. A restore_token in the
+        # response is persisted (see _on_started) regardless of how long
+        # this took to arrive.
+        self._request_async("Start", _build_args, _on_response, interactive=True)
 
-        try:
-            self._connect()
-            self._create_session()
-            self._select_devices(self._load_restore_token())
-            new_token = self._start()
-            if new_token:
-                self._save_restore_token(new_token)
+    def _on_started(self, ok: bool, restore_token: Optional[str]) -> None:
+        if not ok:
+            self._finish_session_setup(False)
+            return
+        if restore_token:
+            self._save_restore_token(restore_token)
+        self._finish_session_setup(True)
+
+    def _finish_session_setup(self, ok: bool) -> None:
+        self._session_pending = False
+        if ok:
             logger.info("RemoteDesktop portal session ready for paste")
-            return True
-        except Exception as e:
-            logger.warning("RemoteDesktop portal session setup failed: %s", e)
+        else:
             self._session_failed = True
             self._session_path = None
-            self._emit_fallback(str(e))
-            return False
+            self._emit_fallback("RemoteDesktop portal session setup failed")
 
     def _notify_keysym(self, keysym: int, state: int) -> None:
         GLib = self._GLib  # noqa: N806
@@ -370,11 +466,19 @@ class PortalPasteSimulator:
                 logger.exception("on_fallback callback raised")
 
     def simulate_paste(self, paste_shortcut: Optional[str] = "ctrl+v") -> bool:
-        """Send the paste shortcut via NotifyKeyboardKeysym.
+        """Send the paste shortcut via NotifyKeyboardKeysym, if the
+        RemoteDesktop session is ready; otherwise fall back to
+        clipboard-only immediately and (idempotently) kick off async
+        session setup for next time.
 
-        Returns True on success, False on any failure (never raises). A
-        session-setup failure is permanent for this instance's lifetime; a
-        NotifyKeyboardKeysym failure only fails this one call.
+        Returns True only if the portal session was already ready and the
+        keysym sequence was sent without error. Returns False -- never
+        blocks, never raises -- whenever the session isn't ready yet
+        (consent still pending, not yet requested, or permanently failed)
+        or a NotifyKeyboardKeysym call fails mid-sequence. The caller
+        (service/daemon.py) already copied the text to the clipboard before
+        reaching this, so a clipboard-only "failure" here still leaves the
+        user with a usable transcript.
 
         If a press/release in the middle of the sequence fails (e.g. Ctrl
         pressed OK, then the V press fails), any modifier keys already
@@ -385,7 +489,14 @@ class PortalPasteSimulator:
         raised): this path only runs when something is already wrong, and
         failing harder here would not help.
         """
-        if not self._ensure_session():
+        if self._session_path is None:
+            if self._session_failed:
+                self._emit_fallback("RemoteDesktop session previously failed")
+            else:
+                self._start_session_setup_if_needed()
+                self._emit_fallback(
+                    "RemoteDesktop session not ready yet (consent pending or not yet requested)"
+                )
             return False
 
         held: List[int] = []
@@ -420,3 +531,40 @@ class PortalPasteSimulator:
             if error is not None:
                 logger.warning("RemoteDesktop NotifyKeyboardKeysym failed: %s", error)
                 self._emit_fallback(str(error))
+
+    def close(self) -> None:
+        """End the RemoteDesktop session, if one is open.
+
+        Marks any in-flight Response callback a no-op (see
+        `_request_async`'s `_finish`) so a setup chain still waiting on a
+        Response when shutdown happens never touches state after close().
+
+        Sessions are closed via ``org.freedesktop.portal.Session.Close()``
+        on the session's own object path (see
+        ``service.hotkey_portal.PortalHotkeys.close`` for the same fix and
+        rationale: there is no ``RemoteDesktop.EndSession`` method, and an
+        unclosed session left dangling is a plausible contributor to a
+        stale-request response on a later daemon run). Best-effort: never
+        raises, since this is expected to run during daemon shutdown.
+        persist_mode=PERSISTENT means the portal remembers this grant across
+        the Close anyway (that's the point of the restore_token), so closing
+        the live session here does not require re-consent next run.
+        """
+        self._closed = True
+        if self._session_path and self._bus is not None:
+            try:
+                self._bus.call_sync(
+                    _PORTAL_BUS,
+                    self._session_path,
+                    _IFACE_SESSION,
+                    "Close",
+                    None,
+                    None,
+                    self._Gio.DBusCallFlags.NONE,
+                    1000,
+                    None,
+                )
+                logger.info("Closed RemoteDesktop session %s", self._session_path)
+            except Exception as e:
+                logger.debug("Session.Close failed (non-fatal, shutting down anyway): %s", e)
+        self._session_path = None

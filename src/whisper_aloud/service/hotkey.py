@@ -194,21 +194,39 @@ class HotkeyManager:
     def _register_portal(self, accel: str, callback: Callable[[], None]) -> bool:
         """Register a hotkey using XDG Desktop Portal GlobalShortcuts.
 
-        Instantiates PortalHotkeys (imported from hotkey_portal), creates a
-        portal session, and binds the "toggle" shortcut to the given accelerator.
-        Wraps everything in try/except so failures fall through cleanly.
+        Instantiates PortalHotkeys (imported from hotkey_portal) and starts
+        its async CreateSession -> ListShortcuts -> BindShortcuts-if-needed
+        flow (see PortalHotkeys.bind()). Wraps construction in try/except so
+        failures fall through cleanly; the flow itself never raises (it
+        reports success/failure via on_bound, logged only -- see that
+        method's docstring for why this call can't return the real outcome
+        synchronously).
+
+        Returns True as soon as the portal backend was selected and the
+        (non-blocking) flow was started -- not once binding actually
+        finished. BindShortcuts can show an interactive consent dialog and
+        now waits indefinitely for the user's response (no nested loop, no
+        thread -- see hotkey_portal.py's module docstring), so this must
+        never block the caller -- HotkeyManager() is constructed from
+        WhisperAloudService.__init__, before the daemon's D-Bus object is
+        published (field bug 1/2).
         """
         try:
             from whisper_aloud.service.hotkey_portal import PortalHotkeys
 
             portal = PortalHotkeys(app_id="org.fede.whisperaloud")
-            portal.create_session()
 
             def _on_activated(shortcut_id: str) -> None:
                 if shortcut_id == "toggle":
                     callback()
 
-            portal.bind_shortcuts_if_needed(
+            def _on_bound(success: bool) -> None:
+                if success:
+                    logger.info("Portal hotkey bound: %s", accel)
+                else:
+                    logger.warning("Portal hotkey binding did not succeed for: %s", accel)
+
+            portal.bind(
                 shortcuts=[
                     {
                         "id": "toggle",
@@ -217,12 +235,13 @@ class HotkeyManager:
                     }
                 ],
                 on_activated=_on_activated,
+                on_bound=_on_bound,
             )
 
             self._portal_hotkeys = portal
             self._callback = callback
             self._registered_accels.append(accel)
-            logger.info("Portal hotkey registered: %s", accel)
+            logger.info("Portal hotkey registration started: %s", accel)
             return True
         except Exception as e:
             logger.error("Failed to register portal hotkey '%s': %s", accel, e)

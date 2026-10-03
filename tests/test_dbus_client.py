@@ -360,3 +360,162 @@ class TestWhisperAloudClient:
         assert client.is_connected is False
         client.disconnect()  # Should not raise
         assert client.is_connected is False
+
+
+class TestIsStartingErrorClassification:
+    """Field bug 1: distinguish "daemon mid-startup" from "truly unavailable"."""
+
+    def _make_client_with_error(self, client_module, message: str):
+        with patch.object(client_module, "SessionBus") as mock_bus_cls:
+            mock_bus = MagicMock()
+            mock_bus_cls.return_value = mock_bus
+            mock_bus.get.side_effect = KeyError(message)
+            return client_module.WhisperAloudClient()
+
+    def test_is_starting_true_for_pydbus_no_interfaces_error(self):
+        client_module = _import_client_module()
+        client = self._make_client_with_error(
+            client_module,
+            "object does not export any interfaces; you might need to pass "
+            "object path as the 2nd argument for get()",
+        )
+        assert client.is_connected is False
+        assert client.is_starting is True
+
+    def test_is_starting_false_for_unrelated_error(self):
+        client_module = _import_client_module()
+        client = self._make_client_with_error(
+            client_module, "no such object; you might need to pass object path"
+        )
+        assert client.is_connected is False
+        assert client.is_starting is False
+
+    def test_is_starting_false_for_generic_connection_error(self):
+        client_module = _import_client_module()
+        client = self._make_client_with_error(client_module, "Connection refused")
+        assert client.is_connected is False
+        assert client.is_starting is False
+
+    def test_is_starting_resets_to_false_on_successful_connect(self):
+        client_module = _import_client_module()
+        client = self._make_client_with_error(
+            client_module, "object does not export any interfaces"
+        )
+        assert client.is_starting is True
+
+        with patch.object(client_module, "SessionBus") as mock_bus_cls:
+            mock_bus = MagicMock()
+            mock_bus_cls.return_value = mock_bus
+            mock_bus.get.return_value = MagicMock()
+            assert client.connect() is True
+
+        assert client.is_starting is False
+
+    def test_classify_helper_directly(self):
+        client_module = _import_client_module()
+        assert client_module._is_starting_error(
+            KeyError("object does not export any interfaces; you might need to pass")
+        )
+        assert not client_module._is_starting_error(KeyError("no such object"))
+        assert not client_module._is_starting_error(Exception("timeout"))
+
+
+class TestConnectWithActivationWait:
+    """Field bug 1: CLI-style blocking wait while the daemon is starting."""
+
+    def _client_that_is_starting(self, client_module):
+        with patch.object(client_module, "SessionBus") as mock_bus_cls:
+            mock_bus = MagicMock()
+            mock_bus_cls.return_value = mock_bus
+            mock_bus.get.side_effect = KeyError("object does not export any interfaces")
+            client = client_module.WhisperAloudClient()
+        assert client.is_starting is True
+        return client, mock_bus_cls
+
+    def test_returns_true_immediately_if_already_connected(self):
+        client_module = _import_client_module()
+        with patch.object(client_module, "SessionBus") as mock_bus_cls:
+            mock_bus = MagicMock()
+            mock_bus_cls.return_value = mock_bus
+            mock_bus.get.return_value = MagicMock()
+            client = client_module.WhisperAloudClient()
+
+        sleeps = []
+        result = client.connect_with_activation_wait(sleep=sleeps.append)
+        assert result is True
+        assert sleeps == []
+
+    def test_returns_false_immediately_when_not_starting(self):
+        client_module = _import_client_module()
+        with patch.object(client_module, "SessionBus") as mock_bus_cls:
+            mock_bus = MagicMock()
+            mock_bus_cls.return_value = mock_bus
+            mock_bus.get.side_effect = Exception("Connection refused")
+            client = client_module.WhisperAloudClient()
+
+        sleeps = []
+        result = client.connect_with_activation_wait(
+            max_wait_seconds=30.0, sleep=sleeps.append
+        )
+        assert result is False
+        assert sleeps == []  # never worth retrying a non-"starting" failure
+
+    def test_retries_while_starting_then_succeeds(self):
+        client_module = _import_client_module()
+        client, mock_bus_cls = self._client_that_is_starting(client_module)
+
+        attempts = {"n": 0}
+
+        def _fake_get(name):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise KeyError("object does not export any interfaces")
+            return MagicMock()
+
+        with patch.object(client_module, "SessionBus") as mock_bus_cls2:
+            mock_bus2 = MagicMock()
+            mock_bus_cls2.return_value = mock_bus2
+            mock_bus2.get.side_effect = _fake_get
+
+            fake_time = {"t": 0.0}
+            sleeps = []
+
+            def _fake_sleep(seconds):
+                sleeps.append(seconds)
+                fake_time["t"] += seconds
+
+            result = client.connect_with_activation_wait(
+                max_wait_seconds=10.0,
+                poll_interval_seconds=1.0,
+                sleep=_fake_sleep,
+                clock=lambda: fake_time["t"],
+            )
+
+        assert result is True
+        assert client.is_connected is True
+        assert len(sleeps) == 3  # 2 failed retries, 3rd succeeds
+
+    def test_gives_up_after_max_wait_seconds_while_still_starting(self):
+        client_module = _import_client_module()
+        client, _ = self._client_that_is_starting(client_module)
+
+        with patch.object(client_module, "SessionBus") as mock_bus_cls2:
+            mock_bus2 = MagicMock()
+            mock_bus_cls2.return_value = mock_bus2
+            mock_bus2.get.side_effect = KeyError("object does not export any interfaces")
+
+            fake_time = {"t": 0.0}
+
+            def _fake_sleep(seconds):
+                fake_time["t"] += seconds
+
+            result = client.connect_with_activation_wait(
+                max_wait_seconds=5.0,
+                poll_interval_seconds=1.0,
+                sleep=_fake_sleep,
+                clock=lambda: fake_time["t"],
+            )
+
+        assert result is False
+        assert client.is_connected is False
+        assert fake_time["t"] >= 5.0

@@ -138,6 +138,31 @@ Filters compose (`--since`/`--until`, `--favorites`, `--query`, `--limit`,
 capped at 5000). Full semantics:
 [`docs/dbus-api.md#exporthistory`](docs/dbus-api.md#exporthistory).
 
+## First run
+
+The first time the daemon starts, GNOME shows two one-time permission
+dialogs:
+
+- **"Add keyboard shortcuts"** — lets you pick the toggle-recording
+  shortcut (default `<Super><Alt>r`). Pick a key combo and accept; WhisperAloud
+  remembers it from then on.
+- **Remote Desktop ("Share your screen")** — only in the Flatpak build, and
+  only the first time WhisperAloud tries to auto-paste into another window.
+  Choose **Allow Remote Interaction**, check **Remember This Selection**,
+  and select **Share**. If you decline or close the dialog, WhisperAloud
+  still copies each transcript to the clipboard — you'll just need to paste
+  it yourself (<kbd>Ctrl</kbd>+<kbd>V</kbd>) instead of it appearing
+  automatically.
+
+Both choices are remembered by GNOME, not asked again on every start. To
+change or revoke them later: **Settings → Keyboard → View and Customize
+Shortcuts** for the hotkey, and **Settings → Apps → WhisperAloud →
+Permissions** for Remote Desktop access (Flatpak only). From a terminal,
+`flatpak permission-reset org.fede.whisperaloud` clears every permission
+WhisperAloud was granted, so both dialogs reappear next time. See
+[`docs/flatpak.md`](docs/flatpak.md#first-run) for more detail on the
+Flatpak build specifically.
+
 ## Privacy and offline operation
 
 WhisperAloud makes no network calls during recording or transcription.

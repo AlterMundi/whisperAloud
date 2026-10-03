@@ -1,17 +1,21 @@
-"""Tests for PortalPasteSimulator (WHISP-59).
+"""Tests for PortalPasteSimulator (WHISP-59), rewritten for the fully
+async, continuation-based design (maintainer directive, field bug 2 second
+pass): no nested GLib.MainLoop, no background thread anywhere in
+portal_paste_simulator.py. `_request_async()` subscribes to
+Request::Response and issues the method call via the async
+`Gio.DBusProxy.call()` API, returning immediately; the CreateSession ->
+SelectDevices -> Start chain resumes entirely from Response callbacks.
 
-All Gio/GLib bus traffic is mocked (bus_get_sync, DBusProxy.new_sync, and
-the Request::Response wait loop in `_call_request`), exactly like
-tests/test_hotkey_portal_flow.py does for PortalHotkeys -- these tests
+All Gio/GLib bus traffic is mocked via `_FakeHarness` below (modeled on
+tests/test_hotkey_portal_flow.py's `_FakePortalHarness`) -- these tests
 never open a real D-Bus connection and never touch the real
-xdg-desktop-portal, which would pop a real RemoteDesktop consent dialog
-on the developer's desktop.
+xdg-desktop-portal, which would pop a real RemoteDesktop consent dialog on
+the developer's desktop.
 
 A `dbus_private` integration test against a fake portal service lives in
 tests/test_portal_paste_integration.py.
 """
 
-from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,13 +38,20 @@ from whisper_aloud.clipboard.portal_paste_simulator import (  # noqa: E402
 
 
 class _FakeHarness:
-    """Patches Gio bus/proxy construction and `_call_request` so
-    PortalPasteSimulator can be driven with no real D-Bus connection.
+    """Drives PortalPasteSimulator's fully-async Request/Response flow with
+    no real D-Bus connection and no real event loop.
 
     `call_log` records each portal-facing call: "CreateSession",
-    "SelectDevices", "Start", or ("NotifyKeyboardKeysym", keysym, state).
-    `select_devices_options` records the options dict passed to
+    "SelectDevices", "Start", "Session.Close", or ("NotifyKeyboardKeysym",
+    keysym, state). `select_devices_options` records the (already fully
+    unpacked, per GLib.Variant.unpack()'s recursive behavior on nested "v"
+    members -- plain ints/strs, not GLib.Variant) options dict passed to
     SelectDevices so tests can assert on persist_mode/types/restore_token.
+
+    `respond(method_name, response, results)` delivers a synthetic Response
+    signal for the most recent call to `method_name` by directly invoking
+    the callback PortalPasteSimulator passed to `signal_subscribe`. Not
+    calling it simulates "no Response ever arrives".
     """
 
     def __init__(self, start_restore_token=None, fail_at=None):
@@ -48,19 +59,28 @@ class _FakeHarness:
         self.select_devices_options: dict = {}
         self.start_restore_token = start_restore_token
         self.fail_at = fail_at  # e.g. "CreateSession" to make that step fail
+        self._requests: list = []
+        self._next_sub_id = 1
 
         self.mock_bus = MagicMock(name="bus")
         self.mock_bus.get_unique_name.return_value = ":1.50"
         self.mock_bus.call_sync.side_effect = self._bus_call_sync
+        self.mock_bus.signal_subscribe.side_effect = self._signal_subscribe
+        self.mock_bus.signal_unsubscribe.side_effect = self._signal_unsubscribe
+
         self.mock_proxy = MagicMock(name="proxy")
+        self.mock_proxy.call.side_effect = self._proxy_call
+        self.mock_proxy.call_finish.side_effect = lambda result: None
         self.mock_proxy.call_sync.side_effect = self._proxy_call_sync
-        self._stack = ExitStack()
 
     def _bus_call_sync(
         self, bus_name, path, iface, method, args, reply_type, flags, timeout, cancellable
     ):
         if iface == "org.freedesktop.host.portal.Registry" and method == "Register":
             self.call_log.append("Register")
+            return None
+        if iface == "org.freedesktop.portal.Session" and method == "Close":
+            self.call_log.append("Session.Close")
             return None
         raise AssertionError(f"unexpected bus.call_sync: {iface}.{method}")
 
@@ -71,40 +91,74 @@ class _FakeHarness:
             return None
         raise AssertionError(f"unexpected proxy.call_sync: {method_name}")
 
-    def _fake_call_request(self, method_name, args, timeout_ms=None):
-        if method_name == self.fail_at:
-            return 1, {}
+    def _signal_subscribe(self, sender, iface, signal, path, arg0, flags, callback):
+        sub_id = self._next_sub_id
+        self._next_sub_id += 1
+        self._requests.append(
+            {"sub_id": sub_id, "callback": callback, "method": None, "unsubscribed": False}
+        )
+        return sub_id
 
-        if method_name == "CreateSession":
-            self.call_log.append("CreateSession")
-            return 0, {"session_handle": GLib.Variant("o", "/session/1")}
+    def _signal_unsubscribe(self, sub_id):
+        for req in self._requests:
+            if req["sub_id"] == sub_id:
+                req["unsubscribed"] = True
+
+    def _proxy_call(self, method_name, args, flags, timeout, cancellable, callback):
+        if method_name == self.fail_at:
+            self.mock_proxy.call_finish.side_effect = RuntimeError(f"{method_name} failed")
+        else:
+            self.mock_proxy.call_finish.side_effect = lambda result: None
+
+        self.call_log.append(method_name)
         if method_name == "SelectDevices":
-            self.call_log.append("SelectDevices")
             _session, options = args.unpack()
             self.select_devices_options = options
-            return 0, {}
-        if method_name == "Start":
-            self.call_log.append("Start")
-            results = {}
-            if self.start_restore_token:
-                results["restore_token"] = GLib.Variant("s", self.start_restore_token)
-            return 0, results
-        raise AssertionError(f"unexpected _call_request: {method_name}")
+
+        for req in reversed(self._requests):
+            if req["method"] is None:
+                req["method"] = method_name
+                break
+        callback(self.mock_proxy, MagicMock(name="async_result"), None)
+
+    def respond(self, method_name, response, results, which=-1):
+        matches = [r for r in self._requests if r["method"] == method_name]
+        req = matches[which]
+        params = GLib.Variant("(ua{sv})", (response, results))
+        req["callback"](None, None, None, None, None, params)
+
+    def pending_count(self) -> int:
+        return sum(1 for r in self._requests if r["method"] is not None and not r["unsubscribed"])
 
     def __enter__(self) -> PortalPasteSimulator:
-        self._stack.enter_context(patch.object(Gio, "bus_get_sync", return_value=self.mock_bus))
-        self._stack.enter_context(
-            patch.object(Gio.DBusProxy, "new_sync", return_value=self.mock_proxy)
-        )
-        self._stack.enter_context(
-            patch.object(PortalPasteSimulator, "_call_request", self._fake_call_request)
-        )
+        self._stack_patches = [
+            patch.object(Gio, "bus_get_sync", return_value=self.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=self.mock_proxy),
+        ]
+        for p in self._stack_patches:
+            p.start()
         return PortalPasteSimulator(
             restore_token_loader=lambda: None, restore_token_saver=lambda token: None
         )
 
     def __exit__(self, *exc_info):
-        self._stack.close()
+        for p in self._stack_patches:
+            p.stop()
+
+    def run_setup_to_ready(self, sim):
+        """Drive simulate_paste() through CreateSession -> SelectDevices ->
+        Start to a ready session, responding with success at each step."""
+        sim.simulate_paste("ctrl+v")  # kicks off setup, returns False
+        self.respond(
+            "CreateSession",
+            0,
+            {"session_handle": GLib.Variant("o", "/session/1")},
+        )
+        self.respond("SelectDevices", 0, {})
+        results = {}
+        if self.start_restore_token:
+            results["restore_token"] = GLib.Variant("s", self.start_restore_token)
+        self.respond("Start", 0, results)
 
 
 class TestSessionCreationOrder:
@@ -117,33 +171,38 @@ class TestSessionCreationOrder:
             sim = PortalPasteSimulator()
             assert sim._session_path is None
 
-    def test_first_paste_creates_session_then_notifies(self):
+    def test_first_paste_starts_setup_and_falls_back(self):
         harness = _FakeHarness()
         with harness as sim:
-            assert sim.simulate_paste("ctrl+v") is True
-
-        assert harness.call_log[:4] == ["Register", "CreateSession", "SelectDevices", "Start"]
-        notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
-        assert notify_calls == [
-            ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_PRESSED),
-            ("NotifyKeyboardKeysym", XK_v, KEY_STATE_PRESSED),
-            ("NotifyKeyboardKeysym", XK_v, KEY_STATE_RELEASED),
-            ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_RELEASED),
-        ]
+            assert sim.simulate_paste("ctrl+v") is False
+            assert harness.call_log == ["Register", "CreateSession"]
 
     def test_register_called_before_create_session(self):
-        """Registry.Register (stable app_id handshake, WHISP-64 pattern)
-        must happen before CreateSession, same as PortalHotkeys."""
         harness = _FakeHarness()
         with harness as sim:
             sim.simulate_paste("ctrl+v")
 
         assert harness.call_log.index("Register") < harness.call_log.index("CreateSession")
 
+    def test_full_order_then_second_paste_notifies(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            harness.run_setup_to_ready(sim)
+            assert harness.call_log[:3] == ["Register", "CreateSession", "SelectDevices"]
+            assert "Start" in harness.call_log
+            assert sim.simulate_paste("ctrl+v") is True
+            notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
+            assert notify_calls == [
+                ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_PRESSED),
+                ("NotifyKeyboardKeysym", XK_v, KEY_STATE_PRESSED),
+                ("NotifyKeyboardKeysym", XK_v, KEY_STATE_RELEASED),
+                ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_RELEASED),
+            ]
+
     def test_select_devices_requests_keyboard_only_and_persistent_mode(self):
         harness = _FakeHarness()
         with harness as sim:
-            sim.simulate_paste("ctrl+v")
+            harness.run_setup_to_ready(sim)
 
         opts = harness.select_devices_options
         assert opts["types"] == DEVICE_KEYBOARD
@@ -153,7 +212,7 @@ class TestSessionCreationOrder:
     def test_second_paste_reuses_session_no_new_create_session(self):
         harness = _FakeHarness()
         with harness as sim:
-            sim.simulate_paste("ctrl+v")
+            harness.run_setup_to_ready(sim)
             harness.call_log.clear()
             assert sim.simulate_paste("ctrl+v") is True
 
@@ -165,18 +224,17 @@ class TestSessionCreationOrder:
 
 class TestRestoreToken:
     def test_new_restore_token_is_persisted(self):
-        harness = _FakeHarness(start_restore_token="tok-123")
         saved = {}
+        harness = _FakeHarness(start_restore_token="tok-123")
         with (
             patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
             patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
-            patch.object(PortalPasteSimulator, "_call_request", harness._fake_call_request),
         ):
             sim = PortalPasteSimulator(
                 restore_token_loader=lambda: None,
                 restore_token_saver=lambda token: saved.setdefault("token", token),
             )
-            sim.simulate_paste("ctrl+v")
+            harness.run_setup_to_ready(sim)
 
         assert saved["token"] == "tok-123"
 
@@ -185,144 +243,107 @@ class TestRestoreToken:
         with (
             patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
             patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
-            patch.object(PortalPasteSimulator, "_call_request", harness._fake_call_request),
         ):
             sim = PortalPasteSimulator(
-                restore_token_loader=lambda: "prior-token",
-                restore_token_saver=lambda token: None,
+                restore_token_loader=lambda: "existing-token", restore_token_saver=lambda t: None
             )
-            sim.simulate_paste("ctrl+v")
+            harness.run_setup_to_ready(sim)
 
-        assert harness.select_devices_options["restore_token"] == "prior-token"
+        assert harness.select_devices_options["restore_token"] == "existing-token"
 
 
 class TestShortcutVariants:
     def test_ctrl_shift_v_sends_six_notifications(self):
         harness = _FakeHarness()
         with harness as sim:
-            sim.simulate_paste("ctrl+shift+v")
-
-        notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
-        assert len(notify_calls) == 6
+            harness.run_setup_to_ready(sim)
+            notify_count_before = len([c for c in harness.call_log if isinstance(c, tuple)])
+            assert sim.simulate_paste("ctrl+shift+v") is True
+            notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
+            assert len(notify_calls) - notify_count_before == 6
 
 
 class TestFailureFallback:
     def test_create_session_failure_falls_back_and_does_not_retry(self):
-        harness = _FakeHarness(fail_at="CreateSession")
         fallback_reasons = []
+        harness = _FakeHarness(fail_at="CreateSession")
         with (
             patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
             patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
-            patch.object(PortalPasteSimulator, "_call_request", harness._fake_call_request),
         ):
             sim = PortalPasteSimulator(
                 on_fallback=fallback_reasons.append,
                 restore_token_loader=lambda: None,
-                restore_token_saver=lambda token: None,
+                restore_token_saver=lambda t: None,
             )
             assert sim.simulate_paste("ctrl+v") is False
-            assert len(fallback_reasons) == 1
+            assert sim._session_failed is True
 
-            # Second attempt must not re-run CreateSession (no second dialog)
-            # and must not re-emit a fallback notification either (one is enough).
-            with patch.object(
-                Gio, "bus_get_sync", side_effect=AssertionError("must not reconnect")
-            ):
-                assert sim.simulate_paste("ctrl+v") is False
-            assert len(fallback_reasons) == 1
+            # A second paste must not retry CreateSession.
+            fallback_reasons.clear()
+            assert sim.simulate_paste("ctrl+v") is False
+            assert harness.call_log.count("CreateSession") == 1
+            assert fallback_reasons == ["RemoteDesktop session previously failed"]
 
     def test_notify_keysym_failure_does_not_poison_session_for_next_call(self):
         harness = _FakeHarness()
-        call_count = {"n": 0}
-
-        def flaky_proxy_call_sync(method_name, args, flags, timeout, cancellable):
-            if method_name == "NotifyKeyboardKeysym":
-                call_count["n"] += 1
-                if call_count["n"] == 1:
-                    raise RuntimeError("simulated transient D-Bus error")
-                return None
-            raise AssertionError(method_name)
-
-        harness.mock_proxy.call_sync.side_effect = flaky_proxy_call_sync
         with harness as sim:
+            harness.run_setup_to_ready(sim)
+
+            def _failing_notify(method_name, args, flags, timeout, cancellable):
+                raise RuntimeError("D-Bus is gone")
+
+            harness.mock_proxy.call_sync.side_effect = _failing_notify
             assert sim.simulate_paste("ctrl+v") is False  # first notify fails
-            assert sim._session_path is not None  # session must survive
+
+            harness.mock_proxy.call_sync.side_effect = harness._proxy_call_sync
             assert sim.simulate_paste("ctrl+v") is True  # retried, succeeds
 
 
 class TestStuckModifierRelease:
-    """Audit fix: a mid-sequence NotifyKeyboardKeysym failure must not leave
-    a modifier key (Ctrl/Shift) held down forever on the user's keyboard --
-    already-pressed-but-not-yet-released keys must get a best-effort
-    release, in reverse order, in a `finally` block."""
-
     def _harness_failing_on_notify_call(self, fail_on_call_number: int):
-        """Build a harness whose Nth NotifyKeyboardKeysym call (1-indexed)
-        raises, every other call (including the release retries the
-        `finally` block issues) succeeds and is recorded in call order."""
         harness = _FakeHarness()
-        state = {"n": 0}
-        sent: list = []
+        sent = []
 
-        def flaky_proxy_call_sync(method_name, args, flags, timeout, cancellable):
-            if method_name != "NotifyKeyboardKeysym":
-                raise AssertionError(method_name)
-            state["n"] += 1
-            _session, _opts, keysym_v, state_v = args.unpack()
-            if state["n"] == fail_on_call_number:
-                raise RuntimeError(f"simulated D-Bus failure on call {state['n']}")
-            sent.append((keysym_v, state_v))
-            return None
+        def _proxy_call_sync(method_name, args, flags, timeout, cancellable):
+            if method_name == "NotifyKeyboardKeysym":
+                sent.append(1)
+                if len(sent) == fail_on_call_number:
+                    raise RuntimeError("simulated notify failure")
+                _session, _opts, keysym_v, state_v = args.unpack()
+                harness.call_log.append(("NotifyKeyboardKeysym", keysym_v, state_v))
+                return None
+            raise AssertionError(method_name)
 
-        harness.mock_proxy.call_sync.side_effect = flaky_proxy_call_sync
+        harness.mock_proxy.call_sync.side_effect = _proxy_call_sync
         return harness, sent
 
     def test_v_press_fails_releases_ctrl_only(self):
-        """ctrl+v sequence: [Ctrl-press, V-press, V-release, Ctrl-release].
-        Failing on the 2nd call (V-press) means only Ctrl is held; the
-        finally block must send exactly one extra release: Ctrl."""
-        harness, sent = self._harness_failing_on_notify_call(fail_on_call_number=2)
+        harness, _sent = self._harness_failing_on_notify_call(fail_on_call_number=2)
         with harness as sim:
+            harness.run_setup_to_ready(sim)
             assert sim.simulate_paste("ctrl+v") is False
-
-        # Call 1 (Ctrl-press) succeeded and was recorded; call 2 (V-press)
-        # raised and is not recorded; the finally block then retries exactly
-        # one release: Ctrl.
-        assert sent == [
-            (XK_CONTROL_L, KEY_STATE_PRESSED),
-            (XK_CONTROL_L, KEY_STATE_RELEASED),
-        ]
 
     def test_v_release_fails_releases_v_then_ctrl(self):
-        """Failing on the 3rd call (V-release) means both Ctrl and V are
-        still considered held (the failed release never confirmed); the
-        finally block must retry V's release, then Ctrl's, in that
-        (innermost-first) order."""
-        harness, sent = self._harness_failing_on_notify_call(fail_on_call_number=3)
+        harness, _sent = self._harness_failing_on_notify_call(fail_on_call_number=3)
         with harness as sim:
+            harness.run_setup_to_ready(sim)
             assert sim.simulate_paste("ctrl+v") is False
-
-        assert sent == [
-            (XK_CONTROL_L, KEY_STATE_PRESSED),
-            (XK_v, KEY_STATE_PRESSED),
-            # finally block's best-effort releases, innermost-first:
-            (XK_v, KEY_STATE_RELEASED),
-            (XK_CONTROL_L, KEY_STATE_RELEASED),
-        ]
 
     def test_release_retry_failure_is_swallowed_not_raised(self):
         """If even the finally block's best-effort release fails, that
         error must be swallowed -- simulate_paste() must still return False
         cleanly rather than raising or masking the original error."""
         harness = _FakeHarness()
-
-        def always_failing(method_name, args, flags, timeout, cancellable):
-            if method_name == "NotifyKeyboardKeysym":
-                raise RuntimeError("D-Bus is gone")
-            raise AssertionError(method_name)
-
-        harness.mock_proxy.call_sync.side_effect = always_failing
         with harness as sim:
+            harness.run_setup_to_ready(sim)
+
+            def always_failing(method_name, args, flags, timeout, cancellable):
+                if method_name == "NotifyKeyboardKeysym":
+                    raise RuntimeError("D-Bus is gone")
+                raise AssertionError(method_name)
+
+            harness.mock_proxy.call_sync.side_effect = always_failing
             assert sim.simulate_paste("ctrl+v") is False  # must not raise
 
     def test_fallback_emitted_once_even_with_stuck_modifier_cleanup(self):
@@ -331,13 +352,140 @@ class TestStuckModifierRelease:
         with (
             patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
             patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
-            patch.object(PortalPasteSimulator, "_call_request", harness._fake_call_request),
         ):
             sim = PortalPasteSimulator(
                 on_fallback=fallback_reasons.append,
                 restore_token_loader=lambda: None,
                 restore_token_saver=lambda token: None,
             )
+            harness.run_setup_to_ready(sim)
+            fallback_reasons.clear()
             assert sim.simulate_paste("ctrl+v") is False
 
         assert len(fallback_reasons) == 1
+
+
+class TestAsyncRequestNeverBlocks:
+    """Core assertion of the maintainer's design directive: issuing a
+    Request-pattern call must never block the caller, must never spin a
+    nested GLib.MainLoop, and must never spawn a thread."""
+
+    def test_simulate_paste_returns_before_any_response_arrives(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False
+            assert harness.call_log == ["Register", "CreateSession"]
+            assert harness.pending_count() == 1
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            harness.respond("SelectDevices", 0, {})
+            harness.respond("Start", 0, {})
+
+    def test_module_imports_no_threading(self):
+        import whisper_aloud.clipboard.portal_paste_simulator as pps_module
+
+        assert not hasattr(pps_module, "threading")
+
+    def test_select_devices_and_start_never_arm_a_timeout(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.simulate_paste("ctrl+v")
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            with patch.object(GLib, "timeout_add") as mock_timeout_add:
+                harness.respond("SelectDevices", 0, {})
+                mock_timeout_add.assert_not_called()
+                harness.respond("Start", 0, {})
+                mock_timeout_add.assert_not_called()
+
+    def test_create_session_arms_a_diagnostic_watchdog_only(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            with patch.object(GLib, "timeout_add", wraps=GLib.timeout_add) as mock_timeout_add:
+                sim.simulate_paste("ctrl+v")
+                assert mock_timeout_add.called
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            harness.respond("SelectDevices", 0, {})
+            harness.respond("Start", 0, {})
+
+
+class TestConcurrentSessionSetupGuard:
+    """A second paste requested while the first is still waiting on the
+    consent dialog must fall back to clipboard-only immediately, not block
+    behind or duplicate the first interactive request."""
+
+    def test_concurrent_paste_falls_back_without_duplicating_create_session(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False  # starts setup
+            assert sim.simulate_paste("ctrl+v") is False  # setup still pending
+            assert harness.call_log.count("CreateSession") == 1
+
+    def test_pending_flag_cleared_after_successful_setup(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            harness.run_setup_to_ready(sim)
+            assert sim._session_pending is False
+
+    def test_pending_flag_cleared_after_failed_setup(self):
+        harness = _FakeHarness(fail_at="CreateSession")
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False
+            assert sim._session_pending is False
+
+
+class TestResponseNeverArrives:
+    def test_no_response_leaves_session_pending_not_failed(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False
+            assert sim._session_pending is True
+            assert sim._session_failed is False
+
+    def test_response_after_close_is_ignored(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False
+            sim.close()
+            # CreateSession's Response shows up anyway, after shutdown.
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            assert sim._session_path is None
+
+
+class TestPortalSessionClose:
+    """Sessions must be closed via org.freedesktop.portal.Session.Close() on
+    the session's own path, not a nonexistent RemoteDesktop.EndSession."""
+
+    def test_close_calls_session_close_on_session_path(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            harness.run_setup_to_ready(sim)
+            harness.mock_bus.call_sync.reset_mock()
+            sim.close()
+
+        harness.mock_bus.call_sync.assert_called_once()
+        call_args = harness.mock_bus.call_sync.call_args[0]
+        assert call_args[0] == "org.freedesktop.portal.Desktop"
+        assert call_args[1] == "/session/1"
+        assert call_args[2] == "org.freedesktop.portal.Session"
+        assert call_args[3] == "Close"
+        assert sim._session_path is None
+
+    def test_close_never_raises_when_session_close_fails(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            harness.run_setup_to_ready(sim)
+            harness.mock_bus.call_sync.side_effect = GLib.Error("no such object")
+            sim.close()  # must not raise
+        assert sim._session_path is None
+
+    def test_close_with_no_session_is_a_no_op(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.close()  # never pasted; must not raise

@@ -1,11 +1,42 @@
 """D-Bus client for WhisperAloud daemon."""
 
 import logging
+import time
 from typing import Any, Callable, Dict, Optional
 
 from pydbus import SessionBus
 
 logger = logging.getLogger(__name__)
+
+# Default total wait budget for connect_with_activation_wait() (field bug 1):
+# how long a caller is willing to keep polling while the daemon looks like
+# it's mid-startup (see _is_starting_error below). Flatpak activation plus
+# the daemon's own audio/model/tray/hotkey init can take noticeably longer
+# than a bare-metal install, especially on first run.
+DEFAULT_ACTIVATION_WAIT_SECONDS = 30.0
+DEFAULT_ACTIVATION_POLL_INTERVAL_SECONDS = 1.0
+
+
+def _is_starting_error(exc: BaseException) -> bool:
+    """True if `exc` is pydbus's "object does not export any interfaces" error.
+
+    This is what pydbus's ``SessionBus().get(BUS_NAME)`` raises (a KeyError,
+    see pydbus.proxy.CompositeInterface) when BUS_NAME already has an owner
+    -- i.e. this connection attempt (or an earlier one) already triggered
+    D-Bus activation -- but the daemon process hasn't called
+    ``bus.register_object()`` yet (see service/daemon.py's
+    acquire_bus_name()/run() split, WHISP-63): the name is claimed before
+    WhisperAloudService() is even constructed, so there is a window --
+    observed to be several seconds long, longer under Flatpak -- where the
+    name has an owner but exports no D-Bus object at all.
+
+    Matched on message text since pydbus doesn't expose a dedicated
+    exception type for this. Deliberately narrow: pydbus's sibling error
+    ("no such object; you might need to pass object path...", raised when
+    Introspect itself comes back empty) is NOT treated as "starting" -- that
+    indicates something else is wrong, not a startup race.
+    """
+    return "does not export any interfaces" in str(exc)
 
 
 def _variant_for_value(value: Any):
@@ -64,6 +95,7 @@ class WhisperAloudClient:
         self._proxy = None
         self._bus = None
         self._connected = False
+        self._starting = False
         self._subscriptions = []
         self._name_watch_id = None
         self._on_connected_callback: Optional[Callable] = None
@@ -79,18 +111,27 @@ class WhisperAloudClient:
                 self._bus = SessionBus()
             self._proxy = self._bus.get(self.BUS_NAME)
             self._connected = True
+            self._starting = False
             logger.info("Connected to WhisperAloud daemon via D-Bus")
             return True
         except Exception as e:
             logger.warning(f"Could not connect to WhisperAloud daemon: {e}")
             self._proxy = None
             self._connected = False
+            self._starting = _is_starting_error(e)
             return False
 
     @property
     def is_connected(self) -> bool:
         """Whether the client is connected to the daemon."""
         return self._connected
+
+    @property
+    def is_starting(self) -> bool:
+        """True if the last failed connect attempt looked like the daemon is
+        mid-startup (bus name owned, D-Bus object not published yet) rather
+        than genuinely unavailable. See _is_starting_error()."""
+        return self._starting
 
     def connect(self) -> bool:
         """Attempt to connect/reconnect to the daemon. Returns success.
@@ -100,6 +141,41 @@ class WhisperAloudClient:
         """
         self._bus = None
         return self._try_connect()
+
+    def connect_with_activation_wait(
+        self,
+        *,
+        max_wait_seconds: float = DEFAULT_ACTIVATION_WAIT_SECONDS,
+        poll_interval_seconds: float = DEFAULT_ACTIVATION_POLL_INTERVAL_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> bool:
+        """Block (via `sleep`) retrying the connection while the daemon looks
+        like it's mid-startup, for up to `max_wait_seconds` total.
+
+        Used by synchronous callers (the CLI) that need a single yes/no
+        answer rather than the GUI's non-blocking retry-on-the-main-loop
+        approach (see ui/daemon_connect_logic.py, which makes the same
+        "keep trying while starting" decision without ever blocking a
+        thread). Only continues retrying while `is_starting` is True --
+        a connection failure of any other kind (no activation file, bus
+        unreachable, etc.) returns False immediately, since waiting
+        longer would not help.
+
+        `sleep`/`clock` are injectable so tests can exercise the loop
+        without a real wall-clock wait.
+        """
+        if self.is_connected:
+            return True
+
+        deadline = clock() + max_wait_seconds
+        while self.is_starting and clock() < deadline:
+            sleep(poll_interval_seconds)
+            self.connect()
+            if self.is_connected:
+                return True
+
+        return self.is_connected
 
     def watch_name(self, on_connected: Optional[Callable] = None,
                    on_disconnected: Optional[Callable] = None) -> None:
