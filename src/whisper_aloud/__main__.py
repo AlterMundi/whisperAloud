@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import WhisperAloudConfig
+from .config import WhisperAloudConfig, user_config_dir
 from .exceptions import ConfigurationError, WhisperAloudError
 
 # Kept for test patch compatibility; resolved lazily in handle_file_transcription.
@@ -477,7 +477,7 @@ def _config_validate(args) -> int:
     instead of being silently swallowed and reported as "valid" while
     actually falling back to in-memory defaults. Never writes the file.
     """
-    config_path = Path.home() / ".config" / "whisper_aloud" / "config.json"
+    config_path = user_config_dir() / "config.json"
     try:
         config = WhisperAloudConfig.load(strict=True)
     except ConfigurationError as e:
@@ -503,7 +503,7 @@ def _config_show(args) -> int:
     warns on stderr that it is doing so instead of silently presenting
     defaults as if they were read from the file. Never writes the file.
     """
-    config_path = Path.home() / ".config" / "whisper_aloud" / "config.json"
+    config_path = user_config_dir() / "config.json"
     try:
         config = WhisperAloudConfig.load(strict=True)
     except ConfigurationError as e:

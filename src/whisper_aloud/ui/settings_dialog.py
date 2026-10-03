@@ -15,6 +15,7 @@ from ..config import (
     NotificationConfig,
     PersistenceConfig,
     WhisperAloudConfig,
+    user_data_dir,
 )
 from ..stt import catalog
 from . import dialogs
@@ -1223,7 +1224,7 @@ class SettingsDialog(Gtk.Window):
             self.db_path_entry.set_text(str(self._config.persistence.db_path))
         else:
             self.db_path_entry.set_text(
-                str(Path.home() / ".local/share/whisper_aloud/history.db")
+                str(user_data_dir() / "history.db")
             )
         self.db_path_entry.set_hexpand(True)
         db_path_box.append(db_path_label)
@@ -1240,7 +1241,7 @@ class SettingsDialog(Gtk.Window):
             self.audio_archive_entry.set_text(str(self._config.persistence.audio_archive_path))
         else:
             self.audio_archive_entry.set_text(
-                str(Path.home() / ".local/share/whisper_aloud/audio")
+                str(user_data_dir() / "audio")
             )
         self.audio_archive_entry.set_hexpand(True)
         audio_path_box.append(audio_path_label)
