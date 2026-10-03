@@ -421,13 +421,19 @@ that. Returns `false` (and starts nothing) when:
   call `CancelDownload()` first if you want to switch targets;
 - `(engine, name)` isn't a known catalog entry — emits
   `Error("download_invalid_model", <message>)`;
-- the entry has `needs_review=True` (a license pending human legal review,
-  e.g. WHISP-56's `nemotron-streaming`) and `accept_license` is not `true` —
-  emits `Error("download_license_review_required", <message>)`. This mirrors
-  the Settings UI's existing convention of hiding such entries from the
-  default model picker, enforced here too so a scripted/CLI caller can't
-  silently fetch a model nobody has reviewed. Passing `accept_license=true`
-  is the caller's explicit acknowledgement of that model's license.
+- the entry has `needs_review=True` (a license pending human legal review --
+  no catalog entry is in this state as of WHISP-86, which completed
+  `nemotron-streaming`'s OpenMDW-1.1 review; see `docs/THIRD_PARTY_MODELS.md`)
+  and `accept_license` is not `true` — emits
+  `Error("download_license_review_required", <message>)`. This mirrors the
+  Settings UI's existing convention of hiding such entries from the default
+  model picker, enforced here too so a scripted/CLI caller can't silently
+  fetch a model nobody has reviewed. Passing `accept_license=true` is the
+  caller's explicit acknowledgement of that model's license. A model whose
+  license has already been reviewed but is merely non-standard for this
+  project (e.g. `nemotron-streaming`'s OpenMDW-1.1, or `parakeet`'s
+  CC-BY-4.0) is unaffected by this gate -- it downloads normally; only the
+  Settings UI's own consent dialog / the CLI's license notice apply.
 
 Only `engine in {"parakeet", "faster-whisper"}` are downloadable today (the
 only two backends `DownloadModel` wires up); any other engine raises
@@ -869,7 +875,8 @@ sibling branches disagreeing about what `1.2.0` contains.
   started)`: starts a background download of a `stt.catalog` `(engine, name)`
   model. Refuses (returns `false`, no-op) when a download is already
   running, the model is unknown, or the entry is `needs_review` and
-  `accept_license` isn't `true`.
+  `accept_license` isn't `true`. (As of WHISP-86, no shipped catalog entry is
+  `needs_review` -- `nemotron-streaming`'s OpenMDW-1.1 review completed.)
 - **New method** `CancelDownload() → (b success)`: requests cancellation of
   the in-flight download, if any.
 - **New signal** `DownloadProgress(s engine, s name, t bytes_done, t

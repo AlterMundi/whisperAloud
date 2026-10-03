@@ -135,9 +135,15 @@ whisper-aloud transcribe meeting.wav --engine parakeet --model parakeet-tdt-0.6b
 whisper-aloud transcribe meeting.wav --model parakeet-tdt-0.6b-v3
 ```
 
-A model pending license review (shown as "(pending license review)" by
-`whisper-aloud models --all`) is never auto-selected and is rejected unless
-passed explicitly together with `--accept-license`.
+A model that is still pending human legal review (shown as "(pending license
+review)" by `whisper-aloud models --all`, hidden from the plain `models`
+listing) is never auto-selected and is rejected unless passed explicitly
+together with `--accept-license`. A model whose license has already been
+reviewed but is non-standard for this project (e.g. Nemotron's OpenMDW-1.1,
+or Parakeet's CC-BY-4.0) shows up normally and needs no `--accept-license` --
+`download-model`/`transcribe` instead print a one-line license notice. See
+[`docs/THIRD_PARTY_MODELS.md`](docs/THIRD_PARTY_MODELS.md) for what each
+engine's model license requires.
 
 ### Output formats and timestamps
 
@@ -360,4 +366,7 @@ tests/           # unit + integration tests
 
 ## License
 
-MIT (declared in `pyproject.toml`).
+MIT (declared in `pyproject.toml`). This covers WhisperAloud's own code only --
+speech models are downloaded at runtime (never bundled, including in the
+Flatpak) and carry their own licenses; see
+[`docs/THIRD_PARTY_MODELS.md`](docs/THIRD_PARTY_MODELS.md).

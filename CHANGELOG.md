@@ -2,6 +2,17 @@
 
 All notable user-facing changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed
+- Nemotron 3.5 ASR Streaming's OpenMDW-1.1 license review (open since 0.3.0)
+  is complete: the engine is now a normal, visible choice in Settings and
+  `whisper-aloud models`/`transcribe`/`download-model`, with no
+  `--accept-license` flag required. Its license is still non-standard for
+  this project, so downloading it still shows an explicit consent step (a
+  dialog in Settings, a one-line notice on the CLI) -- see
+  `docs/THIRD_PARTY_MODELS.md`.
+
 ## [0.3.0] - 2026-10-02
 
 ### Added
