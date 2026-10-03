@@ -259,12 +259,43 @@ def test_download_state_resolves_alias_to_canonical_hf_repo_name(monkeypatch, tm
 
 
 def test_download_state_unknown_engine_is_conservatively_not_downloaded():
-    """A catalog entry for an engine this module doesn't know how to check (e.g. a
-    future streaming engine) reports downloaded=False rather than guessing."""
-    entry = _entry(engine="nemotron-streaming", name="nemotron-streaming-0.6b")
+    """A catalog entry this module doesn't know how to check -- no `download_url`
+    (the sherpa-onnx tarball check) and not `faster-whisper` (the HF-cache
+    heuristic) -- reports downloaded=False rather than guessing. Uses a synthetic
+    engine name since the real nemotron-streaming entry has a `download_url` as of
+    WHISP-86 and so no longer demonstrates this "unknown" path -- see
+    test_download_state_nemotron_present/_absent below."""
+    entry = _entry(engine="some-future-engine", name="some-future-model")
     state = mpl.download_state_for(entry)
     assert state.downloaded is False
     assert state.detection == "unknown"
+
+
+def test_download_state_nemotron_present(monkeypatch, tmp_path):
+    """WHISP-86 bug fix: download_state_for used to key its sherpa-onnx-cache check
+    on `engine == "parakeet"`, so nemotron-streaming (which also has a catalog
+    `download_url`) always fell through to detection="unknown"/downloaded=False in
+    the Settings UI, even once its weights were actually on disk. Routing is now
+    derived from `entry.download_url` instead."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    from whisper_aloud.stt import model_download as md
+
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    d = md.model_dir(entry.name)
+    d.mkdir(parents=True)
+    (d / "tokens.txt").write_text("x")
+    (d / "encoder.onnx").write_bytes(b"\x00")
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is True
+    assert state.detection == "sherpa-onnx-cache"
+
+
+def test_download_state_nemotron_absent(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    state = mpl.download_state_for(entry)
+    assert state.downloaded is False
+    assert state.detection == "sherpa-onnx-cache"
 
 
 # --- row_label: full Model/catalog row text, badges appended as plain text ---
