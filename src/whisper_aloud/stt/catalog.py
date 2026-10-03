@@ -51,6 +51,7 @@ class ModelEntry:
 ENGINES: dict[str, str] = {
     "faster-whisper": "faster-whisper (Whisper)",
     "parakeet": "Parakeet (NVIDIA, sherpa-onnx)",
+    "nemotron-streaming": "Nemotron (NVIDIA, streaming)",
 }
 
 
@@ -203,20 +204,14 @@ _ENTRIES: tuple[ModelEntry, ...] = (
         notes=(
             "WHISP-56: genuinely cache-aware streaming (560 ms chunks), int8-only "
             "export, greedy_search decoding only (no hotwords/beam search for "
-            "model_type='nemotron' yet). NEEDS-HUMAN: OpenMDW-1.1 license is pending "
-            "legal review against the project's existing CC-BY-4.0/MIT STT "
-            "dependencies (see docs/superpowers/specs/"
-            "2026-10-01-whisp55-nemotron-sherpa-findings.md) -- not recommended "
-            "until that review completes."
+            "model_type='nemotron' yet). License: OpenMDW-1.1 (permissive, "
+            "attribution required) -- see docs/THIRD_PARTY_MODELS.md and "
+            "docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md "
+            "(WHISP-55/WHISP-86) for the full findings and legal sign-off."
         ),
-        needs_review=True,
+        needs_review=False,
     ),
 )
-
-# Intentionally NOT added to `ENGINES` (the UI/CLI engine-picker list): this model is
-# wired end-to-end (catalog, config validation, create_engine) for development and
-# testing, but kept out of the picker until the OpenMDW-1.1 license review above
-# completes. `models_for`/`get`/`engine_models` all still find it via `_ENTRIES`.
 
 # WHISP-46 e2e harness: a hidden "fake" engine/model entry, registered only
 # when WHISPER_ALOUD_TEST_MODE=1 is set at *import time* (module-import-time

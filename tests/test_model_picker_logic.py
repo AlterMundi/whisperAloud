@@ -43,13 +43,12 @@ def test_selectable_entries_auto_language_returns_everything_reviewable_for_the_
     assert len(all_cpu) == len(reviewable)  # every current reviewable entry supports cpu
 
 
-def test_selectable_entries_excludes_needs_review_entries():
-    """A needs_review=True entry (e.g. the real nemotron-streaming, pending license
-    review per WHISP-56) is never in the default Model list — it only shows up in
-    the full-catalog view."""
+def test_selectable_entries_includes_nemotron_now_that_its_review_completed():
+    """WHISP-86: nemotron-streaming's needs_review flipped to False, so it is now a
+    normal selectable entry (es/en, cpu) — no longer limited to the full-catalog
+    view the way it was under WHISP-56."""
     entries = mpl.selectable_entries("auto", "cpu")
-    assert not any(e.needs_review for e in entries)
-    assert not any(e.name == "nemotron-3.5-streaming-560ms" for e in entries)
+    assert any(e.name == "nemotron-3.5-streaming-560ms" for e in entries)
 
 
 def test_selectable_entries_still_excludes_needs_review_with_synthetic_entry(monkeypatch):
@@ -155,7 +154,10 @@ def test_badges_for_needs_review_entry():
 
 
 def test_badges_for_streaming_nonstandard_license_and_needs_review_entry():
-    """Matches the real nemotron-streaming catalog entry's shape (WHISP-56)."""
+    """Synthetic entry shaped like nemotron-streaming was before its WHISP-86
+    license review completed (nemotron itself is needs_review=False now, but the
+    badge logic for a hypothetical still-pending streaming/non-standard entry must
+    keep working)."""
     entry = _entry(streaming=True, license="OpenMDW-1.1", needs_review=True)
     assert mpl.badges_for(entry) == ["Streaming", "OpenMDW-1.1", "pending license review"]
 
@@ -163,6 +165,16 @@ def test_badges_for_streaming_nonstandard_license_and_needs_review_entry():
 @pytest.mark.parametrize("lic", ["MIT", "Apache-2.0", "CC-BY-4.0", "BSD-3-Clause"])
 def test_standard_licenses_are_not_flagged(lic):
     assert mpl.is_nonstandard_license(lic) is False
+
+
+def test_badges_for_real_nemotron_entry_shows_license_not_pending_review():
+    """WHISP-86: the real catalog entry's license review completed, so its badge
+    list keeps the non-standard-license badge (still true -- OpenMDW-1.1 isn't in
+    the standard allowlist) but drops "pending license review"."""
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    badges = mpl.badges_for(entry)
+    assert "OpenMDW-1.1" in badges
+    assert "pending license review" not in badges
 
 
 @pytest.mark.parametrize("lic", ["OpenMDW-1.1", "GPL-3.0", ""])
