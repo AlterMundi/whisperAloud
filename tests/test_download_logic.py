@@ -96,3 +96,14 @@ def test_requires_license_consent_true_for_needs_review_even_with_standard_licen
     """needs_review alone is enough, independent of the license string --
     the pending-review status itself is what needs a human decision."""
     assert dl.requires_license_consent(_FakeEntry(license="MIT", needs_review=True)) is True
+
+
+def test_requires_license_consent_true_for_real_nemotron_entry_despite_review_completed():
+    """WHISP-86: nemotron-streaming's OpenMDW-1.1 license review completed
+    (needs_review=False), but its license is still non-standard for this app, so
+    the consent dialog must still appear before a download starts."""
+    from whisper_aloud.stt import catalog
+
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    assert entry.needs_review is False
+    assert dl.requires_license_consent(entry) is True
