@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, Set
 
+from ..sandbox import is_flatpak_sandbox
+
 logger = logging.getLogger(__name__)
 
 # Recovery file lives in /run/user/<uid>/ (tmpfs, cleared on reboot)
@@ -147,6 +149,14 @@ class GainController:
             # already no-ops when self._wpctl is None).
             self._wpctl = None
             logger.info("GainController: WHISPER_ALOUD_TEST_MODE=1, gain control disabled")
+            return
+        if is_flatpak_sandbox():
+            # WHISP-61: wpctl is a host tool (not in the Flatpak runtime) and
+            # the sandbox only gets the PulseAudio socket, not PipeWire's
+            # native one, so it could not reach the session manager anyway.
+            # Disable up front: no PATH probe, no crash-file access.
+            self._wpctl = None
+            logger.info("GainController: running inside Flatpak, gain control disabled")
             return
         self._wpctl = shutil.which("wpctl")
         if self._wpctl:

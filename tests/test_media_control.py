@@ -15,6 +15,7 @@ import pytest
 # MprisController tests
 # =============================================================================
 
+from whisper_aloud.service import media_control
 from whisper_aloud.service.media_control import GainController, GainSnapshot, MprisController
 
 
@@ -225,9 +226,41 @@ class TestGainControllerTestMode:
     def test_gain_controller_probes_wpctl_without_test_mode(self, monkeypatch):
         """Unset WHISPER_ALOUD_TEST_MODE reproduces today's behavior exactly."""
         monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        monkeypatch.setattr(media_control, "is_flatpak_sandbox", lambda: False)
         monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wpctl" if name == "wpctl" else None)
         controller = GainController()
         assert controller._wpctl == "/usr/bin/wpctl"
+
+
+class TestGainControllerFlatpakSandbox:
+    """Inside Flatpak (WHISP-61) wpctl is a host binary: the runtime does not
+    ship it and the sandbox has no PipeWire-native socket to reach the
+    session manager with. Gain control must be disabled up front --
+    no PATH probe, no subprocess, no crash-file access -- even if some
+    `wpctl` happened to be on the sandbox PATH."""
+
+    def test_sandbox_disables_gain_control_even_if_wpctl_on_path(self, monkeypatch):
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        monkeypatch.setattr(media_control, "is_flatpak_sandbox", lambda: True)
+        probed = []
+        monkeypatch.setattr(shutil, "which", lambda name: probed.append(name) or "/app/bin/wpctl")
+        controller = GainController()
+        assert controller._wpctl is None
+        assert probed == []
+
+    def test_sandbox_raise_restore_and_crash_recovery_never_spawn(self, monkeypatch):
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        monkeypatch.setattr(media_control, "is_flatpak_sandbox", lambda: True)
+
+        def _boom(*a, **kw):
+            raise AssertionError("subprocess must not run inside the sandbox")
+
+        monkeypatch.setattr(media_control.subprocess, "run", _boom)
+        monkeypatch.setattr(media_control, "open", _boom, raising=False)
+        controller = GainController()
+        assert controller.raise_to(0.9) is False
+        controller.restore()
+        controller.restore_from_crash_file()
 
 
 class TestGainController:
