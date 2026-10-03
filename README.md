@@ -56,8 +56,8 @@ flatpak install --user whisper-aloud-0.3.0.flatpak
 The `org.gnome.Platform//51` runtime is fetched from Flathub automatically
 if it isn't already installed. To build the bundle yourself instead, run
 `scripts/build_flatpak.sh`; see [`docs/flatpak.md`](docs/flatpak.md) for the
-manifest and sandbox/portal details (global hotkey and paste both go
-through XDG portals, no raw X11/Wayland access).
+manifest and sandbox/portal details (global hotkey and auto-paste both go
+through XDG portals; no input-injection tools inside the sandbox).
 
 Migrating from an existing source/systemd install? Follow
 ["Install and validate"](docs/flatpak.md#install-and-validate-field-test-with-fede)
