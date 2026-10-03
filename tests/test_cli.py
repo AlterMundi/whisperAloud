@@ -206,6 +206,79 @@ def test_daemon_command_when_not_running(mock_check, capsys):
         assert "not running" in capsys.readouterr().err
 
 
+# ─── Field bug 5: CLI D-Bus activation ──────────────────────────────────────
+
+
+@patch('whisper_aloud.__main__._activate_daemon_connection', return_value=True)
+@patch('whisper_aloud.__main__.check_service_running', return_value=False)
+def test_require_daemon_falls_back_to_activation_probe(mock_check, mock_activate, capsys):
+    """When GetNameOwner says nothing is there, _require_daemon must still
+    try to D-Bus-activate the daemon (field bug 5) before giving up."""
+    from whisper_aloud.__main__ import _require_daemon
+
+    assert _require_daemon() is True
+    mock_activate.assert_called_once()
+
+
+@patch('whisper_aloud.__main__._activate_daemon_connection')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_require_daemon_skips_activation_probe_when_already_running(
+    mock_check, mock_activate
+):
+    from whisper_aloud.__main__ import _require_daemon
+
+    assert _require_daemon() is True
+    mock_activate.assert_not_called()
+
+
+@patch('whisper_aloud.__main__._activate_daemon_connection', return_value=False)
+@patch('whisper_aloud.__main__.check_service_running', return_value=False)
+def test_require_daemon_prints_flatpak_hint_when_sandboxed(mock_check, mock_activate, capsys):
+    with patch('whisper_aloud.__main__.is_flatpak_sandbox', return_value=True):
+        from whisper_aloud.__main__ import _require_daemon
+
+        assert _require_daemon() is False
+    err = capsys.readouterr().err
+    assert "daemon is not running" in err
+    assert "flatpak run --command=whisper-aloud org.fede.whisperaloud --daemon" in err
+
+
+@patch('whisper_aloud.__main__._activate_daemon_connection', return_value=False)
+@patch('whisper_aloud.__main__.check_service_running', return_value=False)
+def test_require_daemon_prints_non_flatpak_hint_otherwise(mock_check, mock_activate, capsys):
+    with patch('whisper_aloud.__main__.is_flatpak_sandbox', return_value=False):
+        from whisper_aloud.__main__ import _require_daemon
+
+        assert _require_daemon() is False
+    err = capsys.readouterr().err
+    assert "systemctl --user start whisper-aloud" in err
+
+
+@patch('whisper_aloud.__main__._activate_daemon_connection')
+@patch('whisper_aloud.__main__.check_service_running', return_value=False)
+def test_quit_does_not_trigger_activation(mock_check, mock_activate, capsys):
+    """quit must never start the daemon just to immediately stop it."""
+    with patch('sys.argv', ['whisper-aloud', 'quit']):
+        exit_code = main()
+    assert exit_code == 1
+    mock_activate.assert_not_called()
+
+
+def test_activate_daemon_connection_uses_client_wait(monkeypatch):
+    from whisper_aloud.__main__ import _activate_daemon_connection
+
+    mock_client = MagicMock()
+    mock_client.connect_with_activation_wait.return_value = True
+    mock_client_cls = MagicMock(return_value=mock_client)
+    monkeypatch.setattr(
+        "whisper_aloud.service.client.WhisperAloudClient", mock_client_cls
+    )
+
+    assert _activate_daemon_connection(max_wait_seconds=5.0) is True
+    mock_client.connect_with_activation_wait.assert_called_once_with(max_wait_seconds=5.0)
+    mock_client.disconnect.assert_called_once()
+
+
 @patch('whisper_aloud.__main__.call_service_method')
 @patch('whisper_aloud.__main__.check_service_running', return_value=True)
 def test_status_formatted_output(mock_check, mock_call, capsys):

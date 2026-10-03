@@ -8,7 +8,9 @@ from pathlib import Path
 
 from . import __version__
 from .config import WhisperAloudConfig, user_config_dir
+from .daemon_hints import cli_daemon_unavailable_hint
 from .exceptions import ConfigurationError, WhisperAloudError
+from .sandbox import is_flatpak_sandbox
 
 # Kept for test patch compatibility; resolved lazily in handle_file_transcription.
 Transcriber = None
@@ -102,13 +104,50 @@ def call_service_method(method_name: str, *args):
         raise WhisperAloudError(f"Failed to call service method {method_name}: {e}")
 
 
-def _require_daemon(hint: str = "") -> bool:
-    """Check that the daemon is running. Prints error if not. Returns True if running."""
+def _activate_daemon_connection(max_wait_seconds: float = 20.0) -> bool:
+    """Attempt to connect to the daemon, triggering D-Bus activation.
+
+    Field bug 5: `check_service_running()` only calls org.freedesktop.DBus's
+    GetNameOwner, a plain query that never triggers D-Bus activation -- so a
+    CLI command run while the daemon isn't already up (e.g. right after
+    `flatpak run --command=whisper-aloud org.fede.whisperaloud status`, with
+    nothing else having started it yet) always reported "not running"
+    instead of auto-starting it the way the exported .service activation
+    file is meant to allow.
+
+    WhisperAloudClient()'s first connection attempt (pydbus's
+    SessionBus().get(name)) does trigger activation, and
+    connect_with_activation_wait() keeps retrying while that attempt looks
+    like the daemon is mid-startup (field bug 1's is_starting
+    classification) instead of giving up immediately. Bounded here (unlike
+    the GUI's indefinite-while-starting retry) because a CLI command must
+    eventually return control to the shell either way -- `max_wait_seconds`
+    is a generous allowance for first-run model/audio/tray/hotkey init, not
+    a "give up and declare it broken" deadline.
+    """
+    from .service.client import WhisperAloudClient
+
+    client = WhisperAloudClient()
+    try:
+        return client.connect_with_activation_wait(max_wait_seconds=max_wait_seconds)
+    finally:
+        client.disconnect()
+
+
+def _require_daemon(hint: str = "", *, allow_activation: bool = True) -> bool:
+    """Check that the daemon is running. Prints error if not. Returns True if running.
+
+    `allow_activation=False` (used by `quit`) skips the activation-triggering
+    probe below -- starting the daemon just to immediately quit it again
+    would be pointless, and the plain GetNameOwner check is all that command
+    needs.
+    """
     if check_service_running():
         return True
+    if allow_activation and _activate_daemon_connection():
+        return True
     if not hint:
-        hint = ("Start it with: whisper-aloud --daemon\n"
-                "  Or via systemd: systemctl --user start whisper-aloud")
+        hint = cli_daemon_unavailable_hint(is_flatpak=is_flatpak_sandbox())
     _error("daemon is not running", hint)
     return False
 
@@ -211,7 +250,10 @@ def cmd_reload(args) -> int:
 
 def cmd_quit(args) -> int:
     """Stop the daemon."""
-    if not _require_daemon():
+    # allow_activation=False: starting the daemon (D-Bus activation, plus its
+    # audio/model/tray/hotkey init) just to immediately quit it again would
+    # be pure waste -- if it's not already running, there's nothing to quit.
+    if not _require_daemon(allow_activation=False):
         return 1
     try:
         call_service_method("Quit")
