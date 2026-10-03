@@ -363,6 +363,17 @@ def cmd_transcribe(args) -> int:
     except ValueError as e:
         return _error(str(e))
 
+    # WHISP-86: a one-line, non-blocking license notice for a non-standard-license
+    # model (e.g. Nemotron's OpenMDW-1.1) -- same wording/doc pointer as
+    # cmd_download_model, since `transcribe` can trigger its download too. Printed
+    # to stderr (not stdout) so it never corrupts a machine-readable --format
+    # (srt/vtt/json) piped from stdout.
+    resolved_entry = stt_catalog.get(engine_name, model_name)
+    if resolved_entry is not None:
+        notice = _license_notice_for(resolved_entry)
+        if notice:
+            print(notice, file=sys.stderr)
+
     try:
         config = WhisperAloudConfig.load()
         config.model.name = model_name
@@ -649,6 +660,31 @@ def cmd_history_export(args) -> int:
 # Doc a tester should read before accepting a needs_review model's license.
 _NEEDS_REVIEW_DOC_PATH = "docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md"
 
+# Reference doc for any model whose license is outside the standard allowlist
+# (WHISP-86). Printed as a one-line, non-blocking notice on download -- see
+# _license_notice_for() below.
+_THIRD_PARTY_MODELS_DOC_PATH = "docs/THIRD_PARTY_MODELS.md"
+
+
+def _license_notice_for(entry) -> str | None:
+    """A one-line, non-blocking license notice for `entry`, or None when its
+    license is in the standard allowlist (nothing to call out).
+
+    WHISP-86: a non-standard license (e.g. Nemotron's OpenMDW-1.1, or
+    Parakeet's CC-BY-4.0) no longer blocks the CLI behind `--accept-license`
+    once its catalog entry is reviewed (`needs_review=False`) -- the user
+    still needs to *see* the license and any attribution requirement, just
+    not acknowledge it with a flag before every download.
+    """
+    from .ui.model_picker_logic import is_nonstandard_license
+
+    if not is_nonstandard_license(entry.license):
+        return None
+    return (
+        f"License notice: {entry.label} is distributed under {entry.license}. "
+        f"See {_THIRD_PARTY_MODELS_DOC_PATH} for attribution requirements."
+    )
+
 
 def cmd_download_model(args) -> int:
     """Download a speech model bundle to the local cache (no daemon required)."""
@@ -667,6 +703,11 @@ def cmd_download_model(args) -> int:
                 "--accept-license to proceed."
             ),
         )
+
+    if entry is not None:
+        notice = _license_notice_for(entry)
+        if notice:
+            print(notice)
 
     try:
         path = ensure_model(args.name)
