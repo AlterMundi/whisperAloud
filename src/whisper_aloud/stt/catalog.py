@@ -205,9 +205,10 @@ _ENTRIES: tuple[ModelEntry, ...] = (
             "WHISP-56: genuinely cache-aware streaming (560 ms chunks), int8-only "
             "export, greedy_search decoding only (no hotwords/beam search for "
             "model_type='nemotron' yet). License: OpenMDW-1.1 (permissive, "
-            "attribution required) -- see docs/THIRD_PARTY_MODELS.md and "
-            "docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md "
-            "(WHISP-55/WHISP-86) for the full findings and legal sign-off."
+            "attribution required) -- reviewed and accepted by the maintainer "
+            "(2026-10-03), not a formal legal review. See docs/THIRD_PARTY_MODELS.md "
+            "and docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md "
+            "(WHISP-55/WHISP-86) for the full findings."
         ),
         needs_review=False,
     ),

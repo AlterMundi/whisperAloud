@@ -49,11 +49,13 @@ do to stay compliant.
   attribution requirement.
 - **Status**: WHISP-55 researched and documented OpenMDW-1.1's compatibility
   with this project's other STT dependencies (see
-  `docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md`);
-  WHISP-86 completed that review and enabled the engine. It is not the
-  recommended default for any engine/language (`recommended=False` in the
-  catalog) -- Parakeet remains the recommended CPU model for es/en -- but it
-  is no longer hidden behind a pending-review flag.
+  `docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md`),
+  and the license was reviewed and accepted by the maintainer (2026-10-03) --
+  not a formal legal review. WHISP-86 then enabled the engine on that basis.
+  It is not the recommended default for any engine/language
+  (`recommended=False` in the catalog) -- Parakeet remains the recommended
+  CPU model for es/en -- but it is no longer hidden behind a pending-review
+  flag.
 - **Obligations**: attribution is required, per OpenMDW-1.1's terms. Because
   the license is non-standard for this project, both the Settings UI and the
   CLI still require an explicit, affirmative step before a download starts:
