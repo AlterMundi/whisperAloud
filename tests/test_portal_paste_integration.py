@@ -47,6 +47,23 @@ from whisper_aloud.clipboard.portal_paste_simulator import PortalPasteSimulator 
 CONTROL_IFACE = "org.whisperaloud.test.FakePortalControl"
 
 
+def _pump_until(predicate, timeout_s=5.0):
+    """Iterate the default GLib main context (processing real D-Bus I/O,
+    including Response signals) until `predicate()` is true or `timeout_s`
+    elapses. Needed since PortalPasteSimulator's session setup is now fully
+    async (maintainer directive, field bug 2 second pass): the first
+    simulate_paste() call only *starts* CreateSession -> SelectDevices ->
+    Start and returns False immediately (clipboard-only fallback); the
+    session becomes ready later, from Response callbacks."""
+    import time as _time
+
+    context = GLib.MainContext.default()
+    deadline = _time.monotonic() + timeout_s
+    while not predicate() and _time.monotonic() < deadline:
+        context.iteration(True)
+    assert predicate(), "timed out waiting for condition"
+
+
 def _control_call(bus, method, arg_variant=None, reply_type=None):
     return bus.call_sync(
         "org.freedesktop.portal.Desktop",
@@ -82,8 +99,14 @@ class TestPortalPasteIntegrationOnPrivateBus:
                 os.environ,
                 {"DBUS_SESSION_BUS_ADDRESS": bus_addr, "XDG_DATA_HOME": str(data_home)},
             ):
-                # --- First "daemon run": no restore_token yet. ---
+                # --- First "daemon run": no restore_token yet. The first
+                # simulate_paste() call only starts the async session-setup
+                # chain and falls back to clipboard-only immediately; pump
+                # the main loop for the real Response signals to land, then
+                # paste for real. ---
                 sim1 = PortalPasteSimulator()
+                assert sim1.simulate_paste("ctrl+v") is False
+                _pump_until(lambda: sim1._session_path is not None)
                 assert sim1.simulate_paste("ctrl+v") is True
 
                 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -111,6 +134,8 @@ class TestPortalPasteIntegrationOnPrivateBus:
                 # (simulating a daemon restart) must replay the persisted
                 # restore_token instead of prompting again. ---
                 sim2 = PortalPasteSimulator()
+                assert sim2.simulate_paste("ctrl+v") is False
+                _pump_until(lambda: sim2._session_path is not None)
                 assert sim2.simulate_paste("ctrl+v") is True
 
                 last_token_seen = _control_call(
