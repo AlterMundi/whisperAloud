@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WhisperAloud app icon: a microphone flanked by a speech waveform.
+     Original artwork (WHISP-61), MIT like the rest of the project.
+     Drawn on the GNOME 128 px app-icon grid: 112x108 rounded base with a
+     4 px darker bottom edge. Placeholder until a designer reviews it. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#3584e4"/>
+    </linearGradient>
+  </defs>
+  <!-- base: bottom edge, then face -->
+  <rect x="8" y="14" width="112" height="106" rx="22" fill="#1a5fb4"/>
+  <rect x="8" y="8" width="112" height="106" rx="22" fill="url(#face)"/>
+  <!-- waveform, left -->
+  <g fill="#ffffff" fill-opacity="0.75">
+    <rect x="17" y="55" width="6" height="12" rx="3"/>
+    <rect x="27" y="45" width="6" height="32" rx="3"/>
+    <rect x="37" y="51" width="6" height="20" rx="3"/>
+  </g>
+  <!-- waveform, right (mirror) -->
+  <g fill="#ffffff" fill-opacity="0.75">
+    <rect x="85" y="51" width="6" height="20" rx="3"/>
+    <rect x="95" y="45" width="6" height="32" rx="3"/>
+    <rect x="105" y="55" width="6" height="12" rx="3"/>
+  </g>
+  <!-- microphone capsule -->
+  <rect x="53" y="22" width="22" height="44" rx="11" fill="#ffffff"/>
+  <!-- yoke and stand -->
+  <path d="M48 56a16 16 0 0 0 32 0" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M64 76v14M54 92h20" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+</svg>
