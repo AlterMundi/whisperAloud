@@ -1783,6 +1783,19 @@ class WhisperAloudService:
         if self.hotkey_manager:
             self.hotkey_manager.unregister()
 
+        # Close any open RemoteDesktop portal session (Flatpak paste path,
+        # WHISP-59) -- see clipboard.paste_selection.close_portal_simulator
+        # and PortalPasteSimulator.close() for why an unclosed session can
+        # contribute to a stale-request response on a later run. A no-op if
+        # the portal paste backend was never used (the common, non-sandboxed
+        # case).
+        try:
+            from ..clipboard.paste_selection import close_portal_simulator
+
+            close_portal_simulator()
+        except Exception:
+            logger.debug("close_portal_simulator failed during shutdown", exc_info=True)
+
         # WHISP-68 audit HIGH #3: Quit() already set _download_cancel_event
         # above; join the background download thread with a bounded timeout
         # rather than leaving it running past process shutdown (which would

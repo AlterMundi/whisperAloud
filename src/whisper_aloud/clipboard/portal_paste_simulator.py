@@ -46,6 +46,7 @@ _PORTAL_PATH = "/org/freedesktop/portal/desktop"
 _IFACE_RD = "org.freedesktop.portal.RemoteDesktop"
 _IFACE_REQ = "org.freedesktop.portal.Request"
 _IFACE_REGISTRY = "org.freedesktop.host.portal.Registry"
+_IFACE_SESSION = "org.freedesktop.portal.Session"
 
 # RemoteDesktop DeviceType bitmask (portal spec).
 DEVICE_KEYBOARD = 1
@@ -56,6 +57,10 @@ PERSIST_MODE_APPLICATION = 1
 PERSIST_MODE_PERSISTENT = 2
 
 _RESTORE_TOKEN_FILENAME = "portal_restore_token"
+
+# Distinguishes "caller didn't pass response_timeout_ms, use self._timeout_ms"
+# from an explicit `response_timeout_ms=None` ("wait forever").
+_SENTINEL_USE_DEFAULT = object()
 
 
 def _restore_token_path() -> Path:
@@ -140,6 +145,12 @@ class PortalPasteSimulator:
         self._session_path = None
         self._session_failed = False
         self._pending_handle_token: Optional[str] = None
+        # Guards against two concurrent session-setup attempts (e.g. two
+        # pastes requested back to back before the first dialog is
+        # resolved): a second caller falls back to clipboard-only for its
+        # own paste immediately instead of blocking behind, or duplicating,
+        # the first interactive request in flight.
+        self._session_pending = False
 
     @staticmethod
     def _new_token(prefix: str) -> str:
@@ -186,16 +197,35 @@ class PortalPasteSimulator:
             None,
         )
 
-    def _call_request(self, method_name: str, args, timeout_ms: Optional[int] = None):
-        """Invoke a Request-pattern portal method and block for its Response.
+    def _call_request(
+        self,
+        method_name: str,
+        args,
+        timeout_ms: Optional[int] = None,
+        response_timeout_ms: Optional[int] = _SENTINEL_USE_DEFAULT,
+    ):
+        """Invoke a Request-pattern portal method and wait for its Response.
 
-        Same bounded-timeout Request/Response pattern as
-        `service.hotkey_portal.PortalHotkeys._call_request`. Never raises
-        on timeout -- returns (None, None).
+        Same two-timeout split as `service.hotkey_portal.PortalHotkeys._call_request`
+        (maintainer design directive, field bug 2 follow-up):
+
+        - `timeout_ms` bounds only the synchronous `call_sync` leg (handing
+          back the request object path) -- always safe to bound, regardless
+          of whether the request itself is interactive.
+        - `response_timeout_ms` bounds the Response wait. Left at the
+          sentinel default, it falls back to `self._timeout_ms` (bounded --
+          correct for CreateSession, which never shows a dialog).
+          SelectDevices/Start can show the user a "Share your screen"-style
+          consent dialog, so callers pass `response_timeout_ms=None` for
+          those: no fixed deadline, wait for the Response signal
+          indefinitely. Never raises -- returns (None, None) only if a
+          non-None response_timeout_ms elapses.
         """
         Gio = self._Gio  # noqa: N806
         GLib = self._GLib  # noqa: N806
         timeout_ms = self._timeout_ms if timeout_ms is None else timeout_ms
+        if response_timeout_ms is _SENTINEL_USE_DEFAULT:
+            response_timeout_ms = self._timeout_ms
 
         handle_token = self._pending_handle_token
         sender = self._bus.get_unique_name().lstrip(":").replace(".", "_")
@@ -229,20 +259,24 @@ class PortalPasteSimulator:
         self._proxy.call_sync(method_name, args, Gio.DBusCallFlags.NONE, timeout_ms, None)
 
         timeout_fired = [False]
+        timeout_id = None
 
-        def _timeout():
-            timeout_fired[0] = True
-            logger.warning(
-                "%s timed out waiting for Response on %s", method_name, expected_req_path
-            )
-            loop.quit()
-            return GLib.SOURCE_REMOVE
+        if response_timeout_ms is not None:
 
-        timeout_id = GLib.timeout_add(timeout_ms, _timeout)
+            def _timeout():
+                timeout_fired[0] = True
+                logger.warning(
+                    "%s timed out waiting for Response on %s", method_name, expected_req_path
+                )
+                loop.quit()
+                return GLib.SOURCE_REMOVE
+
+            timeout_id = GLib.timeout_add(response_timeout_ms, _timeout)
+
         loop.run()
-        if not timeout_fired[0]:
+        if timeout_id is not None and not timeout_fired[0]:
             GLib.source_remove(timeout_id)
-        elif sub_id[0] is not None:
+        elif timeout_fired[0] and sub_id[0] is not None:
             self._bus.signal_unsubscribe(sub_id[0])
             sub_id[0] = None
 
@@ -289,9 +323,13 @@ class PortalPasteSimulator:
             opts_dict["restore_token"] = GLib.Variant("s", restore_token)
         opts = GLib.Variant("a{sv}", opts_dict)
 
+        # SelectDevices can require user interaction on some compositors
+        # (device-selection consent) -- no fixed deadline (maintainer design
+        # directive, field bug 2 follow-up); see _call_request's docstring.
         response, _results = self._call_request(
             "SelectDevices",
             GLib.Variant.new_tuple(GLib.Variant("o", self._session_path), opts),
+            response_timeout_ms=None,
         )
         if response != 0:
             raise RuntimeError(f"RemoteDesktop SelectDevices failed (response={response})")
@@ -304,6 +342,11 @@ class PortalPasteSimulator:
         self._pending_handle_token = handle_token
         opts = GLib.Variant("a{sv}", {"handle_token": GLib.Variant("s", handle_token)})
 
+        # Start is the call that shows the "Share your screen" consent
+        # dialog on GNOME -- no fixed deadline (maintainer design directive,
+        # field bug 2 follow-up); see _call_request's docstring. A
+        # restore_token in the response is persisted by the caller
+        # regardless of how long this took to arrive.
         response, results = self._call_request(
             "Start",
             GLib.Variant.new_tuple(
@@ -311,6 +354,7 @@ class PortalPasteSimulator:
                 GLib.Variant("s", ""),  # parent_window
                 opts,
             ),
+            response_timeout_ms=None,
         )
         if response != 0:
             raise RuntimeError(f"RemoteDesktop Start failed (response={response})")
@@ -327,7 +371,16 @@ class PortalPasteSimulator:
             return True
         if self._session_failed:
             return False
+        if self._session_pending:
+            logger.warning(
+                "RemoteDesktop session setup already in progress (an earlier paste is "
+                "waiting on the consent dialog); falling back to clipboard-only for this "
+                "paste rather than blocking behind or duplicating that request"
+            )
+            self._emit_fallback("RemoteDesktop session setup already in progress")
+            return False
 
+        self._session_pending = True
         try:
             self._connect()
             self._create_session()
@@ -343,6 +396,8 @@ class PortalPasteSimulator:
             self._session_path = None
             self._emit_fallback(str(e))
             return False
+        finally:
+            self._session_pending = False
 
     def _notify_keysym(self, keysym: int, state: int) -> None:
         GLib = self._GLib  # noqa: N806
@@ -420,3 +475,35 @@ class PortalPasteSimulator:
             if error is not None:
                 logger.warning("RemoteDesktop NotifyKeyboardKeysym failed: %s", error)
                 self._emit_fallback(str(error))
+
+    def close(self) -> None:
+        """End the RemoteDesktop session, if one is open.
+
+        Sessions are closed via ``org.freedesktop.portal.Session.Close()``
+        on the session's own object path (see
+        ``service.hotkey_portal.PortalHotkeys.close`` for the same fix and
+        rationale: there is no ``RemoteDesktop.EndSession`` method, and an
+        unclosed session left dangling is a plausible contributor to a
+        stale-request response on a later daemon run). Best-effort: never
+        raises, since this is expected to run during daemon shutdown.
+        persist_mode=PERSISTENT means the portal remembers this grant across
+        the Close anyway (that's the point of the restore_token), so closing
+        the live session here does not require re-consent next run.
+        """
+        if self._session_path and self._bus is not None:
+            try:
+                self._bus.call_sync(
+                    _PORTAL_BUS,
+                    self._session_path,
+                    _IFACE_SESSION,
+                    "Close",
+                    None,
+                    None,
+                    self._Gio.DBusCallFlags.NONE,
+                    1000,
+                    None,
+                )
+                logger.info("Closed RemoteDesktop session %s", self._session_path)
+            except Exception as e:
+                logger.debug("Session.Close failed (non-fatal, shutting down anyway): %s", e)
+        self._session_path = None

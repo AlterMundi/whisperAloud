@@ -71,7 +71,7 @@ class _FakeHarness:
             return None
         raise AssertionError(f"unexpected proxy.call_sync: {method_name}")
 
-    def _fake_call_request(self, method_name, args, timeout_ms=None):
+    def _fake_call_request(self, method_name, args, timeout_ms=None, response_timeout_ms=None):
         if method_name == self.fail_at:
             return 1, {}
 
@@ -341,3 +341,137 @@ class TestStuckModifierRelease:
             assert sim.simulate_paste("ctrl+v") is False
 
         assert len(fallback_reasons) == 1
+
+
+class TestNoFixedDeadlineForInteractiveCalls:
+    """Maintainer design directive (field bug 2 follow-up): SelectDevices
+    and Start can show a consent dialog, so neither may be given a fixed
+    Response-wait deadline."""
+
+    def test_select_devices_and_start_pass_response_timeout_none(self):
+        harness = _FakeHarness()
+        captured_calls = []
+
+        real_fake = harness._fake_call_request
+
+        def _spying_call_request(self, method_name, args, timeout_ms=None,
+                                  response_timeout_ms=None):
+            captured_calls.append((method_name, response_timeout_ms))
+            return real_fake(method_name, args, timeout_ms, response_timeout_ms)
+
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+            patch.object(PortalPasteSimulator, "_call_request", _spying_call_request),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: None, restore_token_saver=lambda token: None
+            )
+            assert sim.simulate_paste("ctrl+v") is True
+
+        calls = dict(captured_calls)
+        assert calls["SelectDevices"] is None
+        assert calls["Start"] is None
+        # CreateSession is never interactive -- it's fine for it to keep a
+        # bounded default, so it's deliberately NOT asserted here.
+
+    def test_call_request_schedules_no_timeout_source_when_response_timeout_is_none(self):
+        mock_bus = MagicMock(name="bus")
+        mock_bus.get_unique_name.return_value = ":1.50"
+        captured = {}
+
+        def _signal_subscribe(sender, iface, signal, path, arg0, flags, callback):
+            captured["callback"] = callback
+            return 1
+
+        mock_bus.signal_subscribe.side_effect = _signal_subscribe
+        mock_proxy = MagicMock(name="proxy")
+
+        def _call_sync(method_name, args, flags, timeout, cancellable):
+            fake_params = GLib.Variant("(ua{sv})", (0, {}))
+            GLib.idle_add(captured["callback"], None, None, None, None, None, fake_params)
+            return None
+
+        mock_proxy.call_sync.side_effect = _call_sync
+
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=mock_proxy),
+            patch.object(GLib, "timeout_add") as mock_timeout_add,
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: None, restore_token_saver=lambda token: None
+            )
+            sim._connect()
+            sim._pending_handle_token = "wa_req_test"
+            response, results = sim._call_request(
+                "Start",
+                GLib.Variant.new_tuple(GLib.Variant("a{sv}", {})),
+                response_timeout_ms=None,
+            )
+
+        assert response == 0
+        mock_timeout_add.assert_not_called()
+
+
+class TestConcurrentSessionSetupGuard:
+    """A second paste requested while the first is still waiting on the
+    consent dialog must fall back to clipboard-only immediately, not block
+    behind or duplicate the first interactive request."""
+
+    def test_concurrent_ensure_session_falls_back(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim._session_pending = True  # simulate a setup already in flight
+            fallback_reasons = []
+            sim._on_fallback = fallback_reasons.append
+
+            assert sim._ensure_session() is False
+            assert fallback_reasons == ["RemoteDesktop session setup already in progress"]
+            # Must not have attempted a second CreateSession.
+            assert "CreateSession" not in harness.call_log
+
+    def test_pending_flag_cleared_after_successful_setup(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is True
+            assert sim._session_pending is False
+
+    def test_pending_flag_cleared_after_failed_setup(self):
+        harness = _FakeHarness(fail_at="CreateSession")
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False
+            assert sim._session_pending is False
+
+
+class TestPortalSessionClose:
+    """Sessions must be closed via org.freedesktop.portal.Session.Close() on
+    the session's own path, not a nonexistent RemoteDesktop.EndSession."""
+
+    def test_close_calls_session_close_on_session_path(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.simulate_paste("ctrl+v")
+            harness.mock_bus.call_sync.reset_mock()
+            sim.close()
+
+        harness.mock_bus.call_sync.assert_called_once()
+        call_args = harness.mock_bus.call_sync.call_args[0]
+        assert call_args[0] == "org.freedesktop.portal.Desktop"
+        assert call_args[1] == "/session/1"
+        assert call_args[2] == "org.freedesktop.portal.Session"
+        assert call_args[3] == "Close"
+        assert sim._session_path is None
+
+    def test_close_never_raises_when_session_close_fails(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.simulate_paste("ctrl+v")
+            harness.mock_bus.call_sync.side_effect = GLib.Error("no such object")
+            sim.close()  # must not raise
+        assert sim._session_path is None
+
+    def test_close_with_no_session_is_a_no_op(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.close()  # never pasted; must not raise

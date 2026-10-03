@@ -36,6 +36,22 @@ def reset_portal_simulator_for_tests() -> None:
     _portal_simulator = None
 
 
+def close_portal_simulator() -> None:
+    """Close the cached PortalPasteSimulator's RemoteDesktop session, if one
+    was ever created, and drop the singleton. Called on daemon shutdown
+    (service/daemon.py's _cleanup()) so an open session doesn't dangle --
+    see PortalPasteSimulator.close() for why that matters. A no-op (never
+    raises) if no portal simulator was ever instantiated (the common case
+    outside a Flatpak sandbox)."""
+    global _portal_simulator
+    if _portal_simulator is not None:
+        try:
+            _portal_simulator.close()
+        except Exception:
+            logger.debug("close_portal_simulator: close() failed", exc_info=True)
+        _portal_simulator = None
+
+
 class _PortalPasteAdapter:
     """Adapts PortalPasteSimulator to PasteSimulator's public shape
     (`simulate_paste() -> bool`, `check_availability() -> dict`) so
