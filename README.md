@@ -10,7 +10,7 @@ leaves your machine.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/AlterMundi/whisperAloud?include_prereleases)](https://github.com/AlterMundi/whisperAloud/releases)
 [![CI](https://github.com/AlterMundi/whisperAloud/actions/workflows/ci.yml/badge.svg)](https://github.com/AlterMundi/whisperAloud/actions/workflows/ci.yml)
-[![Flathub](https://img.shields.io/badge/Flathub-coming%20soon-lightgrey)](docs/flatpak.md)
+[![Flatpak](https://img.shields.io/badge/Flatpak-GitHub%20Release-blue)](https://github.com/AlterMundi/whisperAloud/releases)
 
 </div>
 
@@ -41,19 +41,41 @@ leaves your machine.
 
 ## Install
 
-### Flatpak (recommended, coming soon)
+### Flatpak (bundle on GitHub Releases)
 
-A Flatpak manifest is being finalized on a separate branch
-(`packaging/WHISP-61`); see [`docs/flatpak.md`](docs/flatpak.md) for the
-sandbox/portal details it depends on (global hotkey and paste both go
-through `org.freedesktop.portal.Desktop`, no raw X11/Wayland access).
-Once published:
+The Flatpak bundle is not published to Flathub — see "Why not Flathub?"
+below. Instead, once the 0.3.0 release is published, download
+`whisper-aloud-0.3.0.flatpak` from the
+[GitHub Releases page](https://github.com/AlterMundi/whisperAloud/releases)
+and install it:
 
 ```bash
-flatpak install flathub org.fede.whisperaloud   # not yet live — see badge above
+flatpak install --user whisper-aloud-0.3.0.flatpak
 ```
 
-Until then, use the source install below.
+The `org.gnome.Platform//51` runtime is fetched from Flathub automatically
+if it isn't already installed. To build the bundle yourself instead, run
+`scripts/build_flatpak.sh`; see [`docs/flatpak.md`](docs/flatpak.md) for the
+manifest and sandbox/portal details (global hotkey and paste both go
+through XDG portals, no raw X11/Wayland access).
+
+Migrating from an existing source/systemd install? Follow
+["Install and validate"](docs/flatpak.md#install-and-validate-field-test-with-fede)
+in `docs/flatpak.md` to copy your config, history, and model cache into the
+sandbox.
+
+Known off inside the Flatpak: sound feedback, microphone gain boost, and
+GPU-accelerated inference (CPU only) — see
+[`docs/flathub-submission.md`](docs/flathub-submission.md#known-gaps-in-the-flatpak-build-not-policy).
+
+#### Why not Flathub?
+
+A Flathub listing isn't planned for now: Flathub's generative-AI policy
+forbids AI-assisted manifests and, per its announcements, AI-assisted apps
+in general (with discretionary exceptions for mature projects). Since
+WhisperAloud is built with heavy AI assistance, see
+[`docs/flathub-submission.md`](docs/flathub-submission.md) for the full
+analysis.
 
 ### From source (recommended today)
 
@@ -176,9 +198,12 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full list. Highlights:
 
 ## Roadmap
 
-- Finish and publish the Flatpak manifest, then submit to Flathub —
-  tracked on `packaging/WHISP-61`; see [`docs/flatpak.md`](docs/flatpak.md)
-  for the sandbox work already done to support it.
+- Flatpak bundle: done — see [`docs/flatpak.md`](docs/flatpak.md). A
+  Flathub listing is not planned for now (see
+  [`docs/flathub-submission.md`](docs/flathub-submission.md)). Still
+  pending: a "start in background at login" switch via the Background
+  portal, so the global hotkey works right after login without opening
+  the window first.
 - Execute the 0.3.0 field-validation pass
   ([`docs/validation/0.3.0-field-checklist.md`](docs/validation/0.3.0-field-checklist.md))
   on a real desktop and fold its findings back into the backlog.
