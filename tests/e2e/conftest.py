@@ -130,11 +130,28 @@ os.environ["DBUS_SESSION_BUS_ADDRESS"] = _PRIVATE_BUS_ADDRESS
 # never registers org.fede.whisperaloud for activation on the outer bus (the
 # `daemon` fixture below spawns it directly via subprocess.Popen), so "not
 # activatable" is the correct invariant unconditionally.
+# Incident (WHISP-hang follow-up): this guard originally opened its own raw
+# connection via pydbus.connect(_PRIVATE_BUS_ADDRESS) (Gio.DBusConnection.
+# new_for_address_sync), kept alive for the whole session via a module
+# global. That is a second, independent GDBusConnection to the same socket,
+# separate from the one *every* WhisperAloudClient() in this session shares
+# (pydbus.SessionBus() -> Gio.bus_get_sync(), which GLib caches as a single
+# per-process singleton once DBUS_SESSION_BUS_ADDRESS is set -- see right
+# above). Two live GDBusConnection objects to the same bus, each with its
+# own GDBus worker thread, made tests/e2e/test_config.py's SignalCapture
+# (which subscribes a signal on the *cached* SessionBus() connection) hang
+# intermittently inside Gio's signal_subscribe -- reproduced via
+# -o faulthandler_timeout=60 (2 of 5 full-suite runs hung; subsets never
+# did). Using the same cached SessionBus() connection here instead -- which
+# the rest of this module, DaemonHandle.stop(), and _wait_for_daemon_ready
+# below all do too -- means the guard creates zero extra connections: by the
+# time any fixture below runs, there is exactly one GDBusConnection for the
+# whole e2e session, exactly as there was before this guard existed.
 _BUS_NAME_FOR_GUARD = "org.fede.whisperaloud"  # same value as BUS_NAME, defined below
 try:
     import pydbus as _pydbus_guard
 
-    _guard_bus = _pydbus_guard.connect(_PRIVATE_BUS_ADDRESS)
+    _guard_bus = _pydbus_guard.SessionBus()
     _activatable = list(_guard_bus.dbus.ListActivatableNames())
     assert_not_activatable(_activatable, _BUS_NAME_FOR_GUARD)
 except UnsafeBusActivationError as _exc:
@@ -175,7 +192,12 @@ class DaemonHandle:
         try:
             import pydbus
 
-            bus = pydbus.connect(_PRIVATE_BUS_ADDRESS)
+            # SessionBus() (Gio.bus_get_sync, process-wide cached singleton)
+            # rather than pydbus.connect(_PRIVATE_BUS_ADDRESS) (a brand new
+            # GDBusConnection each call): see the module-level guard's
+            # comment above for why a second, independent connection to this
+            # bus caused intermittent hangs elsewhere in the suite.
+            bus = pydbus.SessionBus()
             proxy = bus.get(self.bus_name)
             proxy.Quit()
         except Exception:
@@ -225,6 +247,13 @@ def _wait_for_daemon_ready(proc: subprocess.Popen, timeout: float) -> None:
     why that distinction matters: a misconfigured bus could let a *different*
     process (the real, installed Flatpak app) win the name instead of the
     daemon this fixture itself spawned.
+
+    Uses pydbus.SessionBus() (the same cached, process-wide GDBusConnection
+    singleton every other call site in this module uses), not
+    pydbus.connect(_PRIVATE_BUS_ADDRESS) -- the latter opened a brand new
+    GDBusConnection on every 0.1s retry, which (combined with the
+    module-level guard's own separate connection) caused intermittent hangs
+    elsewhere in the suite; see the guard's comment above.
     """
     import pydbus
 
@@ -237,7 +266,7 @@ def _wait_for_daemon_ready(proc: subprocess.Popen, timeout: float) -> None:
                 f"publishing {BUS_NAME}"
             )
         try:
-            bus = pydbus.connect(_PRIVATE_BUS_ADDRESS)
+            bus = pydbus.SessionBus()
             bus.get(BUS_NAME)
             owner_pid = int(bus.dbus.GetConnectionUnixProcessID(BUS_NAME))
             if owner_pid != proc.pid:
