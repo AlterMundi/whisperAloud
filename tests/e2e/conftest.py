@@ -21,7 +21,12 @@ from typing import Callable, Iterator, Optional
 
 import pytest
 
-from tests._private_bus import private_bus_address
+from tests._private_bus import (
+    UnsafeBusActivationError,
+    assert_not_activatable,
+    assert_process_is_not_flatpak,
+    private_bus_address,
+)
 from tests.e2e.env_builder import build_daemon_env
 
 
@@ -110,6 +115,37 @@ if _PRIVATE_BUS_ADDRESS is None:
 # to for unit-test isolation.
 os.environ["DBUS_SESSION_BUS_ADDRESS"] = _PRIVATE_BUS_ADDRESS
 
+# ─── Fail-closed activation guard (incident follow-up) ─────────────────────
+#
+# private_bus_address() above only checks that this is *some* throwaway
+# dbus-run-session bus, not that it was started with the dedicated,
+# servicedir-free config (tests/dbus/session-test.conf). A bus started
+# without --config-file falls back to the system default session.conf's
+# <standard_session_servicedirs/>, which, on a machine with the real
+# WhisperAloud Flatpak installed, makes org.fede.whisperaloud activatable via
+# the Flatpak's exported .service file. Before any fixture below ever does a
+# bus.get(BUS_NAME) (which is exactly what would trigger that activation),
+# ask the bus itself -- read-only, via ListActivatableNames -- whether that
+# name is activatable at all, and abort the whole session if so. This harness
+# never registers org.fede.whisperaloud for activation on the outer bus (the
+# `daemon` fixture below spawns it directly via subprocess.Popen), so "not
+# activatable" is the correct invariant unconditionally.
+_BUS_NAME_FOR_GUARD = "org.fede.whisperaloud"  # same value as BUS_NAME, defined below
+try:
+    import pydbus as _pydbus_guard
+
+    _guard_bus = _pydbus_guard.connect(_PRIVATE_BUS_ADDRESS)
+    _activatable = list(_guard_bus.dbus.ListActivatableNames())
+    assert_not_activatable(_activatable, _BUS_NAME_FOR_GUARD)
+except UnsafeBusActivationError as _exc:
+    pytest.exit(f"tests/e2e refusing to run: {_exc}", returncode=1)
+except Exception as _exc:  # pragma: no cover - defensive: fail closed, not open
+    pytest.exit(
+        f"tests/e2e could not verify the private bus is safe to use "
+        f"(ListActivatableNames failed: {_exc!r}); refusing to proceed",
+        returncode=1,
+    )
+
 from whisper_aloud.service.client import WhisperAloudClient  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "audio"
@@ -180,7 +216,16 @@ def _build_daemon_env(xdg_home: Path, config_overrides: Optional[dict] = None) -
 def _wait_for_daemon_ready(proc: subprocess.Popen, timeout: float) -> None:
     """Bounded retry loop for bus.get(BUS_NAME) -- no fixed sleep, no polling
     a PID file; just "is the name owned yet" (WHISP-46 design doc section 8:
-    flakiness control (a))."""
+    flakiness control (a)).
+
+    Once the name is owned, verifies (read-only, via
+    GetConnectionUnixProcessID) that the owner is *this* subprocess
+    (``proc.pid``) and, defense in depth, that it does not look like a
+    flatpak/bwrap process -- see the module-level activation guard above for
+    why that distinction matters: a misconfigured bus could let a *different*
+    process (the real, installed Flatpak app) win the name instead of the
+    daemon this fixture itself spawned.
+    """
     import pydbus
 
     deadline = time.monotonic() + timeout
@@ -194,7 +239,18 @@ def _wait_for_daemon_ready(proc: subprocess.Popen, timeout: float) -> None:
         try:
             bus = pydbus.connect(_PRIVATE_BUS_ADDRESS)
             bus.get(BUS_NAME)
+            owner_pid = int(bus.dbus.GetConnectionUnixProcessID(BUS_NAME))
+            if owner_pid != proc.pid:
+                raise UnsafeBusActivationError(
+                    f"{BUS_NAME} is owned by pid {owner_pid}, not the daemon "
+                    f"subprocess this fixture spawned (pid {proc.pid}); refusing "
+                    f"to use it -- something else (possibly a real installed "
+                    f"instance) won the bus name race."
+                )
+            assert_process_is_not_flatpak(owner_pid)
             return
+        except UnsafeBusActivationError:
+            raise
         except Exception as e:
             last_error = e
             time.sleep(0.1)
@@ -242,6 +298,12 @@ def daemon(tmp_path, request) -> Callable[..., DaemonHandle]:
 
         try:
             _wait_for_daemon_ready(proc, ready_timeout)
+        except UnsafeBusActivationError as exc:
+            # Something other than this fixture's own subprocess answered for
+            # BUS_NAME -- possibly a real, installed instance won a bus-name
+            # race. Abort the whole session rather than merely failing this
+            # test: continuing could spawn more daemons against an unsafe bus.
+            pytest.exit(f"tests/e2e refusing to continue: {exc}", returncode=1)
         except RuntimeError:
             tail = ""
             try:
