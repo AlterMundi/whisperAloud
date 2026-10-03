@@ -369,7 +369,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 if client.is_connected:
                     GLib.idle_add(self._on_daemon_connected, client)
                 else:
-                    GLib.idle_add(self._on_connect_attempt_failed, attempt)
+                    GLib.idle_add(
+                        self._on_connect_attempt_failed, attempt, client.is_starting
+                    )
             except Exception as e:
                 logger.error(f"Failed to connect to daemon: {e}", exc_info=True)
                 GLib.idle_add(self._on_load_error, str(e))
@@ -377,20 +379,32 @@ class MainWindow(Gtk.ApplicationWindow):
         threading.Thread(target=_connect_in_thread, daemon=True).start()
         return False
 
-    def _on_connect_attempt_failed(self, attempt: int) -> bool:
+    def _on_connect_attempt_failed(self, attempt: int, starting: bool = False) -> bool:
         """
         Called on the main thread after a failed D-Bus activation attempt.
 
-        Delegates to the pure decide_after_attempt() policy (WHISP-60): either
-        schedule another automatic attempt with backoff, or give up and show
-        the "daemon unavailable" state with a manual retry button.
+        Delegates to the pure decide_after_attempt() policy (WHISP-60/field
+        bug 1): either schedule another automatic attempt with backoff, or
+        give up and show the "daemon unavailable" state with a manual retry
+        button. `starting` (from WhisperAloudClient.is_starting) means the
+        bus name is owned but the daemon hasn't published its D-Bus object
+        yet -- a much longer, steady retry budget applies in that case (see
+        daemon_connect_logic.DEFAULT_STARTING_MAX_AUTO_RETRIES) instead of
+        the short exponential-backoff one used for a plain "nothing there at
+        all" failure.
 
         Returns:
             False to remove this idle callback
         """
-        decision = decide_after_attempt(connected=False, attempt=attempt)
+        decision = decide_after_attempt(connected=False, attempt=attempt, starting=starting)
 
-        if decision.phase is ConnectPhase.WAITING_RETRY:
+        if decision.phase is ConnectPhase.STARTING:
+            self._hide_loading_dialog()
+            self.status_bar.set_status("Daemon is starting, please wait...")
+            self._retry_timeout_id = GLib.timeout_add(
+                int(decision.retry_delay_seconds * 1000), self._init_components_async
+            )
+        elif decision.phase is ConnectPhase.WAITING_RETRY:
             self._hide_loading_dialog()
             self.status_bar.set_status(
                 f"Daemon not available, retrying in {decision.retry_delay_seconds:.0f}s..."
