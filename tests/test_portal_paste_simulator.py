@@ -222,6 +222,74 @@ class TestSessionCreationOrder:
         assert len([c for c in harness.call_log if isinstance(c, tuple)]) == 4
 
 
+class TestSessionReadyOnlyAfterStart:
+    """Regression test for a real bug found via the dbus_private integration
+    test (tests/test_portal_paste_integration.py): `_session_path` -- the
+    flag simulate_paste() checks to decide the session is ready -- was
+    previously set as soon as CreateSession's Response arrived, long before
+    SelectDevices/Start ran. A caller (or a readiness-polling helper like
+    the integration test's `_pump_until`) that observed "ready" at that
+    point and sent NotifyKeyboardKeysym would appear to work (the fake/real
+    portal accepts it) while SelectDevices/Start -- and therefore the
+    restore_token consent dialog -- never actually happened, so no token
+    was ever requested or persisted and the dialog would reappear every
+    session. Session readiness must only become true after Start's
+    Response, never earlier."""
+
+    def test_session_path_is_none_until_create_session_responds(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.simulate_paste("ctrl+v")
+            assert sim._session_path is None
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            # CreateSession succeeded -- a session handle exists on the
+            # portal side -- but it is NOT yet ready: SelectDevices/Start
+            # haven't run.
+            assert sim._session_path is None
+            assert sim._session_handle == "/session/1"
+
+    def test_session_path_is_none_until_select_devices_responds(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.simulate_paste("ctrl+v")
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            harness.respond("SelectDevices", 0, {})
+            # SelectDevices succeeded too, but Start hasn't run -- still not
+            # ready, and critically the restore_token consent (granted by
+            # Start) hasn't happened yet.
+            assert sim._session_path is None
+
+    def test_session_path_is_set_only_after_start_responds(self):
+        harness = _FakeHarness()
+        with harness as sim:
+            harness.run_setup_to_ready(sim)
+            assert sim._session_path == "/session/1"
+
+    def test_simulate_paste_does_not_send_notify_before_start_completes(self):
+        """The core symptom: calling simulate_paste() again after
+        CreateSession/SelectDevices but before Start answers must NOT send
+        NotifyKeyboardKeysym -- it must still report "not ready" and fall
+        back to clipboard-only."""
+        harness = _FakeHarness()
+        with harness as sim:
+            sim.simulate_paste("ctrl+v")
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            harness.respond("SelectDevices", 0, {})
+
+            assert sim.simulate_paste("ctrl+v") is False
+            assert not any(isinstance(c, tuple) for c in harness.call_log)
+
+            harness.respond("Start", 0, {})
+            assert sim.simulate_paste("ctrl+v") is True
+            assert any(isinstance(c, tuple) for c in harness.call_log)
+
+
 class TestRestoreToken:
     def test_new_restore_token_is_persisted(self):
         saved = {}

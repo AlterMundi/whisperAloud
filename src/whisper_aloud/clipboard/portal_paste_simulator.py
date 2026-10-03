@@ -160,6 +160,19 @@ class PortalPasteSimulator:
         self._GLib = None
         self._bus = None
         self._proxy = None
+        # `_session_handle` is the RemoteDesktop session object path as soon
+        # as CreateSession succeeds -- needed to build SelectDevices/Start's
+        # arguments while setup is still in progress. `_session_path` is the
+        # "ready for NotifyKeyboardKeysym" flag `simulate_paste()` checks,
+        # and must only become non-None once Start's Response has actually
+        # arrived (bug found via tests/test_portal_paste_integration.py: it
+        # was previously set as soon as CreateSession responded, so a caller
+        # racing session setup -- or this module's own _pump_until-style
+        # readiness check -- could see "ready" and send
+        # NotifyKeyboardKeysym/treat the session as usable before
+        # SelectDevices/Start ever ran, meaning the consent dialog's
+        # restore_token was silently never requested or persisted).
+        self._session_handle = None
         self._session_path = None
         self._session_failed = False
         # Guards against starting a second concurrent session-setup chain
@@ -349,7 +362,7 @@ class PortalPasteSimulator:
                     session = v.unpack() if hasattr(v, "unpack") else v
 
             if response == 0 and session:
-                self._session_path = session
+                self._session_handle = session
                 on_done(True)
             else:
                 logger.warning("RemoteDesktop CreateSession failed (response=%s)", response)
@@ -375,7 +388,7 @@ class PortalPasteSimulator:
             if restore_token:
                 opts_dict["restore_token"] = GLib.Variant("s", restore_token)
             opts = GLib.Variant("a{sv}", opts_dict)
-            return GLib.Variant.new_tuple(GLib.Variant("o", self._session_path), opts)
+            return GLib.Variant.new_tuple(GLib.Variant("o", self._session_handle), opts)
 
         def _on_response(response, _results):
             if response == 0:
@@ -400,7 +413,7 @@ class PortalPasteSimulator:
         def _build_args(handle_token):
             opts = GLib.Variant("a{sv}", {"handle_token": GLib.Variant("s", handle_token)})
             return GLib.Variant.new_tuple(
-                GLib.Variant("o", self._session_path),
+                GLib.Variant("o", self._session_handle),
                 GLib.Variant("s", ""),  # parent_window
                 opts,
             )
@@ -434,9 +447,15 @@ class PortalPasteSimulator:
     def _finish_session_setup(self, ok: bool) -> None:
         self._session_pending = False
         if ok:
+            # Only now -- after Start's Response actually arrived -- is the
+            # session ready for NotifyKeyboardKeysym. See __init__'s comment
+            # on _session_handle vs. _session_path for why this must not
+            # happen any earlier (e.g. right after CreateSession).
+            self._session_path = self._session_handle
             logger.info("RemoteDesktop portal session ready for paste")
         else:
             self._session_failed = True
+            self._session_handle = None
             self._session_path = None
             self._emit_fallback("RemoteDesktop portal session setup failed")
 
@@ -551,11 +570,17 @@ class PortalPasteSimulator:
         the live session here does not require re-consent next run.
         """
         self._closed = True
-        if self._session_path and self._bus is not None:
+        # Use _session_handle, not _session_path: a session object can exist
+        # on the portal side (CreateSession already succeeded) even while
+        # setup is still in progress (SelectDevices/Start not done yet, so
+        # _session_path -- the "ready" flag -- is still None); that session
+        # should still be closed on shutdown rather than left dangling.
+        session_to_close = self._session_handle
+        if session_to_close and self._bus is not None:
             try:
                 self._bus.call_sync(
                     _PORTAL_BUS,
-                    self._session_path,
+                    session_to_close,
                     _IFACE_SESSION,
                     "Close",
                     None,
@@ -564,7 +589,8 @@ class PortalPasteSimulator:
                     1000,
                     None,
                 )
-                logger.info("Closed RemoteDesktop session %s", self._session_path)
+                logger.info("Closed RemoteDesktop session %s", session_to_close)
             except Exception as e:
                 logger.debug("Session.Close failed (non-fatal, shutting down anyway): %s", e)
+        self._session_handle = None
         self._session_path = None
