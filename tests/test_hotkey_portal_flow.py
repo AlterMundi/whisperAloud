@@ -72,7 +72,7 @@ class _FakePortalHarness:
             return None
         raise AssertionError(f"unexpected bus.call_sync: {iface}.{method}")
 
-    def _fake_call_request(self, method_name, args, timeout_ms=5000):
+    def _fake_call_request(self, method_name, args, timeout_ms=5000, response_timeout_ms=5000):
         if method_name == "CreateSession":
             self.call_log.append("CreateSession")
             return 0, {
@@ -283,6 +283,199 @@ class TestCallRequestTimeout:
         )
 
         assert captured["timeout"] == 1234
+
+    def test_response_timeout_none_schedules_no_timeout_source(self):
+        """BindShortcuts (response_timeout_ms=None) must never arm a GLib
+        timeout for the Response wait -- a fixed deadline on an interactive
+        request is exactly the bug being fixed (maintainer design directive:
+        no timeout for interactive portal requests)."""
+        mock_bus = MagicMock(name="bus")
+        mock_bus.get_unique_name.return_value = ":1.7"
+        captured = {}
+
+        def _signal_subscribe(sender, iface, signal, path, arg0, flags, callback):
+            captured["callback"] = callback
+            return 1
+
+        mock_bus.signal_subscribe.side_effect = _signal_subscribe
+
+        mock_proxy = MagicMock(name="proxy")
+
+        def _call_sync(method_name, args, flags, timeout, cancellable):
+            fake_params = GLib.Variant("(ua{sv})", (0, {}))
+            GLib.idle_add(captured["callback"], None, None, None, None, None, fake_params)
+            return None
+
+        mock_proxy.call_sync.side_effect = _call_sync
+
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=mock_proxy),
+            patch.object(GLib, "timeout_add") as mock_timeout_add,
+        ):
+            portal = PortalHotkeys(app_id="org.fede.whisperaloud")
+            portal._pending_handle_token = "wa_req_test"
+            response, results = portal._call_request(
+                "BindShortcuts",
+                GLib.Variant.new_tuple(GLib.Variant("a{sv}", {})),
+                response_timeout_ms=None,
+            )
+
+        assert response == 0
+        mock_timeout_add.assert_not_called()
+
+
+class TestBindShortcutsPendingGuard:
+    """Field bug 2 follow-up: never issue a second interactive BindShortcuts
+    request while one is already pending -- that produced an observed
+    response=2 on the portal's side for the abandoned first request."""
+
+    def test_second_concurrent_bind_is_refused(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            portal.create_session()
+            portal._bind_pending = True  # simulate a request already in flight
+            portal.bind_shortcuts(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+            )
+
+        # BindShortcuts must never have been attempted while one was pending.
+        assert "BindShortcuts" not in harness.call_log
+
+    def test_flag_cleared_after_bind_completes(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            portal.create_session()
+            portal.bind_shortcuts(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+            )
+            assert portal._bind_pending is False
+
+    def test_flag_cleared_even_if_bind_raises(self):
+        harness = _FakePortalHarness(bound_ids=set())
+
+        def _raising_call_request(self, method_name, args, timeout_ms=5000,
+                                   response_timeout_ms=5000):
+            if method_name == "CreateSession":
+                return 0, {"session_handle": GLib.Variant("o", "/s/1")}
+            if method_name == "ListShortcuts":
+                return 0, {"shortcuts": []}
+            raise RuntimeError("boom")
+
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+            patch.object(PortalHotkeys, "_call_request", _raising_call_request),
+        ):
+            portal = PortalHotkeys(app_id="org.fede.whisperaloud")
+            portal.create_session()
+            with pytest.raises(RuntimeError):
+                portal.bind_shortcuts(
+                    shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                    on_activated=lambda sid: None,
+                )
+            assert portal._bind_pending is False
+
+
+class TestBindShortcutsResponseTwo:
+    """response=2 ("ended without a normal user response") must be logged
+    distinctly, not just folded into the generic failure branch, and must
+    never raise -- it's a recoverable degradation."""
+
+    def test_response_two_is_handled_without_raising(self, caplog):
+        harness = _FakePortalHarness(bound_ids=set())
+
+        def _fake_call_request(self, method_name, args, timeout_ms=5000,
+                                response_timeout_ms=5000):
+            if method_name == "CreateSession":
+                return 0, {"session_handle": GLib.Variant("o", "/s/1")}
+            if method_name == "ListShortcuts":
+                return 0, {"shortcuts": []}
+            if method_name == "BindShortcuts":
+                return 2, {}
+            raise AssertionError(method_name)
+
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+            patch.object(PortalHotkeys, "_call_request", _fake_call_request),
+            caplog.at_level("WARNING"),
+        ):
+            portal = PortalHotkeys(app_id="org.fede.whisperaloud")
+            portal.create_session()
+            portal.bind_shortcuts(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+            )
+
+        assert any("response=2" in rec.message for rec in caplog.records)
+        assert portal._bind_pending is False
+
+
+class TestBindShortcutsIfNeededAsync:
+    def test_already_bound_runs_synchronously_no_thread(self):
+        harness = _FakePortalHarness(bound_ids={"toggle"})
+        with harness as portal:
+            portal.create_session()
+            done = []
+            with patch("whisper_aloud.service.hotkey_portal.threading.Thread") as mock_thread:
+                portal.bind_shortcuts_if_needed_async(
+                    shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                    on_activated=lambda sid: None,
+                    on_done=lambda: done.append(True),
+                )
+                mock_thread.assert_not_called()
+        assert done == [True]
+        assert "BindShortcuts" not in harness.call_log
+
+    def test_not_bound_spawns_background_thread(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            portal.create_session()
+            with patch("whisper_aloud.service.hotkey_portal.threading.Thread") as mock_thread:
+                portal.bind_shortcuts_if_needed_async(
+                    shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                    on_activated=lambda sid: None,
+                )
+                mock_thread.assert_called_once()
+                # The real work must happen inside the thread target, not
+                # before the thread is even started.
+                assert "BindShortcuts" not in harness.call_log
+
+
+class TestSessionClose:
+    """Sessions must be closed via org.freedesktop.portal.Session.Close() on
+    the session's own path, not a nonexistent GlobalShortcuts.EndSession."""
+
+    def test_close_calls_session_close_on_session_path(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            portal.create_session()
+            harness.mock_bus.call_sync.reset_mock()
+            portal.close()
+
+        harness.mock_bus.call_sync.assert_called_once()
+        call_args = harness.mock_bus.call_sync.call_args[0]
+        assert call_args[0] == "org.freedesktop.portal.Desktop"
+        assert call_args[1] == "/org/freedesktop/portal/desktop/session/1"
+        assert call_args[2] == "org.freedesktop.portal.Session"
+        assert call_args[3] == "Close"
+
+    def test_close_never_raises_when_session_close_fails(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            portal.create_session()
+            harness.mock_bus.call_sync.side_effect = GLib.Error("no such object")
+            portal.close()  # must not raise
+
+        assert portal._session_path is None
+
+    def test_close_with_no_session_is_a_no_op(self):
+        harness = _FakePortalHarness()
+        with harness as portal:
+            portal.close()  # never called create_session(); must not raise
 
 
 class TestListShortcutsParsing:

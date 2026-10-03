@@ -208,7 +208,13 @@ class HotkeyManager:
                 if shortcut_id == "toggle":
                     callback()
 
-            portal.bind_shortcuts_if_needed(
+            # Non-blocking (field bug 2): BindShortcuts can show an
+            # interactive consent dialog and now waits indefinitely for the
+            # user's response (see PortalHotkeys.bind_shortcuts), so this
+            # must never run on the caller's thread -- HotkeyManager() is
+            # constructed from WhisperAloudService.__init__, before the
+            # daemon's D-Bus object is published.
+            portal.bind_shortcuts_if_needed_async(
                 shortcuts=[
                     {
                         "id": "toggle",
