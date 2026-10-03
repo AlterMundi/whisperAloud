@@ -1,0 +1,12 @@
+# Runtime Python dependencies shipped inside the Flatpak (WHISP-61).
+# Mirrors [project.dependencies] + the `parakeet` extra in pyproject.toml.
+# PyGObject (gi) comes from the GNOME runtime; dev/test tools are excluded.
+# Regenerate python3-requirements.json with: scripts/build_flatpak.sh --regen-deps
+faster-whisper>=1.1.0
+numpy>=1.24.0
+sounddevice>=0.4.6
+soundfile>=0.12.0
+scipy>=1.11.0
+psutil>=5.9.0
+pydbus>=0.6.0
+sherpa-onnx>=1.13.8
