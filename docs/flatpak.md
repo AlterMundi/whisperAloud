@@ -14,6 +14,73 @@ bundle. This document has four parts:
 Flathub-specific requirements and blockers are covered in
 `docs/flathub-submission.md`.
 
+## First run
+
+Two GNOME permission dialogs are part of normal first-run behavior for the
+Flatpak build. Both are asked once and then remembered by GNOME (not by
+WhisperAloud) — you won't see either again on a later start unless you
+explicitly revoke the permission.
+
+### "Add keyboard shortcuts" (GlobalShortcuts portal)
+
+The first time the daemon starts, it asks the `GlobalShortcuts` portal to
+bind the recording-toggle shortcut (default `<Super><Alt>r`). GNOME shows an
+"Add keyboard shortcuts" dialog listing WhisperAloud's requested shortcut;
+pick the key combination you want (or accept the default) and confirm.
+
+- **If you accept:** the shortcut works immediately, and the daemon's
+  `ListShortcuts` check on every later start sees it's already bound, so the
+  dialog does not reappear.
+- **If you decline or close the dialog:** no global hotkey is registered.
+  WhisperAloud still works — start/stop recording via the GUI's record
+  button or `whisper-aloud toggle` from a terminal — but the keyboard
+  shortcut won't trigger it until you grant this permission (see below for
+  how to retry).
+
+### Remote Desktop ("Share your screen") — Flatpak paste only
+
+Outside Flatpak, WhisperAloud pastes transcribed text into the focused
+window using `ydotool`/`xdotool`. Neither is available inside the sandbox,
+so the Flatpak build instead asks the `RemoteDesktop` portal for permission
+to synthesize a paste keystroke. This dialog appears the first time
+WhisperAloud actually tries to auto-paste (not at daemon startup) — GNOME's
+"Share your screen" style picker, asking you to choose what the app can
+interact with.
+
+1. Choose **Allow Remote Interaction** (WhisperAloud only ever sends a
+   keyboard shortcut — it does not request screen capture, pointer, or
+   touch access).
+2. Check **Remember This Selection** so you aren't asked again.
+3. Select **Share** to confirm.
+
+- **If you accept and remember:** the portal issues a `restore_token` that
+  WhisperAloud saves (`~/.var/app/org.fede.whisperaloud/data/whisper_aloud/
+  portal_restore_token`) and presents on every later session, so the dialog
+  does not reappear.
+- **If you decline, close the dialog, or don't check "Remember":**
+  WhisperAloud falls back to clipboard-only for that paste (and any later
+  one, until you grant the permission) — the transcript is still copied, you
+  just need to paste it yourself with <kbd>Ctrl</kbd>+<kbd>V</kbd>.
+
+### Changing or revoking either permission later
+
+- **Keyboard shortcut:** GNOME Settings → Keyboard → View and Customize
+  Shortcuts. WhisperAloud's shortcut is listed there like any other
+  application shortcut; you can rebind or remove it.
+- **Remote Desktop / paste access:** GNOME Settings → Apps → WhisperAloud →
+  Permissions (or Settings → Privacy → Remote Desktop, depending on your
+  GNOME version). Toggling it off there means the next paste attempt asks
+  again.
+- **Reset everything at once** (both dialogs, plus any other portal grant)
+  from a terminal:
+
+  ```sh
+  flatpak permission-reset org.fede.whisperaloud
+  ```
+
+  The next daemon start (for the shortcut) and the next paste attempt (for
+  Remote Desktop) will prompt again.
+
 ## Portal notes (WHISP-59)
 
 ### Correction: no portal `--talk-name` is needed
