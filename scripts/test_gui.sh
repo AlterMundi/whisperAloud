@@ -17,11 +17,24 @@
 #     below) — so a plain `pytest`/`pytest -q` run (which never sets that var) still
 #     gets the fully-isolated, no-display environment conftest.py guarantees.
 #
+# SAFETY: the `env -i` below already means dbus-run-session is started with no
+# XDG_DATA_DIRS at all, so the system default session.conf's
+# <standard_session_servicedirs/> has nothing Flatpak-derived to resolve from
+# the environment -- but we still pass --config-file explicitly (same
+# dedicated, servicedir-free config as scripts/test_private_bus.sh) rather
+# than rely on that as the only guard. See tests/dbus/session-test.conf.
+#
 # Usage: scripts/test_gui.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PYTHON="${WHISPER_ALOUD_VENV_PYTHON:-$HOME/.venvs/whisper_aloud/bin/python}"
+DBUS_TEST_CONFIG="$REPO_ROOT/tests/dbus/session-test.conf"
+
+if [ ! -f "$DBUS_TEST_CONFIG" ]; then
+    echo "scripts/test_gui.sh: missing $DBUS_TEST_CONFIG" >&2
+    exit 1
+fi
 
 if [ ! -x "$VENV_PYTHON" ]; then
     echo "scripts/test_gui.sh: venv python not found/executable: $VENV_PYTHON" >&2
@@ -50,7 +63,7 @@ env -i \
     VENV_PYTHON="$VENV_PYTHON" \
     REPO_ROOT="$REPO_ROOT" \
     timeout 120 \
-    dbus-run-session -- \
+    dbus-run-session "--config-file=$DBUS_TEST_CONFIG" -- \
     xvfb-run -a bash -c '
         set -euo pipefail
         # Preserve the Xvfb DISPLAY xvfb-run just set, under a name the root
