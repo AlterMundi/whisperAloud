@@ -3,6 +3,8 @@
 import logging
 from typing import Callable, Optional
 
+from ..sandbox import is_flatpak_sandbox
+
 logger = logging.getLogger(__name__)
 
 # Try to import GTK3 and AyatanaAppIndicator3
@@ -26,6 +28,11 @@ def _is_gnome_no_appindicator() -> bool:
 
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
     if "gnome" not in desktop:
+        return False
+    if is_flatpak_sandbox():
+        # WHISP-61: inside Flatpak `gsettings` reads the sandbox's own
+        # settings backend, not the host's org.gnome.shell keys, so it
+        # cannot see the host's extensions. Unknown -> don't nag.
         return False
     try:
         result = subprocess.run(

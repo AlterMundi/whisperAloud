@@ -213,3 +213,30 @@ class TestIndicatorMenu:
             quit_item = [i for i in menu_items if i._label == "Quit"][0]
             quit_item._callback(None)
             assert len(quit_called) == 1
+
+
+class TestGnomeTrayNudgeInFlatpak:
+    """WHISP-61: inside Flatpak, `gsettings` reads the sandbox's own settings
+    backend, not the host's org.gnome.shell keys, so it cannot tell whether
+    the host has the AppIndicator extension. The nudge must not probe (no
+    subprocess) and must report "unknown" (False) rather than nagging."""
+
+    def test_sandbox_skips_gsettings_probe(self, monkeypatch):
+        from whisper_aloud.service import indicator as ind
+
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+        monkeypatch.setattr(ind, "is_flatpak_sandbox", lambda: True)
+        with patch("subprocess.run") as run, patch("subprocess.Popen") as popen:
+            assert ind._is_gnome_no_appindicator() is False
+            run.assert_not_called()
+            popen.assert_not_called()
+
+    def test_native_gnome_still_probes_gsettings(self, monkeypatch):
+        from whisper_aloud.service import indicator as ind
+
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+        monkeypatch.setattr(ind, "is_flatpak_sandbox", lambda: False)
+        with patch("subprocess.run") as run:
+            run.return_value = MagicMock(stdout="['other@ext']")
+            assert ind._is_gnome_no_appindicator() is True
+            run.assert_called_once()
