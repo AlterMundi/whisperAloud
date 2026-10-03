@@ -815,6 +815,39 @@ def test_download_model_nemotron_prints_one_line_license_notice(monkeypatch, cap
     assert "THIRD_PARTY_MODELS.md" in out
 
 
+def test_download_model_nemotron_resolves_via_model_sources(monkeypatch, tmp_path, capsys):
+    """WHISP-86: `download-model nemotron-3.5-streaming-560ms` must actually
+    resolve through `ensure_model`'s normal MODEL_SOURCES lookup (same path as
+    parakeet), not just happen to print a success message -- only `_download`
+    is monkeypatched here (copies a local fixture tarball), so this exercises
+    `ensure_model`/`MODEL_SOURCES` for real, with no network access."""
+    import tarfile
+    from pathlib import Path
+
+    import whisper_aloud.stt.model_download as md
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = tmp_path / "src" / "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8"
+    src.mkdir(parents=True)
+    (src / "tokens.txt").write_text("<blk> 0\n")
+    (src / "encoder.onnx").write_bytes(b"\x00")
+    (src / "decoder.onnx").write_bytes(b"\x00")
+    (src / "joiner.onnx").write_bytes(b"\x00")
+    fixture = tmp_path / "fixture.tar.bz2"
+    with tarfile.open(fixture, "w:bz2") as tf:
+        tf.add(src, arcname=src.name)
+
+    def _fake_download(url, dest):
+        assert url == md.MODEL_SOURCES["nemotron-3.5-streaming-560ms"]
+        Path(dest).write_bytes(fixture.read_bytes())
+    monkeypatch.setattr(md, "_download", _fake_download)
+
+    rc = main(["download-model", "nemotron-3.5-streaming-560ms"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert str(md.model_dir("nemotron-3.5-streaming-560ms")) in out
+
+
 def test_download_model_standard_license_prints_no_notice(monkeypatch, capsys):
     import whisper_aloud.stt.model_download as md
     monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")

@@ -809,10 +809,16 @@ class TestDownloadModel:
             entry.engine, entry.name, False,
         )
 
-    def test_download_model_nemotron_no_longer_requires_accept_license(self, daemon):
+    def test_download_model_nemotron_no_longer_requires_accept_license(self, daemon, monkeypatch):
         """WHISP-86: nemotron-streaming's OpenMDW-1.1 license review completed
         (needs_review=False), so the daemon's DownloadModel no longer gates it
         behind accept_license=True."""
+        from whisper_aloud.stt import model_download
+
+        monkeypatch.setattr(
+            model_download, "download_model",
+            lambda name, progress_cb=None, cancel_event=None: progress_cb(10, 10),
+        )
         result = daemon.DownloadModel(
             "nemotron-streaming", "nemotron-3.5-streaming-560ms", False
         )
@@ -820,6 +826,37 @@ class TestDownloadModel:
         for call in daemon.Error.call_args_list:
             assert call[0][0] != "download_license_review_required"
         daemon._download_thread.join(timeout=2)
+
+    def test_download_model_nemotron_routes_to_sherpa_backend(self, daemon, monkeypatch):
+        """WHISP-86 bug fix: `_run_download` used to hardcode
+        `entry.engine == "parakeet"` for the sherpa-onnx tarball backend, so
+        `nemotron-streaming` (which also has a catalog `download_url`) fell
+        through to the `else: raise ValueError(...)` branch and could never
+        actually download -- DownloadModel still returned `True` (the thread
+        started) but DownloadFinished always reported `ok=False`. Routing is
+        now derived from `entry.download_url` instead of the engine name, so
+        this must call `model_download.download_model`, not raise."""
+        from whisper_aloud.stt import model_download
+
+        calls = []
+
+        def _fake_download(name, progress_cb=None, cancel_event=None):
+            calls.append(name)
+            if progress_cb is not None:
+                progress_cb(1, 1)
+
+        monkeypatch.setattr(model_download, "download_model", _fake_download)
+
+        result = daemon.DownloadModel(
+            "nemotron-streaming", "nemotron-3.5-streaming-560ms", False
+        )
+        assert result is True
+        daemon._download_thread.join(timeout=2)
+
+        assert calls == ["nemotron-3.5-streaming-560ms"]
+        daemon.DownloadFinished.assert_called_once_with(
+            "nemotron-streaming", "nemotron-3.5-streaming-560ms", True, ""
+        )
 
     def test_download_model_starts_thread_and_emits_finished_on_success(self, daemon, monkeypatch):
         from whisper_aloud.stt import model_download

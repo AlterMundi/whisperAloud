@@ -5,13 +5,21 @@ All notable user-facing changes to this project are documented here.
 ## [Unreleased]
 
 ### Changed
-- Nemotron 3.5 ASR Streaming's OpenMDW-1.1 license review (open since 0.3.0)
-  is complete: the engine is now a normal, visible choice in Settings and
+- Nemotron 3.5 ASR Streaming's OpenMDW-1.1 license (pending since 0.3.0) was
+  reviewed and accepted by the maintainer on 2026-10-03 (not via a formal
+  legal review): the engine is now a normal, visible choice in Settings and
   `whisper-aloud models`/`transcribe`/`download-model`, with no
   `--accept-license` flag required. Its license is still non-standard for
   this project, so downloading it still shows an explicit consent step (a
   dialog in Settings, a one-line notice on the CLI) -- see
   `docs/THIRD_PARTY_MODELS.md`.
+
+### Fixed
+- In-app/CLI download of the Nemotron engine (`DownloadModel` over D-Bus)
+  always failed with "Downloading is not supported for engine
+  'nemotron-streaming'", even though it has a catalog download URL like
+  Parakeet -- the daemon's download-backend routing is now derived from
+  that URL instead of a hardcoded engine-name check.
 
 ## [0.3.0] - 2026-10-02
 
