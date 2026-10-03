@@ -41,9 +41,14 @@ whisper-aloud transcribe meeting.wav --engine parakeet --model parakeet-tdt-0.6b
 whisper-aloud transcribe meeting.wav --model parakeet-tdt-0.6b-v3
 ```
 
-A model pending license review (shown as "(pending license review)" by
-`whisper-aloud models --all`) is never auto-selected and is rejected unless
-passed explicitly together with `--accept-license`.
+A model that is still pending license review (shown as "(pending license
+review)" by `whisper-aloud models --all`, hidden from the plain `models`
+listing) is never auto-selected and is rejected unless passed explicitly
+together with `--accept-license`. A model whose license has been reviewed but
+is non-standard for this project (e.g. Nemotron's OpenMDW-1.1, or Parakeet's
+CC-BY-4.0) shows up normally and needs no `--accept-license`;
+`download-model`/`transcribe` print a one-line license notice instead. See
+[`THIRD_PARTY_MODELS.md`](THIRD_PARTY_MODELS.md) for what each model license requires.
 
 ### Output formats and timestamps
 

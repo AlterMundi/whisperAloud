@@ -704,20 +704,48 @@ def test_models_marks_recommended_entries(capsys):
 
 
 # ─── WHISP-56 CHANGES_REQUIRED item 4: needs_review gating ─────────────────────
+#
+# WHISP-86: nemotron-streaming's license review completed (needs_review is now
+# False -- see tests/stt/test_catalog.py), so it's no longer this gate's real-world
+# example. These tests now exercise the general needs_review mechanism against a
+# synthetic catalog entry instead; nemotron's own new (no-gate, notice-only)
+# behavior is covered separately below.
 
 
-def test_models_hides_needs_review_entries_by_default(capsys):
+def _synthetic_needs_review_entry(**overrides):
+    from whisper_aloud.stt.catalog import ModelEntry
+
+    fields = dict(
+        engine="fake-pending-engine",
+        name="fake-pending-model",
+        label="Fake Pending Model",
+        size_mb=1,
+        languages=None,
+        streaming=False,
+        license="Fake-Pending-License",
+        devices=("cpu",),
+        tier="fast",
+        recommended=False,
+        needs_review=True,
+    )
+    fields.update(overrides)
+    return ModelEntry(**fields)
+
+
+def test_models_hides_needs_review_entries_by_default(monkeypatch, capsys):
     from whisper_aloud.stt import catalog
-    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    entry = _synthetic_needs_review_entry()
+    monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (entry,))
     rc = main(["models"])
     assert rc == 0
     out = capsys.readouterr().out
     assert entry.name not in out
 
 
-def test_models_all_shows_needs_review_entries_marked(capsys):
+def test_models_all_shows_needs_review_entries_marked(monkeypatch, capsys):
     from whisper_aloud.stt import catalog
-    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    entry = _synthetic_needs_review_entry()
+    monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (entry,))
     rc = main(["models", "--all"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -725,21 +753,108 @@ def test_models_all_shows_needs_review_entries_marked(capsys):
     assert "pending license review" in out
 
 
-def test_download_model_refuses_needs_review_without_accept_license(capsys):
-    rc = main(["download-model", "nemotron-3.5-streaming-560ms"])
+def test_download_model_refuses_needs_review_without_accept_license(monkeypatch, capsys):
+    from whisper_aloud.stt import catalog
+    entry = _synthetic_needs_review_entry(name="fake-pending-dl")
+    monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (entry,))
+    rc = main(["download-model", entry.name])
     assert rc == 1
     err = capsys.readouterr().err
     assert "pending license review" in err
-    assert "OpenMDW-1.1" in err
-    assert "whisp55-nemotron-sherpa-findings.md" in err
+    assert entry.license in err
 
 
 def test_download_model_proceeds_with_accept_license(monkeypatch, capsys):
+    from whisper_aloud.stt import catalog
+    import whisper_aloud.stt.model_download as md
+    entry = _synthetic_needs_review_entry(name="fake-pending-dl2")
+    monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (entry,))
+    monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")
+    rc = main(["download-model", entry.name, "--accept-license"])
+    assert rc == 0
+    assert f"/cache/{entry.name}" in capsys.readouterr().out
+
+
+# ─── WHISP-86: Nemotron license review completed -- no gate, notice instead ────
+
+
+def test_models_shows_nemotron_by_default():
+    """Nemotron's needs_review=False now, so it's a normal, visible catalog entry
+    (no --all needed) -- unlike before WHISP-86."""
+    from whisper_aloud.stt import catalog
+
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    assert entry.needs_review is False
+
+
+def test_models_lists_nemotron_without_all_flag(capsys):
+    rc = main(["models"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "nemotron-3.5-streaming-560ms" in out
+
+
+def test_download_model_nemotron_no_longer_requires_accept_license(monkeypatch, capsys):
     import whisper_aloud.stt.model_download as md
     monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")
-    rc = main(["download-model", "nemotron-3.5-streaming-560ms", "--accept-license"])
+    rc = main(["download-model", "nemotron-3.5-streaming-560ms"])
     assert rc == 0
     assert "/cache/nemotron-3.5-streaming-560ms" in capsys.readouterr().out
+
+
+def test_download_model_nemotron_prints_one_line_license_notice(monkeypatch, capsys):
+    """Non-blocking: the license notice is printed to stdout alongside the
+    success message, not required via --accept-license."""
+    import whisper_aloud.stt.model_download as md
+    monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")
+    rc = main(["download-model", "nemotron-3.5-streaming-560ms"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "License notice" in out
+    assert "OpenMDW-1.1" in out
+    assert "THIRD_PARTY_MODELS.md" in out
+
+
+def test_download_model_nemotron_resolves_via_model_sources(monkeypatch, tmp_path, capsys):
+    """WHISP-86: `download-model nemotron-3.5-streaming-560ms` must actually
+    resolve through `ensure_model`'s normal MODEL_SOURCES lookup (same path as
+    parakeet), not just happen to print a success message -- only `_download`
+    is monkeypatched here (copies a local fixture tarball), so this exercises
+    `ensure_model`/`MODEL_SOURCES` for real, with no network access."""
+    import tarfile
+    from pathlib import Path
+
+    import whisper_aloud.stt.model_download as md
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = tmp_path / "src" / "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8"
+    src.mkdir(parents=True)
+    (src / "tokens.txt").write_text("<blk> 0\n")
+    (src / "encoder.onnx").write_bytes(b"\x00")
+    (src / "decoder.onnx").write_bytes(b"\x00")
+    (src / "joiner.onnx").write_bytes(b"\x00")
+    fixture = tmp_path / "fixture.tar.bz2"
+    with tarfile.open(fixture, "w:bz2") as tf:
+        tf.add(src, arcname=src.name)
+
+    def _fake_download(url, dest):
+        assert url == md.MODEL_SOURCES["nemotron-3.5-streaming-560ms"]
+        Path(dest).write_bytes(fixture.read_bytes())
+    monkeypatch.setattr(md, "_download", _fake_download)
+
+    rc = main(["download-model", "nemotron-3.5-streaming-560ms"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert str(md.model_dir("nemotron-3.5-streaming-560ms")) in out
+
+
+def test_download_model_standard_license_prints_no_notice(monkeypatch, capsys):
+    import whisper_aloud.stt.model_download as md
+    monkeypatch.setattr(md, "ensure_model", lambda name: f"/cache/{name}")
+    rc = main(["download-model", "tiny"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "License notice" not in out
 
 
 def test_download_model_accept_license_is_a_no_op_for_non_review_models(monkeypatch, capsys):

@@ -388,7 +388,11 @@ def test_download_click_on_needs_review_entry_opens_consent_dialog_not_download(
     fake_client.download_model.return_value = True
     monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
 
-    entry = next(e for e in catalog.entries() if e.needs_review)
+    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
+    # license review completed), so it's no longer found via `e.needs_review` --
+    # but it's still a non-standard-license entry, so requires_license_consent()
+    # (and this consent-dialog flow) must still apply to it.
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
     shown = {}
     original = dialog._show_license_consent_dialog
 
@@ -415,7 +419,11 @@ def test_license_consent_dialog_cancel_sends_nothing(config, monkeypatch):
     fake_client = MagicMock()
     monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
 
-    entry = next(e for e in catalog.entries() if e.needs_review)
+    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
+    # license review completed), so it's no longer found via `e.needs_review` --
+    # but it's still a non-standard-license entry, so requires_license_consent()
+    # (and this consent-dialog flow) must still apply to it.
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
     dialog._on_license_consent_response(None, "cancel", entry)
 
     fake_client.download_model.assert_not_called()
@@ -431,7 +439,11 @@ def test_license_consent_dialog_accept_sends_accept_license_true(config, monkeyp
     fake_client.download_model.return_value = True
     monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
 
-    entry = next(e for e in catalog.entries() if e.needs_review)
+    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
+    # license review completed), so it's no longer found via `e.needs_review` --
+    # but it's still a non-standard-license entry, so requires_license_consent()
+    # (and this consent-dialog flow) must still apply to it.
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
     dialog._on_license_consent_response(None, "accept", entry)
 
     fake_client.download_model.assert_called_once_with(entry.engine, entry.name, True)
@@ -454,7 +466,11 @@ def test_license_consent_dialog_shows_label_license_and_doc_reference(config, mo
     fake_client.download_model.return_value = True
     monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
 
-    entry = next(e for e in catalog.entries() if e.needs_review)
+    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
+    # license review completed), so it's no longer found via `e.needs_review` --
+    # but it's still a non-standard-license entry, so requires_license_consent()
+    # (and this consent-dialog flow) must still apply to it.
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
     dialog._show_license_consent_dialog(entry)
 
     # The dialog was actually presented (no exception) -- now build one the same

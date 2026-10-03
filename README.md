@@ -229,4 +229,7 @@ GTK4/libadwaita.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE). This covers WhisperAloud's own code only:
+speech models are downloaded at runtime (never bundled, including in the
+Flatpak) and carry their own licenses; see
+[`docs/THIRD_PARTY_MODELS.md`](docs/THIRD_PARTY_MODELS.md).

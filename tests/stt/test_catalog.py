@@ -38,8 +38,18 @@ def test_every_engine_in_ENGINES_has_at_least_one_entry():
 
 
 def test_every_engine_has_exactly_one_recommended_default():
+    """Every engine has exactly one `recommended=True` entry -- except
+    `nemotron-streaming` (WHISP-86), which is intentionally never
+    auto-selected as a default (not recommended for any engine/language,
+    `recommended=False` on its only entry) even though its license review
+    completed and it is now a normal, visible picker entry."""
     for engine in catalog.ENGINES:
         recommended = [e for e in catalog.models_for(engine) if e.recommended]
+        if engine == "nemotron-streaming":
+            assert len(recommended) == 0, (
+                f"engine {engine!r} has {len(recommended)} recommended entries, expected 0"
+            )
+            continue
         assert len(recommended) == 1, (
             f"engine {engine!r} has {len(recommended)} recommended entries, expected 1"
         )
@@ -181,14 +191,23 @@ def test_nemotron_streaming_supports_es_and_en():
 
 
 def test_nemotron_streaming_engine_is_wired_into_engine_models():
-    """config.validate() derives its valid engines from this, so it must be present
-    even though the entry is kept out of the `ENGINES` UI picker (pending legal review)."""
+    """config.validate() derives its valid engines from this, so it must be present."""
     assert "nemotron-streaming" in catalog.engine_models()
     assert "nemotron-3.5-streaming-560ms" in catalog.engine_models()["nemotron-streaming"]
 
 
-def test_nemotron_streaming_not_in_engines_picker_pending_license_review():
-    assert "nemotron-streaming" not in catalog.ENGINES
+def test_nemotron_streaming_is_in_engines_picker():
+    """WHISP-86: the OpenMDW-1.1 license review completed, so nemotron-streaming is
+    now a normal, visible engine in the UI/CLI picker."""
+    assert "nemotron-streaming" in catalog.ENGINES
+    assert catalog.ENGINES["nemotron-streaming"] == "Nemotron (NVIDIA, streaming)"
+
+
+def test_nemotron_streaming_license_notes_point_to_third_party_docs():
+    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
+    assert "pending legal review" not in entry.notes
+    assert "NEEDS-HUMAN" not in entry.notes
+    assert "docs/THIRD_PARTY_MODELS.md" in entry.notes
 
 
 # ── WHISP-56 CHANGES_REQUIRED item 4: ModelEntry.needs_review ───────────────
@@ -196,13 +215,13 @@ def test_nemotron_streaming_not_in_engines_picker_pending_license_review():
 
 def test_needs_review_defaults_to_false():
     for entry in catalog.entries():
-        if entry.engine != "nemotron-streaming":
-            assert entry.needs_review is False, entry
+        assert entry.needs_review is False, entry
 
 
-def test_nemotron_streaming_needs_review_is_true():
+def test_nemotron_streaming_needs_review_is_false():
+    """WHISP-86: the OpenMDW-1.1 license review completed."""
     entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
-    assert entry.needs_review is True
+    assert entry.needs_review is False
 
 
 def test_recommended_never_returns_a_needs_review_entry(monkeypatch):

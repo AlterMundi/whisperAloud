@@ -77,21 +77,24 @@ def test_cancel_download_returns_false_when_idle(client):
     assert client.cancel_download() is False
 
 
-def test_download_model_needs_review_refused_without_accept_license(daemon):
+def test_download_model_nemotron_no_longer_requires_accept_license(daemon):
+    """WHISP-86: nemotron-streaming's OpenMDW-1.1 license review completed
+    (needs_review=False), so DownloadModel no longer refuses it without
+    accept_license=True the way it did under WHISP-56."""
     handle = daemon(config_overrides={"FAKE_DOWNLOAD": "1"})
     client = handle.client()
-    error_capture = SignalCapture(client, "Error")
+    finished = SignalCapture(client, "DownloadFinished")
 
     started = client.download_model(
         "nemotron-streaming", "nemotron-3.5-streaming-560ms", False
     )
-    assert started is False
-    assert client.get_status()["downloading"] is False
+    assert started is True
 
-    code, _message = error_capture.wait(
-        timeout=5.0, predicate=lambda code, message: code == "download_license_review_required"
+    engine, name, ok, error = finished.wait(timeout=10.0)
+    assert (engine, name, ok, error) == (
+        "nemotron-streaming", "nemotron-3.5-streaming-560ms", True, "",
     )
-    assert code == "download_license_review_required"
+    assert client.get_status()["downloading"] is False
 
     client.disconnect()
 

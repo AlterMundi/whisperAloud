@@ -190,19 +190,25 @@ def _hf_hub_cache_root() -> Path:
 def download_state_for(entry: ModelEntry) -> DownloadState:
     """Whether `entry`'s weights are already on disk, and how we know.
 
-    - engine == "parakeet": delegates to model_download.is_present(entry.name) (the
-      same tokens.txt/encoder*.onnx presence check model_download.ensure_model uses).
+    - any entry with a `download_url` (e.g. `parakeet`, and -- as of WHISP-86 --
+      `nemotron-streaming`): delegates to model_download.is_present(entry.name) (the
+      same tokens.txt/encoder*.onnx presence check model_download.ensure_model/
+      download_model use). Derived from `download_url` rather than a hardcoded
+      engine name, matching service/daemon.py's `_run_download` routing fix
+      (WHISP-86 bug: this used to only check `engine == "parakeet"`, so Nemotron
+      always showed as "not downloaded" in Settings even once its weights were on
+      disk -- every sherpa-onnx tarball entry shares this one presence check).
     - engine == "faster-whisper": a *heuristic* over the Hugging Face hub cache — looks
       for a `models--Systran--faster-whisper-<canonical-name>` directory containing at
       least one snapshot with a `model.bin` file. This is best-effort: a nonstandard
       HF_HUB_CACHE layout or a custom `model.download_root` can produce a false
       "not downloaded" notice even though the model loads fine — documented limitation,
       not a correctness bug (worst case is an unnecessary notice, not a functional break).
-    - Unknown engine (e.g. a future catalog entry this module doesn't know how to check):
-      detection = "unknown", downloaded = False (conservative: show the notice rather
-      than hide it).
+    - Unknown engine/no download_url (e.g. a future catalog entry this module doesn't
+      know how to check): detection = "unknown", downloaded = False (conservative:
+      show the notice rather than hide it).
     """
-    if entry.engine == "parakeet":
+    if entry.download_url:
         return DownloadState(
             downloaded=model_download.is_present(entry.name),
             detection="sherpa-onnx-cache",

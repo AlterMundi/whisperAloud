@@ -1243,7 +1243,7 @@ class WhisperAloudService:
 
     def _run_download(self, entry, cancel_event: threading.Event) -> None:
         """Background-thread worker for DownloadModel(). Performs the actual
-        download via the right backend for `entry.engine`, then emits
+        download via the right backend for `entry`, then emits
         DownloadFinished via idle_add (WHISP-68)."""
         ok = False
         error = ""
@@ -1261,7 +1261,17 @@ class WhisperAloudService:
                 fake_download.download_model(
                     entry.name, progress_cb=_progress, cancel_event=cancel_event
                 )
-            elif entry.engine == "parakeet":
+            elif entry.download_url:
+                # Any catalog entry with a `download_url` is a sherpa-onnx tarball
+                # (WHISP-86 bug fix): this used to be hardcoded to
+                # `entry.engine == "parakeet"`, which silently left every other
+                # sherpa-onnx engine with a `download_url` (e.g.
+                # `nemotron-streaming`) unable to ever download in production --
+                # DownloadModel always raised "Downloading is not supported for
+                # engine ...", even though `model_download.download_model`/
+                # `MODEL_SOURCES` already handle it by name, and
+                # `NemotronStreamingEngine.load_model` already reads from the
+                # exact same `model_download.model_dir(name)` this writes to.
                 model_download.download_model(
                     entry.name, progress_cb=_progress, cancel_event=cancel_event
                 )

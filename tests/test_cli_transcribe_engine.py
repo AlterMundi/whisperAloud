@@ -95,20 +95,48 @@ def test_resolve_model_only_finds_its_engine():
     assert (engine, model) == ("parakeet", "parakeet-tdt-0.6b-v3")
 
 
-def test_resolve_needs_review_model_rejected_without_accept_license():
+def test_resolve_needs_review_model_rejected_without_accept_license(monkeypatch):
+    """WHISP-86: nemotron-streaming's needs_review is now False, so it's no longer
+    this gate's real-world example -- exercise it against a synthetic needs_review
+    entry instead to keep the mechanism covered."""
     from whisper_aloud.stt import catalog
+    from whisper_aloud.stt.catalog import ModelEntry
+
+    pending = ModelEntry(
+        engine="fake-pending-engine", name="fake-pending-model", label="Fake Pending",
+        size_mb=1, languages=None, streaming=False, license="Fake-License",
+        devices=("cpu",), tier="fast", recommended=False, needs_review=True,
+    )
+    monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (pending,))
 
     with pytest.raises(ValueError, match="pending license review"):
-        _resolve_transcribe_model(
-            _Args(model="nemotron-3.5-streaming-560ms"), catalog
-        )
+        _resolve_transcribe_model(_Args(model="fake-pending-model"), catalog)
 
 
-def test_resolve_needs_review_model_allowed_with_accept_license():
+def test_resolve_needs_review_model_allowed_with_accept_license(monkeypatch):
+    from whisper_aloud.stt import catalog
+    from whisper_aloud.stt.catalog import ModelEntry
+
+    pending = ModelEntry(
+        engine="fake-pending-engine", name="fake-pending-model", label="Fake Pending",
+        size_mb=1, languages=None, streaming=False, license="Fake-License",
+        devices=("cpu",), tier="fast", recommended=False, needs_review=True,
+    )
+    monkeypatch.setattr(catalog, "_ENTRIES", catalog._ENTRIES + (pending,))
+
+    engine, model = _resolve_transcribe_model(
+        _Args(model="fake-pending-model", accept_license=True), catalog
+    )
+    assert (engine, model) == ("fake-pending-engine", "fake-pending-model")
+
+
+def test_resolve_nemotron_no_longer_requires_accept_license():
+    """WHISP-86: nemotron's OpenMDW-1.1 license review completed, so it resolves
+    like any other explicitly-named model -- no --accept-license needed."""
     from whisper_aloud.stt import catalog
 
     engine, model = _resolve_transcribe_model(
-        _Args(model="nemotron-3.5-streaming-560ms", accept_license=True), catalog
+        _Args(model="nemotron-3.5-streaming-560ms"), catalog
     )
     assert (engine, model) == ("nemotron-streaming", "nemotron-3.5-streaming-560ms")
 

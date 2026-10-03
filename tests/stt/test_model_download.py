@@ -35,6 +35,43 @@ def test_ensure_model_idempotent_skips_download(monkeypatch, tmp_path):
     assert called["download"] is False
 
 
+def test_model_sources_includes_nemotron_streaming():
+    """WHISP-86: nemotron-streaming has a catalog `download_url` like parakeet,
+    so it must resolve through the same sherpa-onnx tarball backend -- this is
+    what `service/daemon.py`'s `_run_download` now keys its routing on (derived
+    from `entry.download_url`, no longer hardcoded to `entry.engine ==
+    "parakeet"`)."""
+    assert "nemotron-3.5-streaming-560ms" in md.MODEL_SOURCES
+    assert md.MODEL_SOURCES["nemotron-3.5-streaming-560ms"].startswith("https://")
+
+
+def test_ensure_model_downloads_nemotron_streaming_via_sherpa_tarball(monkeypatch, tmp_path):
+    """`whisper-aloud download-model nemotron-3.5-streaming-560ms` (and the CLI's
+    `ensure_model` call behind it) resolves nemotron-streaming via MODEL_SOURCES
+    and downloads/extracts it exactly like parakeet -- no real network access
+    (`_download` is monkeypatched to copy a local fixture tarball)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = tmp_path / "src" / "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8"
+    src.mkdir(parents=True)
+    (src / "tokens.txt").write_text("<blk> 0\n")
+    (src / "encoder.onnx").write_bytes(b"\x00")
+    (src / "decoder.onnx").write_bytes(b"\x00")
+    (src / "joiner.onnx").write_bytes(b"\x00")
+    fixture = tmp_path / "fixture.tar.bz2"
+    with tarfile.open(fixture, "w:bz2") as tf:
+        tf.add(src, arcname=src.name)
+
+    def _fake_download(url, dest):
+        assert url == md.MODEL_SOURCES["nemotron-3.5-streaming-560ms"]
+        Path(dest).write_bytes(fixture.read_bytes())
+    monkeypatch.setattr(md, "_download", _fake_download)
+
+    d = md.ensure_model("nemotron-3.5-streaming-560ms")
+    assert (d / "tokens.txt").exists()
+    assert (d / "encoder.onnx").exists()
+    assert d == md.model_dir("nemotron-3.5-streaming-560ms")
+
+
 def test_ensure_model_downloads_and_flattens(monkeypatch, tmp_path):
     """ensure_model downloads the tarball, extracts, and flattens the single top dir."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
