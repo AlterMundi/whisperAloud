@@ -1,36 +1,109 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Fede and the WhisperAloud contributors -->
 <component type="desktop-application">
   <id>org.fede.whisperaloud</id>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
+
   <name>WhisperAloud</name>
-  <summary>Offline voice transcription for Linux</summary>
+  <summary>Dictate text offline with on-device speech recognition</summary>
+
+  <developer id="io.github.altermundi">
+    <name>Fede</name>
+  </developer>
+
   <description>
     <p>
-      WhisperAloud provides offline speech-to-text transcription using
-      OpenAI Whisper models. It runs as a background daemon with system
-      tray integration and global hotkeys, or as a standalone GTK4 application.
+      WhisperAloud turns your voice into text without sending audio anywhere.
+      Speech recognition runs entirely on your computer; an internet
+      connection is only used when you choose to download a model.
     </p>
-    <p>Features include:</p>
+    <p>
+      Open the window, press the record button or your global shortcut,
+      speak, and the transcription is copied to the clipboard and can be
+      typed into the focused application.
+    </p>
+    <p>Features:</p>
     <ul>
-      <li>Offline transcription — no internet required after model download</li>
-      <li>Professional audio pipeline with AGC, noise gate, and denoising</li>
-      <li>System tray integration with AppIndicator</li>
-      <li>Global hotkeys via XDG Desktop Portal or libkeybinder3</li>
-      <li>Automatic clipboard integration</li>
-      <li>Transcription history with search</li>
+      <li>Offline transcription with Whisper (faster-whisper) and Parakeet models</li>
+      <li>Live partial transcripts while you speak with streaming models</li>
+      <li>In-app model download with progress and an explicit license step</li>
+      <li>Audio clean-up pipeline: noise gate, automatic gain and peak limiter</li>
+      <li>Global shortcut through the desktop's shortcut portal</li>
+      <li>Automatic clipboard copy and optional paste into the focused window</li>
+      <li>Searchable transcription history with favorites and export</li>
     </ul>
   </description>
+
   <launchable type="desktop-id">org.fede.whisperaloud.desktop</launchable>
-  <url type="homepage">https://github.com/fede/whisper-aloud</url>
+
   <provides>
-    <dbus type="session">org.fede.whisperaloud</dbus>
+    <binary>whisper-aloud</binary>
+    <dbus type="user">org.fede.whisperaloud</dbus>
   </provides>
-  <content_rating type="oars-1.1" />
+
+  <url type="homepage">https://github.com/AlterMundi/whisperAloud</url>
+  <url type="bugtracker">https://github.com/AlterMundi/whisperAloud/issues</url>
+  <url type="vcs-browser">https://github.com/AlterMundi/whisperAloud</url>
+
+  <!-- Placeholder screenshots (WHISP-61): the images must be committed at
+       these paths before any store submission. -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>Main window while dictating</caption>
+      <image>https://raw.githubusercontent.com/AlterMundi/whisperAloud/master/docs/screenshots/main-window.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Choosing and downloading a speech model</caption>
+      <image>https://raw.githubusercontent.com/AlterMundi/whisperAloud/master/docs/screenshots/settings-models.png</image>
+    </screenshot>
+  </screenshots>
+
+  <keywords>
+    <keyword>dictation</keyword>
+    <keyword>speech to text</keyword>
+    <keyword>transcription</keyword>
+    <keyword>voice</keyword>
+    <keyword>whisper</keyword>
+  </keywords>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#99c1f1</color>
+    <color type="primary" scheme_preference="dark">#1a5fb4</color>
+  </branding>
+
+  <content_rating type="oars-1.1"/>
+
   <releases>
+    <release version="0.3.0" date="2026-10-02">
+      <description>
+        <p>Engine choice, streaming dictation and sandbox support.</p>
+        <ul>
+          <li>Pick a speech model from Settings; the matching engine is selected automatically</li>
+          <li>Parakeet models for much faster transcription on the CPU</li>
+          <li>Live partial transcripts while recording with the Nemotron streaming model</li>
+          <li>Download models from inside the app, with progress and cancel</li>
+          <li>The background service now starts on demand when the window opens</li>
+          <li>Paste and global shortcuts work through desktop portals when sandboxed</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.2.0" date="2026-02-20">
+      <description>
+        <p>Background service with a D-Bus control interface and history.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-02-19">
       <description>
-        <p>Initial release with daemon-first architecture.</p>
+        <p>Initial release.</p>
       </description>
     </release>
   </releases>
