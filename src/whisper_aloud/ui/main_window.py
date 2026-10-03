@@ -11,6 +11,8 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GLib, Gtk
 
 from ..config import WhisperAloudConfig
+from ..daemon_hints import gui_daemon_unavailable_hint
+from ..sandbox import is_flatpak_sandbox
 from ..service.history_client import DaemonHistoryManager
 from .daemon_connect_logic import ConnectPhase, decide_after_attempt
 from .error_handler import (
@@ -545,21 +547,9 @@ class MainWindow(Gtk.ApplicationWindow):
         box.append(title)
 
         has_user_service = (Path.home() / ".config/systemd/user/whisper-aloud.service").exists()
-        if has_user_service:
-            hint_text = (
-                "Start the daemon with:\n\n"
-                "  systemctl --user start whisper-aloud\n\n"
-                "Or run directly:\n\n"
-                "  whisper-aloud-daemon\n"
-                "  whisper-aloud --daemon"
-            )
-        else:
-            hint_text = (
-                "Start the daemon with:\n\n"
-                "  whisper-aloud-daemon\n"
-                "  whisper-aloud --daemon\n\n"
-                "Tip: run ./install.sh to enable systemd user service integration."
-            )
+        hint_text = gui_daemon_unavailable_hint(
+            is_flatpak=is_flatpak_sandbox(), has_user_service=has_user_service
+        )
 
         hint = Gtk.Label(label=hint_text)
         hint.set_wrap(True)
