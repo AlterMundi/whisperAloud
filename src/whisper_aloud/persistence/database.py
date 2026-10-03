@@ -24,7 +24,9 @@ class TranscriptionDatabase:
             db_path: Optional path to database file. Defaults to XDG data directory.
         """
         if db_path is None:
-            db_path = Path.home() / ".local/share/whisper_aloud/history.db"
+            from ..config import user_data_dir
+
+            db_path = user_data_dir() / "history.db"
 
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

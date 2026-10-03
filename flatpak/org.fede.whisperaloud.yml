@@ -1,0 +1,169 @@
+# Flatpak manifest for WhisperAloud (WHISP-61).
+#
+# Local build: scripts/build_flatpak.sh (builds, exports to a local OSTree
+# repo and writes a single-file bundle). Install/validate steps:
+# docs/flatpak.md. Flathub notes: docs/flathub-submission.md.
+#
+# App ID: Flatpak only lets an app own D-Bus names equal to or below its
+# app ID, and grants that without any --own-name. The daemon's bus name
+# (org.fede.whisperaloud) and the GtkApplication ID
+# (org.fede.whisperaloud.Gui) both fall under org.fede.whisperaloud, and the
+# desktop entry is already org.fede.whisperaloud.desktop.
+id: org.fede.whisperaloud
+
+# GNOME 51 is the current stable GNOME runtime (51.0, freedesktop-sdk 26.08,
+# Python 3.14). It ships GTK 4, libadwaita, PyGObject, GTK 3 (for the
+# AppIndicator tray), libnotify (portal-backed in Flatpak) and libsndfile.
+# Every binary wheel below has a cp314 / abi3 manylinux build.
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+
+# Window-first: launching the app opens the GTK4 window; the window's first
+# D-Bus call auto-starts the daemon through the exported activation file
+# (see the whisper-aloud module below and docs/dbus-activation.md).
+command: whisper-aloud-gui
+
+finish-args:
+  # Display. GTK4 window (and the daemon's GTK3 tray menu) on Wayland, with
+  # X11 only as a fallback when no Wayland compositor is available. IPC is
+  # shared for X11 MIT-SHM, as recommended alongside fallback-x11.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # GPU access for GTK4's GL/Vulkan renderer. Speech inference runs on the
+  # CPU in this build (no CUDA in the sandbox).
+  - --device=dri
+  # Microphone capture. sounddevice -> PortAudio (ALSA) -> the runtime's
+  # ALSA pulse plugin -> PipeWire's PulseAudio server. Flatpak has no
+  # finer-grained "microphone only" permission for PulseAudio clients.
+  - --socket=pulseaudio
+  # Network is used only for user-initiated model downloads: Whisper and
+  # Parakeet models from the Hugging Face Hub, sherpa-onnx models from
+  # GitHub release assets. Transcription itself is fully offline. There is
+  # no portal for this; dropping it would make the app unusable on first
+  # run (no model is bundled: models are 75 MB to 3 GB, with their own
+  # licenses that the user accepts in-app before downloading).
+  - --share=network
+  # System tray: the daemon publishes a StatusNotifierItem via
+  # libayatana-appindicator and must reach the host's watcher. The tray is
+  # optional (the window is the primary UI); without a watcher it is simply
+  # not shown.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # "Pause media while recording" (recording_flow.pause_media, on by
+  # default): lists and pauses/resumes MPRIS players over the session bus.
+  # Without this the feature silently does nothing.
+  - --talk-name=org.mpris.MediaPlayer2.*
+  # Deliberately NOT requested:
+  # - --own-name: org.fede.whisperaloud and org.fede.whisperaloud.Gui are
+  #   at/below the app ID, which Flatpak allows by default.
+  # - --talk-name=org.freedesktop.portal.*: portals are always reachable.
+  #   GlobalShortcuts (hotkey), RemoteDesktop (paste, WHISP-59) and
+  #   Notification (libnotify uses it automatically) need nothing here.
+  # - --talk-name=org.freedesktop.Notifications: replaced by the portal.
+  # - --filesystem=home or any host path: config, history and model caches
+  #   live in ~/.var/app/org.fede.whisperaloud/ (XDG_CONFIG_HOME,
+  #   XDG_DATA_HOME, XDG_CACHE_HOME). The CLI `transcribe` subcommand can be
+  #   handed a file with `flatpak run --file-forwarding ... @@ FILE @@`, or
+  #   the user can grant e.g. `flatpak override --user
+  #   --filesystem=xdg-download:ro org.fede.whisperaloud`.
+  # - --socket=session-bus / --socket=system-bus: not needed.
+  # - --device=all: no raw device access; audio goes through PulseAudio.
+
+# License files: flatpak-builder records each module's LICENSE/COPYING into
+# /app/share/licenses/org.fede.whisperaloud/<module>/ automatically.
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+  - /share/doc
+  - /share/gtk-doc
+  - /share/aclocal
+  - '*.la'
+  - '*.a'
+
+modules:
+  # PortAudio: sounddevice loads libportaudio.so via ctypes; it is not part
+  # of the GNOME runtime. ALSA backend only (routes to PulseAudio/PipeWire
+  # through the runtime's ALSA pulse plugin); no JACK/OSS.
+  - name: portaudio
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --with-alsa
+      - --without-jack
+      - --without-oss
+    # PortAudio's autotools build is not parallel-safe.
+    no-parallel-make: true
+    sources:
+      - type: git
+        url: https://github.com/PortAudio/portaudio.git
+        tag: v19.7.0
+        commit: 147dd722548358763a8b649b3e4b41dfffbcfbb6
+
+  # wl-clipboard: the daemon copies the transcription with `wl-copy` (the
+  # GUI uses GDK). It runs inside the sandbox against the Wayland socket
+  # granted above -- no host binary is executed. Under the X11 fallback
+  # there is no xclip, and ClipboardManager falls back to its file path.
+  - name: wl-clipboard
+    buildsystem: meson
+    config-opts:
+      - -Dzshcompletiondir=no
+      - -Dfishcompletiondir=no
+    sources:
+      - type: git
+        url: https://github.com/bugaevc/wl-clipboard.git
+        tag: v2.3.0
+        commit: 67a7b937895bceec1ae5ccebb10216f63f70ca1b
+    cleanup:
+      - /share/bash-completion
+
+  # System tray (AyatanaAppIndicator3 typelib + libdbusmenu-gtk3). Vendored
+  # copy of flathub/shared-modules libayatana-appindicator at
+  # cb9ec602a1ece1c76d5a4f8aa1d87c4a6bf99c3e; on Flathub this would be the
+  # shared-modules git submodule instead.
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+
+  # Python dependencies, generated by flatpak-pip-generator from
+  # flatpak/requirements-flatpak.txt against org.gnome.Sdk//51 with
+  # manylinux wheels preferred for the compiled packages (ctranslate2, av,
+  # numpy, scipy, onnxruntime, sherpa-onnx, tokenizers, ...). See
+  # docs/flathub-submission.md for the binary-wheel policy discussion.
+  - python3-requirements.json
+
+  - name: whisper-aloud
+    buildsystem: simple
+    build-commands:
+      # The app itself (dependencies come from the module above).
+      - pip3 install --verbose --exists-action=i --no-index --no-deps --no-build-isolation
+        --prefix=${FLATPAK_DEST} .
+      # Desktop entry: Flatpak rewrites Exec= to `flatpak run --command=<argv0>`,
+      # so argv0 must be the in-sandbox command name, not /usr/bin/...
+      # TryExec would point at a path that does not exist on the host.
+      - sed -e 's|^Exec=/usr/bin/|Exec=|' -e '/^TryExec=/d' data/org.fede.whisperaloud.desktop
+        > org.fede.whisperaloud.desktop
+      - desktop-file-validate org.fede.whisperaloud.desktop
+      - install -Dm644 org.fede.whisperaloud.desktop ${FLATPAK_DEST}/share/applications/org.fede.whisperaloud.desktop
+      # D-Bus activation: same file as the native one minus SystemdService=
+      # (there is no systemd unit inside Flatpak; Flatpak's exporter would
+      # strip it anyway) and with a sandbox-relative Exec=. On export it
+      # becomes `Exec=flatpak run --command=whisper-aloud org.fede.whisperaloud --daemon`.
+      - sed -e '/^#/d' -e '/^SystemdService=/d' -e 's|^Exec=/usr/bin/|Exec=|' data/org.fede.whisperaloud.service
+        > org.fede.whisperaloud.service
+      - install -Dm644 org.fede.whisperaloud.service ${FLATPAK_DEST}/share/dbus-1/services/org.fede.whisperaloud.service
+      - install -Dm644 data/org.fede.whisperaloud.metainfo.xml ${FLATPAK_DEST}/share/metainfo/org.fede.whisperaloud.metainfo.xml
+      - install -Dm644 data/icons/hicolor/scalable/apps/org.fede.whisperaloud.svg
+        ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/org.fede.whisperaloud.svg
+    sources:
+      # Local checkout. A store build would use `type: git` with a release
+      # tag and commit instead.
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .flatpak-builder
+          - .venv
+          - build
+          - dist
+          - bench

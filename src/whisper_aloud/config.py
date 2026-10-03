@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from .exceptions import ConfigurationError
+from .sandbox import is_flatpak_sandbox
 from .stt import catalog
 from .utils.validation_helpers import sanitize_language_code
 
@@ -17,9 +18,39 @@ logger = logging.getLogger(__name__)
 # Configuration Path Constants
 # =============================================================================
 
+# Host-install defaults, computed at import time. Prefer user_config_dir() /
+# user_data_dir() below, which also handle the Flatpak sandbox (WHISP-61).
 CONFIG_DIR = Path.home() / ".config" / "whisper_aloud"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DATA_DIR = Path.home() / ".local" / "share" / "whisper_aloud"
+
+
+def _xdg_base(env_var: str, home_relative: str) -> Path:
+    """Resolve an XDG base dir, honoring the env var only inside Flatpak.
+
+    Inside a Flatpak sandbox only ~/.var/app/<app-id>/ is persistent;
+    ~/.config and ~/.local/share are not exposed, so writes there vanish
+    when the sandbox exits. Flatpak points XDG_CONFIG_HOME/XDG_DATA_HOME
+    at ~/.var/app/<app-id>/{config,data}, so the sandboxed app must use
+    them (WHISP-61). Outside the sandbox the historical HOME-relative paths
+    are kept unchanged. A relative or empty value is ignored, per the XDG
+    Base Directory spec.
+    """
+    if is_flatpak_sandbox():
+        value = os.environ.get(env_var, "")
+        if value and os.path.isabs(value):
+            return Path(value)
+    return Path.home() / home_relative
+
+
+def user_config_dir() -> Path:
+    """Directory holding config.json (computed at call time)."""
+    return _xdg_base("XDG_CONFIG_HOME", ".config") / "whisper_aloud"
+
+
+def user_data_dir() -> Path:
+    """Directory holding history.db and the audio archive (call time)."""
+    return _xdg_base("XDG_DATA_HOME", ".local/share") / "whisper_aloud"
 
 
 # =============================================================================
@@ -201,9 +232,9 @@ class PersistenceConfig:
     def __post_init__(self):
         """Set default paths if not provided."""
         if self.db_path is None:
-            self.db_path = DATA_DIR / "history.db"
+            self.db_path = user_data_dir() / "history.db"
         if self.audio_archive_path is None:
-            self.audio_archive_path = DATA_DIR / "audio"
+            self.audio_archive_path = user_data_dir() / "audio"
 
 
 @dataclass
@@ -455,7 +486,7 @@ class WhisperAloudConfig:
                 but cannot be read or parsed.
         """
         # Compute path dynamically to support HOME changes in tests
-        config_file = Path.home() / ".config" / "whisper_aloud" / "config.json"
+        config_file = user_config_dir() / "config.json"
 
         # Start with defaults from dataclass
         config = cls()
@@ -703,7 +734,7 @@ class WhisperAloudConfig:
     def save(self) -> Path:
         """Save configuration to file."""
         # Compute path dynamically to support HOME changes in tests
-        config_dir = Path.home() / ".config" / "whisper_aloud"
+        config_dir = user_config_dir()
         config_file = config_dir / "config.json"
         config_dir.mkdir(parents=True, exist_ok=True)
         with open(config_file, "w") as f:
