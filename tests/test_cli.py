@@ -1,6 +1,7 @@
 """Tests for CLI functionality."""
 
 import json
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -262,6 +263,79 @@ def test_quit_does_not_trigger_activation(mock_check, mock_activate, capsys):
         exit_code = main()
     assert exit_code == 1
     mock_activate.assert_not_called()
+
+
+class TestConfigureDaemonLogging:
+    """Field bug 6: nothing on the --daemon path ever called
+    logging.basicConfig, so only WARNING+ reached the journal and
+    --daemon --verbose changed nothing."""
+
+    def _reset_logging(self):
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        root.setLevel(logging.WARNING)
+
+    def test_default_level_is_info(self, monkeypatch):
+        from whisper_aloud.__main__ import _configure_daemon_logging
+
+        monkeypatch.delenv("WHISPER_ALOUD_LOG_LEVEL", raising=False)
+        self._reset_logging()
+        _configure_daemon_logging(verbose=False)
+        assert logging.getLogger().getEffectiveLevel() == logging.INFO
+        self._reset_logging()
+
+    def test_verbose_sets_debug(self, monkeypatch):
+        from whisper_aloud.__main__ import _configure_daemon_logging
+
+        monkeypatch.delenv("WHISPER_ALOUD_LOG_LEVEL", raising=False)
+        self._reset_logging()
+        _configure_daemon_logging(verbose=True)
+        assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
+        self._reset_logging()
+
+    def test_env_var_overrides_verbose_flag(self, monkeypatch):
+        from whisper_aloud.__main__ import _configure_daemon_logging
+
+        monkeypatch.setenv("WHISPER_ALOUD_LOG_LEVEL", "WARNING")
+        self._reset_logging()
+        _configure_daemon_logging(verbose=True)
+        assert logging.getLogger().getEffectiveLevel() == logging.WARNING
+        self._reset_logging()
+
+    def test_invalid_env_var_falls_back_to_verbose_flag(self, monkeypatch):
+        from whisper_aloud.__main__ import _configure_daemon_logging
+
+        monkeypatch.setenv("WHISPER_ALOUD_LOG_LEVEL", "not-a-level")
+        self._reset_logging()
+        _configure_daemon_logging(verbose=True)
+        assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
+        self._reset_logging()
+
+    def test_handle_daemon_command_configures_logging(self, monkeypatch):
+        """handle_daemon_command must configure logging before anything
+        else runs (so startup messages aren't silently dropped)."""
+        from whisper_aloud import __main__ as cli
+
+        called = {}
+        monkeypatch.setattr(
+            cli, "_configure_daemon_logging", lambda verbose=False: called.setdefault("v", verbose)
+        )
+        fake_bus = MagicMock()
+        fake_owner = MagicMock()
+        with (
+            patch("pydbus.SessionBus", return_value=fake_bus),
+            patch("whisper_aloud.service.daemon.acquire_bus_name", return_value=fake_owner),
+            patch("whisper_aloud.service.WhisperAloudService") as mock_service_cls,
+        ):
+            mock_service_cls.return_value.run.return_value = None
+
+            class _Args:
+                verbose = True
+
+            cli.handle_daemon_command(_Args())
+
+        assert called == {"v": True}
 
 
 def test_activate_daemon_connection_uses_client_wait(monkeypatch):

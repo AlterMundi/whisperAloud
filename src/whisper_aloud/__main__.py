@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -798,6 +799,31 @@ def cmd_models(args) -> int:
     return 0
 
 
+def _configure_daemon_logging(verbose: bool = False) -> None:
+    """Configure logging for the daemon process (field bug 6).
+
+    Unlike cmd_transcribe (which calls logging.basicConfig for its own
+    one-shot run), nothing on the `--daemon` path ever configured logging:
+    in production only WARNING+ reached the journal via Python's lastResort
+    handler, so INFO lines (e.g. hotkey_portal.py's CreateSession/
+    ListShortcuts/BindShortcuts/Activated outcomes) and all DEBUG were
+    silently lost, and `--daemon --verbose` changed nothing.
+
+    INFO by default; DEBUG when `verbose` is True or
+    WHISPER_ALOUD_LOG_LEVEL=DEBUG/INFO/WARNING/ERROR is set (matching
+    WhisperAloudConfig's WHISPER_ALOUD_-prefixed env override convention;
+    the env var wins over `verbose` when both are set, since it's the more
+    explicit ask). Format is deliberately bare -- journald/systemd already
+    timestamps each line, so repeating that here would be redundant noise.
+    """
+    env_level_name = os.environ.get("WHISPER_ALOUD_LOG_LEVEL", "").strip().upper()
+    level = getattr(logging, env_level_name, None)
+    if not isinstance(level, int):
+        level = logging.DEBUG if verbose else logging.INFO
+
+    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+
+
 def handle_daemon_command(args) -> int:
     """Start the daemon service.
 
@@ -808,6 +834,8 @@ def handle_daemon_command(args) -> int:
     with a clean message instead of doing a full audio/tray/model init only
     to crash inside bus.publish() (WHISP-63).
     """
+    _configure_daemon_logging(verbose=getattr(args, "verbose", False))
+
     from pydbus import SessionBus
 
     from .service.daemon import EXIT_ALREADY_RUNNING, AlreadyRunningError, acquire_bus_name
