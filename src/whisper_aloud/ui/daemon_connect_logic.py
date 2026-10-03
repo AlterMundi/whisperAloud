@@ -18,20 +18,26 @@ tests/test_daemon_connect_logic.py) independent of a display or a bus.
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 DEFAULT_MAX_AUTO_RETRIES = 3
 DEFAULT_BASE_DELAY_SECONDS = 1.0
 DEFAULT_MAX_DELAY_SECONDS = 8.0
 
-# Field bug 1: when the daemon's bus name is already owned (D-Bus activation
-# started it) but it hasn't published its object yet -- see
-# service/client.py's is_starting/_is_starting_error -- the GUI should keep
-# retrying at a steady pace for much longer than the plain "is anything
-# there at all" budget above (~3s). Flatpak activation plus the daemon's own
-# audio/model/tray/hotkey init can easily take longer than that, especially
-# on first run. A fixed 1s cadence for up to 30 attempts gives ~30s total,
-# matching service.client.DEFAULT_ACTIVATION_WAIT_SECONDS.
-DEFAULT_STARTING_MAX_AUTO_RETRIES = 30
+# Field bug 1, revised per maintainer design directive: a fixed "wait N
+# seconds, then give up forever" window is the wrong shape for "the bus name
+# is owned (D-Bus activation started it) but the object isn't published
+# yet" -- see service/client.py's is_starting/_is_starting_error. As long as
+# the daemon is still owning the name, it is *alive and working on it*
+# (audio/model/tray/hotkey init, slower under Flatpak and on first run); the
+# GUI should keep retrying at a steady pace for as long as that remains
+# true, not declare it "unavailable" just because an arbitrary clock ran
+# out. DEFAULT_STARTING_MAX_AUTO_RETRIES is therefore None (unlimited) --
+# the only way out of STARTING is CONNECTED (object appeared) or the
+# daemon's name actually vanishing, which reclassifies the next attempt as
+# a plain (non-starting) failure. A finite value remains available for
+# tests/callers that want one.
+DEFAULT_STARTING_MAX_AUTO_RETRIES: Optional[int] = None
 DEFAULT_STARTING_RETRY_DELAY_SECONDS = 1.0
 
 
@@ -79,7 +85,7 @@ def decide_after_attempt(
     max_auto_retries: int = DEFAULT_MAX_AUTO_RETRIES,
     base_delay: float = DEFAULT_BASE_DELAY_SECONDS,
     max_delay: float = DEFAULT_MAX_DELAY_SECONDS,
-    starting_max_auto_retries: int = DEFAULT_STARTING_MAX_AUTO_RETRIES,
+    starting_max_auto_retries: Optional[int] = DEFAULT_STARTING_MAX_AUTO_RETRIES,
     starting_retry_delay: float = DEFAULT_STARTING_RETRY_DELAY_SECONDS,
 ) -> ConnectDecision:
     """Decide what the GUI should do after one daemon-connection attempt.
@@ -90,16 +96,22 @@ def decide_after_attempt(
 
     When False and `starting` is True (field bug 1: the client classified
     the failure as the daemon being mid-startup -- see
-    service/client.WhisperAloudClient.is_starting), a much longer, steady
-    retry budget applies (`starting_max_auto_retries` at a fixed
-    `starting_retry_delay`) instead of the short exponential-backoff one,
-    since a slow-but-alive daemon just needs more time, not faster-shrinking
-    patience.
+    service/client.WhisperAloudClient.is_starting), a steady retry at
+    `starting_retry_delay` applies instead of the short exponential-backoff
+    one below, and -- per the maintainer's design directive -- it does not
+    give up on its own: `starting_max_auto_retries` defaults to None
+    (unlimited). A daemon that still owns the bus name is alive and working
+    on startup; declaring it "unavailable" after an arbitrary clock runs out
+    is exactly the fixed-window bug this replaces. A finite
+    `starting_max_auto_retries` remains available for callers/tests that
+    want a cap.
 
-    Otherwise, attempts below `max_auto_retries` schedule another automatic
-    try with an exponentially growing delay; once the relevant budget is
-    exhausted the phase is UNAVAILABLE, meaning the GUI should stop retrying
-    on its own and wait for the user to click "Retry Connection".
+    Otherwise (not starting -- nothing is there at all, or activation
+    itself failed), attempts below `max_auto_retries` schedule another
+    automatic try with an exponentially growing delay; once that budget is
+    exhausted the phase is UNAVAILABLE, meaning the GUI should stop
+    retrying on its own and wait for the user to click "Retry Connection"
+    (which always remains available, per field bug 4).
     """
     if attempt < 1:
         raise ValueError("attempt must be >= 1")
@@ -108,7 +120,7 @@ def decide_after_attempt(
         return ConnectDecision(phase=ConnectPhase.CONNECTED, attempt=attempt)
 
     if starting:
-        if attempt >= starting_max_auto_retries:
+        if starting_max_auto_retries is not None and attempt >= starting_max_auto_retries:
             return ConnectDecision(phase=ConnectPhase.UNAVAILABLE, attempt=attempt)
         return ConnectDecision(
             phase=ConnectPhase.STARTING, attempt=attempt, retry_delay_seconds=starting_retry_delay

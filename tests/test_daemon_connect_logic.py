@@ -115,6 +115,13 @@ class TestDecideAfterAttemptStarting:
         decision = decide_after_attempt(connected=True, attempt=1, starting=True)
         assert decision.phase is ConnectPhase.CONNECTED
 
+    def test_starting_never_gives_up_by_default(self):
+        """Maintainer design directive: no fixed "wait N seconds then
+        declare unavailable forever" window while the daemon still owns the
+        bus name. Default starting_max_auto_retries is unlimited."""
+        decision = decide_after_attempt(connected=False, attempt=10_000, starting=True)
+        assert decision.phase is ConnectPhase.STARTING
+
     def test_custom_starting_budget(self):
         decision = decide_after_attempt(
             connected=False,
