@@ -12,6 +12,11 @@ from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Shortcut id used for the single toggle-recording accelerator (matches
+# readiness.py's own copy of this constant -- kept duplicated rather than
+# imported to avoid a cross-module dependency for one string literal).
+TOGGLE_SHORTCUT_ID = "toggle"
+
 
 def _is_wayland() -> bool:
     """Return True if the current session appears to be Wayland."""
@@ -81,15 +86,34 @@ class HotkeyManager:
     - "none": no automatic hotkey support; user must configure manually
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, on_state_change: Optional[Callable[[bool, str, str], None]] = None
+    ) -> None:
+        """Args:
+            on_state_change: optional callback invoked with
+                ``(bound, trigger, backend)`` whenever the binding state
+                actually changes (WHISP-99) -- portal bind result (including
+                GNOME's response=2-with-shortcuts quirk), ShortcutsChanged
+                recovery, keybinder register/unregister, a backend re-probe
+                (WHISP-90), or `unregister()` at shutdown/config change.
+                Never called twice in a row with the same tuple. Must never
+                raise -- any exception it raises is logged and swallowed, so
+                a caller's bug can never break hotkey registration itself.
+        """
         self._backend: str = "none"
         self._xdp = None  # portal sentinel / PortalHotkeys class (or mock in tests)
         self._keybinder = None  # Keybinder module reference
         self._portal_hotkeys = None  # PortalHotkeys instance (live session)
         self._registered_accels: List[str] = []
         self._callback: Optional[Callable[[], None]] = None
+        self._on_state_change = on_state_change
+        self._last_notified_state: Optional[tuple] = None
 
         self._backend = self.detect_backend()
+        # Notify once up front (WHISP-99) so a caller that passed
+        # on_state_change always learns the initial state even if
+        # `available` is False and register() is therefore never called.
+        self._notify_state_change()
 
     def detect_backend(self) -> str:
         """Detect best available backend.
@@ -165,6 +189,7 @@ class HotkeyManager:
             self._reprobe("registration failed")
             if self._backend != "none":
                 ok = self._register_with_current_backend(accel, callback)
+        self._notify_state_change()
         return ok
 
     def _register_with_current_backend(
@@ -189,6 +214,7 @@ class HotkeyManager:
             logger.info("Hotkey backend changed (%s): %s -> %s", reason, old, new)
         else:
             logger.debug("Hotkey backend re-probed (%s): still %s", reason, new)
+        self._notify_state_change()
 
     def unregister(self) -> None:
         """Unregister all hotkeys. Idempotent and never raises."""
@@ -210,6 +236,7 @@ class HotkeyManager:
         finally:
             self._registered_accels.clear()
             self._callback = None
+        self._notify_state_change()
 
     @property
     def backend(self) -> str:
@@ -238,6 +265,53 @@ class HotkeyManager:
         except Exception as e:
             logger.debug("get_bound_trigger failed: %s", e)
             return None
+
+    def is_bound(self, shortcut_id: str = TOGGLE_SHORTCUT_ID) -> bool:
+        """Whether the toggle shortcut is actually bound right now.
+
+        The single source of truth `readiness.hotkey_bound()` prefers (see
+        that module's docstring: "a future public HotkeyManager.is_bound()
+        is used as soon as it exists"). Never raises.
+        """
+        try:
+            if self._backend == "portal":
+                portal = self._portal_hotkeys
+                return portal is not None and portal.is_bound(shortcut_id) is True
+            if self._backend == "keybinder":
+                return len(self._registered_accels) > 0
+        except Exception:
+            logger.debug("is_bound check failed", exc_info=True)
+        return False
+
+    def _notify_state_change(self) -> None:
+        """Invoke `on_state_change(bound, trigger, backend)` (WHISP-99), but
+        only when the tuple actually changed since the last notification --
+        so e.g. two no-op `unregister()` calls in a row, or a `register()`
+        that merely starts an async portal flow without changing anything
+        yet observable, never emit a duplicate signal.
+
+        Called from register()/unregister()/_reprobe() (always on the
+        thread that called them -- __init__, SetConfig, or _cleanup, all on
+        the daemon's main thread) and from the portal's on_bound callback
+        (already dispatched on the main loop by GDBus's own signal
+        delivery -- see hotkey_portal.py's module docstring). Never raises:
+        this must not break hotkey registration itself if a caller's
+        callback misbehaves.
+        """
+        if self._on_state_change is None:
+            return
+        try:
+            state = (self.is_bound(), self.get_bound_trigger() or "", self._backend)
+        except Exception:
+            logger.debug("Failed to compute hotkey state for notification", exc_info=True)
+            return
+        if state == self._last_notified_state:
+            return
+        self._last_notified_state = state
+        try:
+            self._on_state_change(*state)
+        except Exception:
+            logger.debug("on_state_change callback raised", exc_info=True)
 
     # -- Private backend methods --
 
@@ -275,6 +349,12 @@ class HotkeyManager:
                     logger.info("Portal hotkey bound: %s", accel)
                 else:
                     logger.warning("Portal hotkey binding did not succeed for: %s", accel)
+                # WHISP-99: this callback also fires for a later
+                # ShortcutsChanged recovery (same on_bound, see
+                # hotkey_portal.py's bind() docstring), so this is the
+                # single place that must notify for both the initial
+                # BindShortcuts outcome and any delayed recovery.
+                self._notify_state_change()
 
             portal.bind(
                 shortcuts=[

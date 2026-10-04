@@ -25,7 +25,41 @@ def test_status_readiness_keys_without_any_window(daemon):
         assert status["hotkey_backend"] == "none"
         assert status["hotkey_trigger"] == ""
         assert status["autostart"] is False
-        assert client.get_api_version() == "1.7.1"
+        # Compared as a version tuple, not an exact string, so an unrelated
+        # concurrent API bump (e.g. WHISP-96's TranscribeFile) landing
+        # first/after never makes this test flaky.
+        version = tuple(int(p) for p in client.get_api_version().split("."))
+        assert version >= (1, 9, 0)
+    finally:
+        client.disconnect()
+
+
+def test_hotkey_state_changed_api_present_and_status_reflects_test_mode(daemon):
+    """WHISP-99: TEST_MODE disables hotkeys entirely (no portal/keybinder
+    contact at all, per WHISP-46), so the real daemon's own
+    HotkeyStateChanged(False, "", "none") fires once, in __init__, before
+    this harness's D-Bus-activation call even returns -- there is no way
+    for a client connecting afterwards to race that one emission. What is
+    verified here instead, end-to-end against the real subprocess: the
+    client can subscribe to the signal without error (the API exists, API
+    1.9.0), and GetStatus() -- carrying the exact values that emission
+    sent -- reports backend "none" and bound False, consistently with
+    test_status_readiness_keys_without_any_window above."""
+    handle = daemon()
+    wait_for_model_state(handle.client(), "ready", timeout=10.0)  # disconnects its client
+    client = handle.client()
+    try:
+        hotkey_signals = SignalCapture(client, "HotkeyStateChanged")
+
+        status = client.get_status()
+        assert status["hotkey_bound"] is False
+        assert status["hotkey_backend"] == "none"
+        assert status["hotkey_trigger"] == ""
+
+        # No hotkey config change happens in this test, and test mode never
+        # constructs a HotkeyManager, so no further signal is expected --
+        # this only asserts that subscribing itself is safe/inert.
+        assert hotkey_signals._received == []
     finally:
         client.disconnect()
 

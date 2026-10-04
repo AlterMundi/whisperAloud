@@ -97,6 +97,27 @@ check('no fallback while the portal binding is pending/declined (1.7.0)',
 check('no fallback when not running',
       s.needsFallbackKeybinding({running: false, status: null}), false);
 
+// HotkeyStateChanged (API 1.9.0, WHISP-99): applyHotkeyState patches the
+// status dict the same way GetStatus's hotkey_* keys would read.
+{
+    const hs = st({hotkey_bound: false, hotkey_trigger: '', hotkey_backend: 'portal'});
+    s.applyHotkeyState(hs, true, 'Press <Control>space', 'portal');
+    check('apply hotkey state sets bound/trigger/backend',
+          [hs.hotkey_bound, hs.hotkey_trigger, hs.hotkey_backend],
+          [true, 'Press <Control>space', 'portal']);
+    s.applyHotkeyState(hs, false, '', 'portal');
+    check('apply hotkey state false clears trigger',
+          [hs.hotkey_bound, hs.hotkey_trigger], [false, '']);
+    s.applyHotkeyState(null, true, 'x', 'portal');  // must not throw
+    check('apply hotkey state on null is a no-op', true, true);
+}
+check('deriveState reflects an applied HotkeyStateChanged(false)',
+      (() => {
+          const s2 = st({hotkey_bound: true});
+          s.applyHotkeyState(s2, false, '', 'portal');
+          return s.deriveState({running: true, status: s2});
+      })(), S.READY_NO_HOTKEY);
+
 // "All OK" (1.7.0): model ready AND hotkey_bound.
 check('all OK', s.deriveState({running: true, status: st({hotkey_bound: true})}), S.READY);
 check('ready but hotkey not bound',
@@ -108,16 +129,6 @@ check('loading wins over hotkey',
       s.deriveState({running: true, status: st({model_state: 'loading', hotkey_bound: false})}), S.LOADING);
 check('degraded style', s.STYLE_CLASSES[S.READY_NO_HOTKEY], 'whisperaloud-degraded');
 check('recording style', s.STYLE_CLASSES[S.RECORDING], 'whisperaloud-recording');
-
-check('recheck while portal pending',
-      s.shouldRecheckHotkey({running: true, status: st({hotkey_bound: false, hotkey_trigger: ''})}), true);
-check('no recheck once bound', s.shouldRecheckHotkey({running: true, status: st({hotkey_bound: true})}), false);
-check('no recheck without backend',
-      s.shouldRecheckHotkey({running: true, status: st({hotkey_backend: 'none', hotkey_bound: false})}), false);
-check('no recheck when not running', s.shouldRecheckHotkey({running: false, status: null}), false);
-check('no recheck for pre-1.7 portal pending (unknown)',
-      s.shouldRecheckHotkey({running: true, status: st({hotkey_trigger: ''})}), false);
-check('recheck delays bounded', s.HOTKEY_RECHECK_DELAYS_S.reduce((a, b) => a + b, 0) <= 300, true);
 
 check('label ready', s.statusLabel(S.READY, st({})), 'Ready');
 check('label ready no hotkey', s.statusLabel(S.READY_NO_HOTKEY, st({})), 'Ready, but no global hotkey');

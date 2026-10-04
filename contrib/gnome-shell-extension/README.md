@@ -33,16 +33,19 @@ Everything is event-driven, with no polling timers:
 
 - `Gio.bus_watch_name` on `org.fede.whisperaloud` tracks whether the daemon
   runs.
-- `StatusChanged(s)`, `ModelStateChanged(s, s)` and `ConfigChanged` signals
-  carry state changes.
+- `StatusChanged(s)`, `ModelStateChanged(s, s)`, `HotkeyStateChanged(b, s, s)`
+  (API 1.9.0) and `ConfigChanged` signals carry state changes.
 - One `GetStatus()` call runs when the daemon appears, when it returns to
   `idle` and when its config changes. Every key is read defensively, so
-  daemons older than API 1.6.0/1.7.0 still work.
-- `hotkey_bound` has no change signal. While it is false and the daemon
-  has a hotkey backend, the extension re-reads `GetStatus()` after 2, 5, 10,
-  20, 40 and 60 s, then stops until the next `ConfigChanged` or daemon
-  restart. This is the extension's only timer. It is bounded and is not
-  used to detect whether the daemon is running.
+  daemons older than API 1.6.0/1.7.0/1.9.0 still work.
+- `HotkeyStateChanged` fires on every hotkey binding-state transition
+  (portal bind result, GNOME's response=2-with-shortcuts quirk,
+  `ShortcutsChanged` recovery, keybinder register/unregister, a backend
+  re-probe, a hotkey config change, and daemon shutdown), so the extension
+  never needs to re-read `GetStatus()` on a timer to learn `hotkey_bound`
+  changing. Daemons older than API 1.9.0 never emit it; the "Ready, but no
+  global hotkey" state then only clears on the next `StatusChanged`/
+  `ConfigChanged`-triggered `GetStatus()`.
 
 The pure state logic is in `status.js`. It has no GNOME Shell imports and is
 unit-tested with Node (`tests/test_shell_extension_js.py`).

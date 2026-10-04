@@ -51,6 +51,14 @@ All notable user-facing changes to this project are documented here.
 - The Flatpak can now reach the extension's window service
   (`--talk-name=org.gnome.Shell.Extensions.whisperaloud`), so pasting into
   the window that was focused when recording started can work there too.
+- The daemon now emits a `HotkeyStateChanged(bound, trigger, backend)`
+  D-Bus signal (API 1.9.0) on every global-hotkey binding-state transition:
+  a portal bind result, a later recovery once the compositor actually
+  grants it, a libkeybinder3 register/unregister, a backend re-probe, a
+  hotkey config change, and daemon shutdown. The GNOME Shell extension
+  (`whisperaloud@fede`, version 3) now applies this signal directly instead
+  of re-reading `GetStatus()` on a bounded backoff timer while the hotkey
+  was not yet bound; that timer is gone.
 
 ### Changed
 - Recording is now refused up front when the configured model is missing or

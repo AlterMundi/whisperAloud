@@ -257,10 +257,11 @@ Valid in any state. Returns a dict of GLib variants:
 
 **Readiness summary for indicators.** A tray icon or Shell extension can show
 "all OK" without the main window when `model_state == "ready"` and
-`hotkey_bound` is true. Neither key has a change signal of its own:
-`ModelStateChanged` covers the model, `ConfigChanged` covers `autostart`, and
-`hotkey_bound` must be re-read with `GetStatus()` (for example on
-`StatusChanged`, or on a slow poll).
+`hotkey_bound` is true. `ModelStateChanged` covers the model and
+`ConfigChanged` covers `autostart`; `hotkey_bound`/`hotkey_trigger`/
+`hotkey_backend` are covered by `HotkeyStateChanged` (1.9.0) -- subscribe to
+it before calling `GetStatus()` so a transition racing the call is never
+missed, the same pattern `ModelStateChanged` uses.
 
 ### GetHistory
 
@@ -713,6 +714,23 @@ for the states). `detail` is `""` for `loading`/`ready`, the reason for
 needs the current state should subscribe first and then call `GetStatus()`
 (`model_state`), so a transition racing the call is never missed.
 
+### HotkeyStateChanged
+
+```
+HotkeyStateChanged(b bound, s trigger, s backend)
+```
+
+Emitted on every global-hotkey binding-state transition (1.9.0): a portal
+bind result (including GNOME's "response=2 but the shortcuts results say
+bound" quirk -- see the portal's own notes), a later `ShortcutsChanged`
+recovery, a libkeybinder3 register/unregister, a backend re-probe after a
+registration failure, a hotkey config change (`SetConfig` re-registers), and
+daemon shutdown (reports `bound=false`). `bound`/`trigger`/`backend` mirror
+`GetStatus()`'s `hotkey_bound`/`hotkey_trigger`/`hotkey_backend` keys exactly
+-- a client that wants to show "is the hotkey ready" without polling
+`GetStatus()` on a timer subscribes to this signal instead, the same way
+`ModelStateChanged` replaces polling for model readiness.
+
 ## Activation
 
 WhisperAloud uses standard D-Bus service activation plus a systemd user
@@ -933,6 +951,15 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.9.0 — 2026-10-04
+
+Minor (additive), WHISP-99.
+
+- **New signal** `HotkeyStateChanged(b bound, s trigger, s backend)`,
+  emitted on every hotkey binding-state transition (see "Signals" above for
+  the full list of triggers). Lets a client learn `hotkey_bound` changing
+  without re-reading `GetStatus()` on a timer.
 
 ### 1.7.1 — 2026-10-04
 
