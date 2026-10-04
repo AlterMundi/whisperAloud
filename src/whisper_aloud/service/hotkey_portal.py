@@ -592,6 +592,39 @@ class PortalHotkeys:
         either), so a short bounded call_sync for EnableShortcuts remains
         appropriate here -- it is a plain method call with a direct, fast
         reply, never a dialog.
+
+        Field bug: subscribing with ``sender=_PORTAL_BUS`` (a well-known
+        name) and the session handle passed as the ``arg0`` filter used to
+        mean these signals were silently never delivered on a real GNOME
+        session, even though dbus-monitor showed the portal emitting them
+        correctly (unicast to our unique name). Two independent problems:
+
+        1. ``Activated``/``ShortcutsChanged``'s first argument is the
+           session handle, of D-Bus type ``o`` (OBJECT_PATH) -- GDBus's
+           arg0 match filter only ever matches a STRING-typed first
+           argument (this is how match rules work: ``arg0='...'`` in the
+           D-Bus match-rule grammar is a string comparison), so a filter
+           built from an object path can never match, full stop.
+        2. ``NO_MATCH_RULE`` means no match rule is installed on the bus at
+           all -- GDBus relies on its own client-side sender tracking
+           instead, keyed off resolving the well-known name to its current
+           owner's unique name. That resolution is exactly the mechanism
+           CVE-2024-34397's fix made stricter, and combined with (1) it
+           made these two particular subscriptions silently inert in the
+           field while the structurally-similar ``Request::Response``
+           subscription in ``_request_async`` (``sender=None``, object
+           path filter, ``arg0=None``, ``NONE`` flags) kept working, since
+           it never relied on arg0 or well-known-name sender tracking.
+
+        The fix: ``sender=None`` (match any sender; we don't need the
+        portal's unique name), ``object_path=_PORTAL_PATH`` (cheap, exact,
+        always a match), ``arg0=None`` (no arg0 filtering at the bus
+        level), ``flags=NONE`` (do install a real match rule -- harmless
+        for a unicast signal, and the only way GDBus reliably delivers
+        these on some compositors). The session handle is instead checked
+        inside the callback (`_on_activated`/`_on_shortcuts_changed`),
+        which also guards against ever acting on a signal for some other
+        app's session, should the bus ever deliver one.
         """
         Gio = self._Gio  # noqa: N806
         GLib = self._GLib  # noqa: N806
@@ -599,12 +632,12 @@ class PortalHotkeys:
 
         if self._act_sub_id is None:
             self._act_sub_id = self._bus.signal_subscribe(
-                _PORTAL_BUS,
+                None,
                 _IFACE_GS,
                 "Activated",
+                _PORTAL_PATH,
                 None,
-                self._session_path,
-                Gio.DBusSignalFlags.NO_MATCH_RULE,
+                Gio.DBusSignalFlags.NONE,
                 self._on_activated,
             )
             logger.info(
@@ -615,12 +648,12 @@ class PortalHotkeys:
 
         if self._shortcuts_changed_sub_id is None:
             self._shortcuts_changed_sub_id = self._bus.signal_subscribe(
-                _PORTAL_BUS,
+                None,
                 _IFACE_GS,
                 "ShortcutsChanged",
+                _PORTAL_PATH,
                 None,
-                self._session_path,
-                Gio.DBusSignalFlags.NO_MATCH_RULE,
+                Gio.DBusSignalFlags.NONE,
                 self._on_shortcuts_changed,
             )
             logger.info(
@@ -646,15 +679,33 @@ class PortalHotkeys:
             logger.debug("EnableShortcuts skipped/failed: %s", e)
 
     def _on_activated(self, conn, sender, path, iface, signal, params):
+        """Handle GlobalShortcuts.Activated(session_handle, shortcut_id,
+        timestamp, options).
+
+        Since the bus-level subscription no longer filters by session
+        (see `_subscribe_session_signals`'s docstring -- an object-path
+        arg0 filter can never match), the session handle is checked here
+        instead: a signal for any session other than ours (e.g. another
+        app's GlobalShortcuts session, should the portal ever deliver one
+        to us) is logged and ignored, never dispatched.
+        """
         try:
-            _sid, sc_id, _ts, _details = params.unpack()
+            session, sc_id, _ts, _details = params.unpack()
         except Exception:
             try:
                 sc_id, _ts, _details = params.unpack()
+                session = self._session_path
             except Exception:
                 logger.exception("Unknown Activated() signature: %r", params)
                 return
-        logger.debug("Portal shortcut activated: %s", sc_id)
+        if session != self._session_path:
+            logger.debug(
+                "Ignoring Activated for unrelated session=%s (ours=%s)",
+                session,
+                self._session_path,
+            )
+            return
+        logger.info("Portal shortcut activated: %s", sc_id)
         if callable(self._activated_cb):
             self._activated_cb(sc_id)
 
@@ -664,11 +715,23 @@ class PortalHotkeys:
         Recovery path (see module docstring): if BindShortcuts initially
         failed to report one of our ids bound, a later ShortcutsChanged
         for that id still marks it bound and fires on_bound(True) once.
+
+        Like `_on_activated`, the session handle is checked here rather
+        than at the bus-subscription level (see `_subscribe_session_signals`'s
+        docstring for why an arg0 filter on this object-path argument can
+        never work) -- a signal for a different session is ignored.
         """
         try:
-            _session, shortcuts = params.unpack()
+            session, shortcuts = params.unpack()
         except Exception:
             logger.exception("Unparseable ShortcutsChanged signal: %r", params)
+            return
+        if session != self._session_path:
+            logger.debug(
+                "Ignoring ShortcutsChanged for unrelated session=%s (ours=%s)",
+                session,
+                self._session_path,
+            )
             return
         entries = self._extract_shortcuts_result({"shortcuts": shortcuts})
         newly_bound = self._record_bound(entries)

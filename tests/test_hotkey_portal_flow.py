@@ -132,6 +132,13 @@ class _FakePortalHarness:
             "method": None,
             "unsubscribed": False,
             "signal": signal,
+            "subscribe_args": {
+                "sender": sender,
+                "iface": iface,
+                "path": path,
+                "arg0": arg0,
+                "flags": flags,
+            },
         }
         if iface == "org.freedesktop.portal.GlobalShortcuts":
             # Activated/ShortcutsChanged: persistent, session-level
@@ -244,16 +251,24 @@ class _FakePortalHarness:
                 return
         raise AssertionError("ShortcutsChanged was never subscribed to")
 
-    def emit_activated(self, shortcut_id, timestamp=0):
-        """Emit an Activated signal for the current session."""
+    def emit_activated(self, shortcut_id, timestamp=0, session_path=None):
+        """Emit an Activated signal for the current session (or
+        `session_path`, to simulate a signal for an unrelated session)."""
+        path = session_path if session_path is not None else self.portal._session_path
         for req in self._requests:
             if req.get("signal") == "Activated":
-                params = GLib.Variant(
-                    "(osta{sv})", (self.portal._session_path, shortcut_id, timestamp, {})
-                )
+                params = GLib.Variant("(osta{sv})", (path, shortcut_id, timestamp, {}))
                 req["callback"](None, None, None, None, None, params)
                 return
         raise AssertionError("Activated was never subscribed to")
+
+    def subscribe_args(self, signal: str) -> dict:
+        """The raw (sender, iface, signal, path, arg0, flags) args passed to
+        `signal_subscribe` for `signal` ("Activated" or "ShortcutsChanged")."""
+        for req in self._requests:
+            if req.get("signal") == signal:
+                return req["subscribe_args"]
+        raise AssertionError(f"{signal} was never subscribed to")
 
 
 class TestRegisterCalledBeforeCreateSession:
@@ -777,6 +792,94 @@ class TestActivatedSubscribedIndependentlyOfBind:
             assert activations == ["toggle"]
 
 
+class TestActivatedSubscriptionArgs:
+    """Field bug regression: the GlobalShortcuts.Activated/ShortcutsChanged
+    subscriptions must never filter by sender (a well-known name) or by
+    arg0 (the session handle is an OBJECT_PATH, which GDBus's arg0 match
+    can never match) -- see `_subscribe_session_signals`'s docstring.
+    Instead they must subscribe broadly (sender=None, arg0=None, a real
+    match rule via DBusSignalFlags.NONE, object_path=the portal's own
+    path) and filter by session handle inside the callback."""
+
+    def test_activated_subscribed_with_sender_none_and_arg0_none(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+            )
+            harness.respond_create_session()
+
+            args = harness.subscribe_args("Activated")
+            assert args["sender"] is None
+            assert args["arg0"] is None
+            assert args["path"] == "/org/freedesktop/portal/desktop"
+            assert args["iface"] == "org.freedesktop.portal.GlobalShortcuts"
+            # NOT DBusSignalFlags.NO_MATCH_RULE -- a real match rule must be
+            # installed since we can no longer rely on GDBus's well-known
+            # sender tracking for delivery.
+            assert int(args["flags"]) == 0
+
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts()
+
+    def test_shortcuts_changed_subscribed_with_sender_none_and_arg0_none(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+            )
+            harness.respond_create_session()
+
+            args = harness.subscribe_args("ShortcutsChanged")
+            assert args["sender"] is None
+            assert args["arg0"] is None
+            assert args["path"] == "/org/freedesktop/portal/desktop"
+            assert int(args["flags"]) == 0
+
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts()
+
+
+class TestActivatedSessionFiltering:
+    """Since the bus-level subscription no longer filters by session
+    handle (it can't -- see above), the callback must do it: a signal
+    for some other session must be ignored, and one for ours dispatched."""
+
+    def test_activated_for_unrelated_session_is_ignored(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            activations = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=activations.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts()
+
+            harness.emit_activated(
+                "toggle", session_path="/org/freedesktop/portal/desktop/session/other_app"
+            )
+            assert activations == []
+
+    def test_activated_for_our_session_still_dispatches(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            activations = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=activations.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts()
+
+            harness.emit_activated("toggle")
+            assert activations == ["toggle"]
+
+
 class TestSessionClose:
     """Sessions must be closed via org.freedesktop.portal.Session.Close() on
     the session's own path, not a nonexistent GlobalShortcuts.EndSession."""
@@ -885,6 +988,134 @@ class TestPortalIntegrationOnPrivateBus:
                 bind_calls_run2, success2 = _run_daemon_bind_once()
                 assert bind_calls_run2 == 1
                 assert success2 is True
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_old_arg0_sender_subscription_never_fires_but_fixed_one_does(self, tmp_path):
+        """MOST IMPORTANT regression test for the field bug: reproduces the
+        exact failure mode on a *real* GDBus connection (not the mocked
+        unit-test harness above, which invokes callbacks directly and so
+        can never exercise GDBus's own arg0/sender filtering).
+
+        The fake portal here emits a real, unicast ``Activated`` signal --
+        same shape as the real dbus-monitor capture from the field bug
+        report: ``destination=`` the client's unique name, object path
+        ``/org/freedesktop/portal/desktop``, first argument the session
+        handle as an OBJECT_PATH ('o').
+
+        Two subscriptions are set up against that same real signal:
+
+        * the OLD pattern (``sender=_PORTAL_BUS`` well-known name,
+          ``object_path=None``, ``arg0=session_path``,
+          ``NO_MATCH_RULE``) -- subscribed manually here, bypassing
+          PortalHotkeys, to show it never receives the signal.
+        * the NEW pattern, via a real ``PortalHotkeys.bind()`` run to
+          completion against the fake portal -- must receive it.
+
+        Per the ticket brief: if the OLD pattern unexpectedly *does* fire
+        on this GDBus/portal combination, that is reported via the
+        skip-reason below rather than silently passed over, but the fix
+        is kept regardless (defense in depth: the callback also filters
+        by session handle, so it is correct even if the bus-level filter
+        had happened to work).
+        """
+        import time
+
+        bus_addr = private_bus_address()
+        fake_portal_script = tmp_path / "fake_portal.py"
+        fake_portal_script.write_text(_FAKE_PORTAL_SERVICE_SRC)
+
+        env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=bus_addr)
+        proc = subprocess.Popen([sys.executable, str(fake_portal_script)], env=env)
+        try:
+            time.sleep(1.0)  # let the fake service claim the bus name
+
+            with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": bus_addr}):
+                bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+                old_received = []
+
+                def _old_cb(_conn, _sender, _path, _iface, _signal, params):
+                    old_received.append(params.unpack())
+
+                # The OLD, broken subscription pattern (see hotkey_portal.py's
+                # pre-fix _subscribe_session_signals): well-known-name
+                # sender, arg0 set to the (object-path-typed) session
+                # handle, NO_MATCH_RULE.
+                old_sub_id = bus.signal_subscribe(
+                    "org.freedesktop.portal.Desktop",
+                    "org.freedesktop.portal.GlobalShortcuts",
+                    "Activated",
+                    None,
+                    "/session/1",
+                    Gio.DBusSignalFlags.NO_MATCH_RULE,
+                    _old_cb,
+                )
+
+                try:
+                    new_received = []
+                    bound = []
+                    portal = PortalHotkeys(app_id="org.fede.whisperaloud")
+                    loop = GLib.MainLoop()
+                    portal.bind(
+                        shortcuts=[
+                            {
+                                "id": "toggle",
+                                "description": "Toggle",
+                                "accelerators": ["<Super><Alt>r"],
+                            }
+                        ],
+                        on_activated=new_received.append,
+                        on_bound=lambda ok: (bound.append(ok), loop.quit()),
+                    )
+                    bind_timeout_id = GLib.timeout_add(5000, loop.quit)
+                    loop.run()
+                    GLib.source_remove(bind_timeout_id)
+                    assert bound == [True]
+
+                    # Trigger a real unicast Activated signal, same shape
+                    # as the field bug's dbus-monitor capture.
+                    bus.call_sync(
+                        "org.freedesktop.portal.Desktop",
+                        "/org/freedesktop/portal/desktop",
+                        "org.whisperaloud.test.FakePortalControl",
+                        "TriggerActivated",
+                        GLib.Variant("(s)", ("toggle",)),
+                        None,
+                        Gio.DBusCallFlags.NONE,
+                        2000,
+                        None,
+                    )
+
+                    # Pump the loop briefly so the async signal dispatch
+                    # actually happens.
+                    pump_loop = GLib.MainLoop()
+                    GLib.timeout_add(500, pump_loop.quit)
+                    pump_loop.run()
+
+                    assert new_received == ["toggle"], (
+                        "the fixed (sender=None, arg0=None) subscription must "
+                        "receive the real unicast Activated signal"
+                    )
+                    if old_received:
+                        import warnings
+
+                        warnings.warn(
+                            "OLD arg0/sender-filtered subscription unexpectedly "
+                            "received the Activated signal on this GDBus/portal "
+                            "combination; the field bug may be specific to this "
+                            "environment's GDBus/compositor version. The fix is "
+                            "kept regardless (defense in depth).",
+                            stacklevel=1,
+                        )
+                    else:
+                        # Expected: this is the reproduction of the field bug.
+                        assert old_received == []
+
+                    portal.close()
+                finally:
+                    bus.signal_unsubscribe(old_sub_id)
         finally:
             proc.terminate()
             proc.wait(timeout=5)
@@ -1043,9 +1274,19 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
           <arg type="i" name="count" direction="out"/>
         </method>
         <method name="ResetBindCallCount"/>
+        <method name="TriggerActivated">
+          <arg type="s" name="shortcut_id" direction="in"/>
+        </method>
       </interface>
     </node>
     \"\"\"
+
+    # The unique name of the last client that called CreateSession -- the
+    # real portal's dbus-monitor capture (see hotkey_portal.py's module
+    # docstring / the field bug report) shows Activated delivered as a
+    # *unicast* signal, destination=the daemon's own unique name, not a
+    # broadcast -- so TriggerActivated below reproduces that shape exactly.
+    last_client_sender = [None]
 
     def _emit_response(conn, sender, handle_token, response, results):
         sender_safe = sender.lstrip(":").replace(".", "_")
@@ -1072,6 +1313,23 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
             elif method == "ResetBindCallCount":
                 bind_call_count[0] = 0
                 invocation.return_value(None)
+            elif method == "TriggerActivated":
+                (shortcut_id,) = args
+                invocation.return_value(None)
+                if last_client_sender[0] is not None:
+                    # Unicast, exactly like the real portal in the field
+                    # (dbus-monitor capture: destination=daemon's unique
+                    # name), with the session handle as arg0 of type 'o'
+                    # (OBJECT_PATH) -- this is precisely what an arg0
+                    # match-rule filter can never match (see
+                    # hotkey_portal.py's module docstring).
+                    conn.emit_signal(
+                        last_client_sender[0],
+                        PATH,
+                        "org.freedesktop.portal.GlobalShortcuts",
+                        "Activated",
+                        GLib.Variant("(osta{sv})", ("/session/1", shortcut_id, 0, {})),
+                    )
             return
         if iface != "org.freedesktop.portal.GlobalShortcuts":
             invocation.return_value(None)
@@ -1080,6 +1338,7 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
         if method == "CreateSession":
             options = args[0]
             handle_token = options.get("handle_token")
+            last_client_sender[0] = sender
             invocation.return_value(GLib.Variant("(o)", ("/session/1",)))
             session_result = {"session_handle": GLib.Variant("o", "/session/1")}
             GLib.idle_add(_emit_response, conn, sender, handle_token, 0, session_result)
