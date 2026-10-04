@@ -87,6 +87,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # Entirely independent of self._state/AppState -- a file transcription
         # never changes the mic-recording state machine.
         self._file_job_id: Optional[str] = None
+        # A path queued by open_file_for_transcription() (GApplication
+        # do_open / "Open With") waiting for the daemon connection to be up;
+        # see _try_consume_pending_open_file()'s docstring for why this is
+        # event-driven rather than a timed retry.
+        self._pending_open_path: Optional[str] = None
 
         # Live partial-transcript view state (WHISP-58); only advanced by a
         # streaming engine's PartialTranscript signal, see partial_view_logic.py
@@ -541,6 +546,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # Update model info display
         self._update_model_info()
 
+        # WHISP-96: a file queued by "Open With"/do_open before this
+        # connection landed can now run.
+        self._try_consume_pending_open_file()
+
         return False
 
     def _on_daemon_reconnected(self) -> None:
@@ -575,6 +584,12 @@ class MainWindow(Gtk.ApplicationWindow):
         if daemon_state == "idle":
             self.status_bar.set_status("Ready")
         logger.info("Reconnected to daemon after restart (state=%s)", daemon_state)
+
+        # WHISP-96: a file queued while the daemon was unavailable (e.g. the
+        # user opened a file, then had to click "Retry Connection") can now
+        # run.
+        self._try_consume_pending_open_file()
+
         return False
 
     def _on_daemon_lost(self) -> None:
@@ -1022,20 +1037,36 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def open_file_for_transcription(self, path: str) -> None:
         """Public entry point for "Open With WhisperAloud" (GApplication
-        do_open) and the command line -- called once the window/daemon
-        connection is up. Retries briefly if the daemon isn't connected yet
-        (e.g. the app was just launched by opening a file)."""
-        self._open_file_when_ready(path, attempts_left=40)
+        do_open) and the command line.
 
-    def _open_file_when_ready(self, path: str, attempts_left: int) -> bool:
-        if self.client and self.client.is_connected:
+        Event-driven, never a fixed-time retry/poll: if the daemon
+        connection isn't up yet (e.g. the app was just launched by opening
+        a file, or the daemon is currently unavailable), `path` is queued
+        in `self._pending_open_path` and consumed by
+        `_try_consume_pending_open_file()`, which is called from every
+        place MainWindow actually transitions into a connected state --
+        `_on_daemon_connected` (first connect) and `_handle_reconnection`
+        (daemon came back, including after the user clicks "Retry
+        Connection" in the daemon-unavailable dialog). A file opened while
+        the daemon is down is therefore never silently dropped -- it waits
+        for the real connected-state event, however long that takes.
+
+        A second call while one is already queued replaces it (one file
+        transcription in flight at a time, matching _start_file_
+        transcription's own one-job model) rather than queuing both.
+        """
+        self._pending_open_path = path
+        self._try_consume_pending_open_file()
+
+    def _try_consume_pending_open_file(self) -> None:
+        """If a file is queued (see open_file_for_transcription) and the
+        daemon connection is actually up right now, start it and clear the
+        queue. A no-op otherwise -- callers are expected to call this again
+        themselves the next time the connection state changes."""
+        if self._pending_open_path and self.client and self.client.is_connected:
+            path = self._pending_open_path
+            self._pending_open_path = None
             self._start_file_transcription(path)
-            return False
-        if attempts_left <= 0:
-            logger.warning(f"Gave up waiting for daemon connection to open {path!r}")
-            return False
-        GLib.timeout_add(250, self._open_file_when_ready, path, attempts_left - 1)
-        return False
 
     def _start_file_transcription(self, path: str) -> None:
         """Kick off TranscribeFile() for `path` and show it as in-flight.

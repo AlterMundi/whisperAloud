@@ -145,6 +145,32 @@ def _make_window():
     return window, fake_client
 
 
+def _make_disconnected_window():
+    """Like _make_window(), but never calls _on_daemon_connected() -- for
+    exercising open_file_for_transcription()'s event-driven queueing while
+    no client is attached yet, as happens when a file is opened right at
+    app startup, before the daemon connection lands."""
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, Gtk
+
+    if not Gtk.init_check():
+        pytest.skip("GTK4 failed to initialize against the Xvfb display")
+    Adw.init()
+
+    from whisper_aloud.ui.main_window import MainWindow
+
+    app = Gtk.Application(
+        application_id="org.fede.whisperaloud.GuiTest",
+        flags=Gio.ApplicationFlags.NON_UNIQUE,
+    )
+    app.register()
+    window = MainWindow(application=app)
+    return window
+
+
 def _pump_main_loop() -> None:
     from gi.repository import GLib
 
@@ -283,3 +309,71 @@ def test_drop_picks_first_supported_among_multiple():
 
     assert handled is True
     assert fake_client.transcribe_file_calls == [("/tmp/clip.mp3", {})]
+
+
+# ─── open_file_for_transcription(): event-driven queueing (WHISP-96) ──────
+#
+# No GLib.timeout_add retry loop here: a file opened before the daemon
+# connection is up must be queued and consumed exactly when MainWindow
+# transitions into a connected state (_on_daemon_connected /
+# _handle_reconnection), not after any fixed delay.
+
+
+def test_open_file_before_connection_is_queued_not_started():
+    window = _make_disconnected_window()
+
+    window.open_file_for_transcription("/tmp/meeting.wav")
+
+    assert window._pending_open_path == "/tmp/meeting.wav"
+    assert window._file_job_id is None
+
+
+def test_queued_open_file_runs_once_daemon_connects():
+    window = _make_disconnected_window()
+    window.open_file_for_transcription("/tmp/meeting.wav")
+
+    fake_client = _FakeClient()
+    window._on_daemon_connected(fake_client)
+
+    assert fake_client.transcribe_file_calls == [("/tmp/meeting.wav", {})]
+    assert window._pending_open_path is None
+
+
+def test_open_file_while_already_connected_starts_immediately():
+    window, fake_client = _make_window()
+
+    window.open_file_for_transcription("/tmp/meeting.wav")
+
+    assert fake_client.transcribe_file_calls == [("/tmp/meeting.wav", {})]
+    assert window._pending_open_path is None
+
+
+def test_queued_open_file_survives_a_reconnection_cycle():
+    """A file opened while the daemon was unavailable must still run once
+    the user's "Retry Connection" (or an automatic reconnect) succeeds --
+    _handle_reconnection() is the code path a real reconnect/manual retry
+    both funnel through."""
+    window = _make_disconnected_window()
+    window.open_file_for_transcription("/tmp/meeting.wav")
+    assert window._pending_open_path == "/tmp/meeting.wav"
+
+    fake_client = _FakeClient()
+    window.client = fake_client
+    window._handle_reconnection()
+
+    assert fake_client.transcribe_file_calls == [("/tmp/meeting.wav", {})]
+    assert window._pending_open_path is None
+
+
+def test_second_open_file_call_replaces_the_queued_one():
+    window = _make_disconnected_window()
+
+    window.open_file_for_transcription("/tmp/first.wav")
+    window.open_file_for_transcription("/tmp/second.wav")
+
+    assert window._pending_open_path == "/tmp/second.wav"
+
+    fake_client = _FakeClient()
+    window._on_daemon_connected(fake_client)
+
+    assert fake_client.transcribe_file_calls == [("/tmp/second.wav", {})]
