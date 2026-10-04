@@ -48,8 +48,8 @@ sees speech at a known level.
   and applies a smoothed digital gain toward a target. The gain is bounded:
   by default it's capped at 30 dB, it can rise by at most 3 dB/s, it keeps
   headroom so it can't clip, and it's capped so the amplified noise floor
-  stays under a maximum output noise level (-50 dBFS in AGC2; -40 dBFS
-  here, see the defaults table). A limiter follows.
+  stays under a maximum output noise level (-50 dBFS, same default here).
+  A limiter follows.
   The older analog AGC1 path that moved the OS mixer volume is the legacy,
   opt-in route.
 - **Per-app capture stream:** under PipeWire and PulseAudio each app gets
@@ -109,13 +109,44 @@ above it passes through unchanged at 0 dB.
 |---|---|---|
 | `target_dbfs` | -20 dBFS | Speech RMS at -20 leaves about 17 dB of crest-factor headroom below the -3 dBFS peak ceiling. It sits 2 dB under the unchanged AGC target (-18), so the AGC only makes small corrections, and 20 dB above the unchanged gate's -40 open threshold. |
 | `max_gain_db` | +30 dB | Covers the field case: about -45 to -47 dBFS speech needs +25 to +27 dB. It matches WebRTC AGC2's default cap. More than that only amplifies a nearly dead channel. |
-| `max_output_noise_dbfs` | -40 dBFS | Caps the amplified noise floor at the unchanged NoiseGate's *open* threshold, so normalizing never by itself lifts stationary noise above it. AGC2 uses -50 because its listeners are people who hear the residual noise. Here the listener is an ASR model, and the failure we have to avoid is speech kept *under* the gate. In the field case (speech -47, floor -66, so 19 dB SNR), a -50 cap would stop at +16 dB, leaving speech near -31 dBFS. The -40 cap allows +26 dB, which puts speech within 1 dB of the target. Lower it if you prefer quieter pauses over level. |
+| `max_output_noise_dbfs` | -50 dBFS | Same as AGC2. Keeps the amplified noise floor more than 4 dB under the unchanged NoiseGate's *close* threshold (-46 dBFS), so the gate still closes in pauses after normalization. When this cap binds, speech lands below the target, but it's still well inside the gate's open region; see "Noise cap: measured trade-off" below. |
 | `peak_ceiling_dbfs` | -3 dBFS | Headroom above which no normalized sample may go. The unchanged PeakLimiter (-1 dBFS) still handles anything the AGC adds later. |
 | `max_gain_change_db_per_s` | 10 dB/s | Upward slew for the **streaming** path only, because the batch path uses a single non-causal gain. AGC2 uses 3 dB/s, but it runs for whole calls. Dictation sessions last seconds, and the session starts from the previous session's gain (in-memory), so 10 dB/s is a compromise between convergence speed and audible pumping. Downward moves are not slew-limited. |
 
 The stage **only amplifies**. Loud input goes through at 0 dB, and the
 unchanged AGC and limiter handle it as before. That keeps the change
 strictly additive for users whose mic was already hot.
+
+### Noise cap: measured trade-off
+
+Real speech (`tests/fixtures/vad_quiet_speech/two_speaker.wav`, segment A)
+was rescaled to the field level and white noise was added. The result went
+through the batch normalizer and then the **unchanged** NoiseGate (open
+-40, close -46). The "speech kept" column is the share of active speech
+frames that pass the gate. "Noise passed" is the share of noise-only frames
+before and after the utterance that pass it.
+
+| input (speech / floor) | cap | gain | speech after | speech kept | noise passed |
+|---|---|---|---|---|---|
+| -47 / -66 (field) | none (raw, before this change) | 0 dB | -47 | **0.00** | 0.00 |
+| -47 / -66 | -40 | +26.1 | -20.0 | 1.00 | 0.99 |
+| -47 / -66 | -43 | +23.3 | -22.9 | 0.99 | 0.49 |
+| -47 / -66 | -46 | +20.3 | -25.9 | 0.99 | 0.32 |
+| -47 / -66 | **-50** | +16.3 | -29.9 | 0.99 | **0.00** |
+| -47 / -75 | -50 | +25.2 | -24.2 | 0.99 | 0.00 |
+| -35 / -55 | -50 | +5.2 | -29.1 | 0.99 | 0.00 |
+
+Every cap fixes the field failure (speech kept goes from 0 to 0.99), and
+weak syllables survive equally well (0.97 for all caps). Only the -50 cap
+also lets the unchanged gate close in pauses. With a higher cap the noise
+sits between the gate's close and open thresholds, and once speech has
+opened the gate, its hysteresis keeps it open. So the default is AGC2's
+-50 dBFS. On low-SNR input the speech level lands under `target_dbfs`,
+because the noise, not the target, sets the limit. Raise the cap if
+reaching the target matters more to you than a closing gate.
+`tests/test_input_gain_real_speech.py` pins the raw row and the default
+(field, -50) row. The other rows came from the same setup with only the cap
+or the input levels changed.
 
 ### Where it runs
 
@@ -160,7 +191,7 @@ New section `input_gain` (all keys optional):
 | `enabled` | `true` | `WHISPER_ALOUD_INPUT_GAIN_ENABLED` |
 | `target_dbfs` | `-20.0` | `WHISPER_ALOUD_INPUT_GAIN_TARGET_DBFS` |
 | `max_gain_db` | `30.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_GAIN_DB` |
-| `max_output_noise_dbfs` | `-40.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS` |
+| `max_output_noise_dbfs` | `-50.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS` |
 | `peak_ceiling_dbfs` | `-3.0` | — |
 | `max_gain_change_db_per_s` | `10.0` | — |
 | `hardware_control` | `false` | `WHISPER_ALOUD_INPUT_GAIN_HARDWARE_CONTROL` |
@@ -224,6 +255,6 @@ in pauses once the gate's release tail has decayed, and it can boost that
 noise by up to its `max_gain_db` (20 dB). This behaviour predates this
 change. AGC only "holds" below an RMS of 1e-8, and the gate's 50 ms release
 tail takes several hundred milliseconds to fall that far. With the
-noise floor capped at the gate's open threshold, the gate still closes on
-noise that sits below it. The effect hasn't been measured here. A follow-up
+-50 dBFS noise cap, the gate does close in pauses (see the table below),
+but the AGC tail effect itself hasn't been measured here. A follow-up
 could make AGC hold on unvoiced frames using the same voiced decision.

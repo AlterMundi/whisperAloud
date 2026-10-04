@@ -74,7 +74,7 @@ def test_enabled_by_default(no_device):
 
 
 def test_batch_output_is_normalized(no_device):
-    raw = utterance()
+    raw = utterance(floor_db=-85.0)  # clean floor: the noise cap doesn't bind
     out = _record(_recorder(), raw)
     mask = voiced_mask(len(out))
     assert _rms_db(raw[mask]) == pytest.approx(-47.0, abs=1.5)
@@ -105,7 +105,7 @@ def test_normalization_runs_before_trim_and_pipeline(no_device):
         patch.object(AudioProcessor, "trim_silence", staticmethod(spy_trim)),
         patch.object(AudioPipeline, "process", spy_process),
     ):
-        _record(_recorder(vad=True), utterance())
+        _record(_recorder(vad=True), utterance(floor_db=-85.0))
 
     assert [name for name, _ in order] == ["trim", "pipeline"]
     trim_level = order[0][1]
@@ -130,7 +130,7 @@ def test_batch_logs_summary_and_keeps_stats(no_device, caplog):
     assert "Input normalization (batch)" in text
     assert "speech_before=" in text and "speech_after=" in text
     assert rec.last_input_gain_stats is not None
-    assert rec.last_input_gain_stats.final_gain_db > 20.0
+    assert rec.last_input_gain_stats.final_gain_db > 12.0
 
 
 def test_streaming_chunks_are_normalized(no_device):
@@ -144,14 +144,14 @@ def test_streaming_chunks_are_normalized(no_device):
     streamed = np.concatenate(received)
     assert len(streamed) == len(raw)
     tail = slice(len(raw) // 2, None)  # after convergence
-    assert _rms_db(streamed[tail]) > _rms_db(raw[tail]) + 18.0
+    assert _rms_db(streamed[tail]) > _rms_db(raw[tail]) + 12.0
 
 
 def test_streaming_session_seeded_from_last_batch_gain(no_device):
     rec = _recorder(hook=lambda c: None)
     _record(rec, utterance())
     learned = rec.last_input_gain_stats.target_gain_db
-    assert learned > 20.0
+    assert learned > 12.0
 
     rec.start()
     assert rec._chunk_session.normalizer is not None
@@ -183,7 +183,7 @@ def test_resampled_device_rate_still_normalized(no_device):
     rec = AudioRecorder(
         AudioConfig(sample_rate=48000, vad_enabled=False), processing_config=CHAIN_OFF
     )
-    raw16 = utterance()
+    raw16 = utterance(floor_db=-85.0)
     raw48 = np.repeat(raw16, 3).astype(np.float32)
     out = _record(rec, raw48)
     assert len(out) == pytest.approx(len(raw16), abs=3)

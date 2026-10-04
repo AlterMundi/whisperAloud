@@ -15,7 +15,7 @@ def test_defaults():
     assert cfg.enabled is True
     assert cfg.target_dbfs == pytest.approx(-20.0)
     assert cfg.max_gain_db == pytest.approx(30.0)
-    assert cfg.max_output_noise_dbfs == pytest.approx(-40.0)
+    assert cfg.max_output_noise_dbfs == pytest.approx(-50.0)
     assert cfg.peak_ceiling_dbfs == pytest.approx(-3.0)
     assert cfg.max_gain_change_db_per_s == pytest.approx(10.0)
     # The user's mic gain is theirs: hardware control is opt-in.

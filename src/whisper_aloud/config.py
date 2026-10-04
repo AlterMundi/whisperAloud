@@ -316,7 +316,7 @@ class InputGainConfig:
     enabled: bool = True
     target_dbfs: float = -20.0            # voiced-speech RMS level to aim for
     max_gain_db: float = 30.0             # bounded boost (AGC2 default)
-    max_output_noise_dbfs: float = -40.0  # cap on the amplified noise floor
+    max_output_noise_dbfs: float = -50.0  # cap on the amplified noise floor
     peak_ceiling_dbfs: float = -3.0       # no normalized sample above this
     max_gain_change_db_per_s: float = 10.0  # upward slew, streaming path only
     hardware_control: bool = False        # reserved (deferred backend)

@@ -80,8 +80,11 @@ def test_frame_levels_db_handles_partial_frame_and_silence():
 
 
 class TestBatch:
-    def test_quiet_field_case_reaches_target(self):
-        """-47 dBFS speech over a -66 dBFS floor ends up near the -20 target."""
+    def test_quiet_field_case_noise_limited(self):
+        """Field case: -47 dBFS speech over a -66 dBFS floor (19 dB SNR).
+
+        The default noise cap (-50 dBFS) binds before the -20 target: the
+        floor is lifted exactly to the cap and speech by the same gain."""
         audio = utterance()
         norm = InputNormalizer(InputGainConfig())
         out = norm.normalize_buffer(audio)
@@ -89,22 +92,38 @@ class TestBatch:
 
         assert stats.speech_before_dbfs == pytest.approx(-47.0, abs=2.5)
         assert stats.noise_floor_dbfs == pytest.approx(-66.0, abs=4.0)
-        # Gain is bounded by the noise cap (-40 - floor) or the target, whichever first.
-        assert 22.0 <= stats.final_gain_db <= 28.0
-        assert stats.speech_after_dbfs == pytest.approx(-20.0, abs=3.0)
-
-        # Measured directly on the output, over the speech bursts.
-        mask = voiced_mask(len(out))
-        assert _rms_db(out[mask]) == pytest.approx(-20.0, abs=3.0)
+        assert stats.limited_by == "noise"
+        assert stats.final_gain_db == pytest.approx(-50.0 - stats.noise_floor_dbfs, abs=0.01)
+        assert stats.final_gain_db > 12.0
+        assert stats.speech_after_dbfs == pytest.approx(
+            stats.speech_before_dbfs + stats.final_gain_db, abs=0.5
+        )
+        lead_in = out[: int(0.5 * SR)]
+        assert _rms_db(lead_in) == pytest.approx(-50.0, abs=2.0)
         assert out.dtype == np.float32 and out.shape == audio.shape
 
+    def test_quiet_clean_input_reaches_target(self):
+        """Same quiet speech with a clean floor: nothing caps it, -20 is reached."""
+        audio = utterance(speech_db=-47.0, floor_db=-85.0)
+        norm = InputNormalizer(InputGainConfig())
+        out = norm.normalize_buffer(audio)
+        assert norm.stats.limited_by == "target"
+        assert norm.stats.speech_after_dbfs == pytest.approx(-20.0, abs=1.0)
+        mask = voiced_mask(len(out))
+        assert _rms_db(out[mask]) == pytest.approx(-20.0, abs=3.0)
+
+    def test_raising_noise_cap_reaches_target_on_field_case(self):
+        norm = InputNormalizer(InputGainConfig(max_output_noise_dbfs=-40.0))
+        norm.normalize_buffer(utterance())
+        assert norm.stats.speech_after_dbfs == pytest.approx(-20.0, abs=1.5)
+
     def test_noise_floor_cap_respected(self):
-        cfg = InputGainConfig(max_output_noise_dbfs=-50.0)
+        cfg = InputGainConfig(max_output_noise_dbfs=-55.0)
         audio = utterance()
         norm = InputNormalizer(cfg)
         out = norm.normalize_buffer(audio)
         gap = out[: int(0.5 * SR)]  # lead-in, noise only
-        assert _rms_db(gap) <= -50.0 + 1.0
+        assert _rms_db(gap) <= -55.0 + 1.0
         assert norm.stats.limited_by == "noise"
 
     def test_max_gain_bound(self):
@@ -116,7 +135,7 @@ class TestBatch:
 
     def test_never_clips_and_never_exceeds_ceiling(self):
         """A loud transient inside quiet speech: output stays under the ceiling."""
-        audio = utterance()
+        audio = utterance(floor_db=-85.0)  # ~+27 dB of gain to make clipping likely
         click_at = int(1.3 * SR)
         audio[click_at : click_at + 40] = 0.9  # -1 dBFS burst
         norm = InputNormalizer(InputGainConfig())
@@ -152,8 +171,10 @@ class TestBatch:
         audio = np.concatenate([np.zeros(int(0.4 * SR), np.float32), utterance()])
         norm = InputNormalizer(InputGainConfig())
         norm.normalize_buffer(audio)
+        reference = InputNormalizer(InputGainConfig())
+        reference.normalize_buffer(utterance())
         assert norm.stats.noise_floor_dbfs == pytest.approx(-66.0, abs=4.0)
-        assert norm.stats.speech_after_dbfs == pytest.approx(-20.0, abs=3.0)
+        assert norm.stats.final_gain_db == pytest.approx(reference.stats.final_gain_db, abs=0.5)
 
     def test_gain_constant_in_pauses(self):
         """Batch uses one gain for the whole buffer: pauses can't pump."""

@@ -55,7 +55,7 @@ never changes your mic's device volume. Design and defaults:
 | `input_gain.enabled` | `true` | `WHISPER_ALOUD_INPUT_GAIN_ENABLED` |
 | `input_gain.target_dbfs` | `-20.0` | `WHISPER_ALOUD_INPUT_GAIN_TARGET_DBFS` |
 | `input_gain.max_gain_db` | `30.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_GAIN_DB` |
-| `input_gain.max_output_noise_dbfs` | `-40.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS` |
+| `input_gain.max_output_noise_dbfs` | `-50.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS` |
 | `input_gain.peak_ceiling_dbfs` | `-3.0` | — |
 | `input_gain.max_gain_change_db_per_s` | `10.0` | — |
 | `input_gain.hardware_control` | `false` | `WHISPER_ALOUD_INPUT_GAIN_HARDWARE_CONTROL` |
