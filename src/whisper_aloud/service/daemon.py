@@ -76,6 +76,14 @@ EXIT_ALREADY_RUNNING = 3
 # Error("model_not_available", ...)). The refusal reuses the same code and
 # is synchronous with the call, and still kicks the background re-check.
 #
+# 1.8.0 (WHISP-96, file transcription): additive -- new
+# TranscribeFile(s path, a{sv} options) -> (s job_id) method and
+# FileTranscriptionProgress(s job_id, s stage) /
+# FileTranscriptionReady(s job_id, s text, a{sv} meta) /
+# FileTranscriptionError(s job_id, s code, s message) signals. Entirely
+# independent of the mic-recording state machine (StartRecording/
+# StopRecording/_job_id) -- a file job never changes `GetStatus()["state"]`.
+#
 # 1.9.0 (WHISP-99): additive -- new HotkeyStateChanged(b bound, s trigger,
 # s backend) signal, emitted on every hotkey binding-state transition
 # (portal bind result, GNOME's response=2-with-shortcuts quirk,
@@ -84,8 +92,6 @@ EXIT_ALREADY_RUNNING = 3
 # service/hotkey.py's `on_state_change`. `hotkey_bound`/`hotkey_trigger`
 # (GetStatus) no longer need a client-side recheck timer to learn about a
 # late portal bind; they still reflect the same values this signal carries.
-# 1.8.0 is reserved for WHISP-96 (TranscribeFile), landing separately --
-# this branch was rebased past it without needing anything from it.
 API_VERSION = "1.9.0"
 
 # ExportHistory (WHISP-79): default/maximum number of entries a single
@@ -300,6 +306,11 @@ class WhisperAloudService:
         <method name="CancelDownload">
           <arg direction="out" type="b" name="success"/>
         </method>
+        <method name="TranscribeFile">
+          <arg direction="in" type="s" name="path"/>
+          <arg direction="in" type="a{sv}" name="options"/>
+          <arg direction="out" type="s" name="job_id"/>
+        </method>
         <signal name="RecordingStarted"/>
         <signal name="RecordingStopped"/>
         <signal name="TranscriptionReady">
@@ -341,6 +352,20 @@ class WhisperAloudService:
           <arg type="s" name="state"/>
           <arg type="s" name="detail"/>
         </signal>
+        <signal name="FileTranscriptionProgress">
+          <arg type="s" name="job_id"/>
+          <arg type="s" name="stage"/>
+        </signal>
+        <signal name="FileTranscriptionReady">
+          <arg type="s" name="job_id"/>
+          <arg type="s" name="text"/>
+          <arg type="a{sv}" name="meta"/>
+        </signal>
+        <signal name="FileTranscriptionError">
+          <arg type="s" name="job_id"/>
+          <arg type="s" name="code"/>
+          <arg type="s" name="message"/>
+        </signal>
         <signal name="HotkeyStateChanged">
           <arg type="b" name="bound"/>
           <arg type="s" name="trigger"/>
@@ -363,6 +388,9 @@ class WhisperAloudService:
     DownloadProgress = signal()
     DownloadFinished = signal()
     ModelStateChanged = signal()
+    FileTranscriptionProgress = signal()
+    FileTranscriptionReady = signal()
+    FileTranscriptionError = signal()
     HotkeyStateChanged = signal()
 
     def __init__(
@@ -1636,6 +1664,122 @@ class WhisperAloudService:
                 return False
             self._download_cancel_event.set()
         return True
+
+    def TranscribeFile(self, path: str, options: dict) -> str:
+        """Transcribe an audio/video file using the daemon's already-loaded
+        model (WHISP-96), out-of-band from the mic-recording state machine.
+
+        Returns a `job_id` immediately; progress/result arrive asynchronously
+        via `FileTranscriptionProgress`/`FileTranscriptionReady`/
+        `FileTranscriptionError`, never via this method's return value.
+        Returns `""` (and starts nothing) when `path` is not an existing,
+        readable file -- `Error("file_transcription_invalid_path", ...)` is
+        emitted in that case, matching the convention of other input-
+        validation failures in this class (e.g. `DownloadModel`).
+
+        `options` is an `a{sv}` dict; the only key currently recognized is
+        "language" (str), forwarded to the engine's `transcribe_file()` to
+        override the configured default (usually auto-detect).
+
+        Deliberately reuses `self.transcriber` -- the model the daemon
+        already has loaded for mic recordings -- rather than constructing a
+        fresh engine, so the model is never loaded twice in RAM (the
+        daemon-first architecture's whole point). Does not touch
+        `self._job_id`/`self._transcribing`/`GetStatus()["state"]`: a file
+        transcription job can run concurrently with, or independently of,
+        mic recording -- the two share only the executor's thread pool.
+        """
+        if not isinstance(path, str) or not path or not os.path.isfile(path):
+            self.Error("file_transcription_invalid_path", f"No such file: {path!r}")
+            return ""
+
+        unpacked_options = {
+            key: (value.unpack() if hasattr(value, "unpack") else value)
+            for key, value in (options or {}).items()
+        }
+
+        job_id = uuid.uuid4().hex
+        engine = self.transcriber
+        self.executor.submit(
+            self._run_file_transcription, path, unpacked_options, job_id, engine
+        )
+        return job_id
+
+    def _run_file_transcription(
+        self,
+        path: str,
+        options: dict,
+        job_id: str,
+        engine: Optional[SpeechEngine] = None,
+    ) -> None:
+        """Background-thread worker for TranscribeFile() (runs on
+        self.executor, never the main loop). Entirely independent of the
+        recording job-token machinery (`_job_id`/`_is_job_stale`) -- a file
+        job is never invalidated by `CancelRecording()`/`Quit()` bumping
+        that counter, since it was never a recording in the first place."""
+        engine = engine if engine is not None else self.transcriber
+        GLib.idle_add(
+            _call_once_idle(self.FileTranscriptionProgress, job_id, "transcribing")
+        )
+        try:
+            self._ensure_model_loaded()
+            kwargs = {}
+            language = options.get("language")
+            if language:
+                kwargs["language"] = language
+            result = engine.transcribe_file(path, **kwargs)
+        except ModelNotAvailableError as e:
+            self._emit_file_transcription_error(job_id, e, code="model_not_available")
+            return
+        except Exception as e:
+            self._emit_file_transcription_error(job_id, e)
+            return
+        self._emit_file_transcription_success(result, path, job_id)
+
+    def _emit_file_transcription_error(
+        self, job_id: str, exc: Exception, code: str = "transcription_failed"
+    ) -> None:
+        """Marshal a TranscribeFile() job failure onto the main loop."""
+        error_message = str(exc)
+        logger.error(f"File transcription failed for job {job_id[:8]}: {error_message}")
+        GLib.idle_add(
+            _call_once_idle(self.FileTranscriptionError, job_id, code, error_message)
+        )
+
+    def _emit_file_transcription_success(self, result, path: str, job_id: str) -> None:
+        """Save `result` to history (tagged with the source filename via
+        `add_tag` -- WHISP-96 doesn't add a schema column for this) and emit
+        `FileTranscriptionReady` on the main loop."""
+        filename = os.path.basename(path)
+
+        def _emit_success():
+            try:
+                entry_id = self.history_manager.add_transcription(
+                    result=result,
+                    audio=None,
+                    sample_rate=self.config.audio.sample_rate,
+                    session_id=job_id,
+                )
+                try:
+                    self.history_manager.add_tag(entry_id, f"source:{filename}")
+                except Exception as e:
+                    logger.warning(f"Failed to tag file-transcription history entry: {e}")
+            except Exception as e:
+                logger.error(f"Failed to save file-transcription history: {e}")
+                entry_id = -1
+
+            meta = {
+                "duration": GLib.Variant("d", result.duration),
+                "language": GLib.Variant("s", result.language),
+                "confidence": GLib.Variant("d", result.confidence),
+                "history_id": GLib.Variant("i", entry_id),
+                "source_path": GLib.Variant("s", path),
+                "source_name": GLib.Variant("s", filename),
+            }
+            self.FileTranscriptionReady(job_id, result.text, meta)
+            return False
+
+        GLib.idle_add(_emit_success)
 
     def _run_download(self, entry, cancel_event: threading.Event) -> None:
         """Background-thread worker for DownloadModel(). Performs the actual

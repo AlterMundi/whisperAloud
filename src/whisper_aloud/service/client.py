@@ -430,6 +430,24 @@ class WhisperAloudClient:
             logger.warning(f"cancel_download failed: {e}")
             return False
 
+    def transcribe_file(self, path: str, options: Optional[Dict[str, Any]] = None) -> str:
+        """Start transcribing `path` using the daemon's already-loaded model
+        (WHISP-96). Returns the `job_id` string, or "" if not connected or
+        the call failed (e.g. invalid path -- see the Error signal, emitted
+        with code "file_transcription_invalid_path").
+
+        Progress/result arrive asynchronously via
+        on_file_transcription_progress/on_file_transcription_ready/
+        on_file_transcription_error, not this return value.
+        """
+        if not self._connected or not self._proxy:
+            return ""
+        try:
+            return self._proxy.TranscribeFile(path, _wrap_config_changes(options or {}))
+        except Exception as e:
+            logger.warning(f"transcribe_file failed: {e}")
+            return ""
+
     def get_api_version(self) -> str:
         """Get the org.fede.whisperaloud.Control interface's semantic version.
 
@@ -498,6 +516,18 @@ class WhisperAloudClient:
         Subscribe before reading GetStatus()["model_state"] so a transition
         racing that call is never missed."""
         self._subscribe_signal("ModelStateChanged", callback)
+
+    def on_file_transcription_progress(self, callback: Callable) -> None:
+        """Subscribe to FileTranscriptionProgress signal (job_id, stage) -- API 1.8.0."""
+        self._subscribe_signal("FileTranscriptionProgress", callback)
+
+    def on_file_transcription_ready(self, callback: Callable) -> None:
+        """Subscribe to FileTranscriptionReady signal (job_id, text, meta) -- API 1.8.0."""
+        self._subscribe_signal("FileTranscriptionReady", callback)
+
+    def on_file_transcription_error(self, callback: Callable) -> None:
+        """Subscribe to FileTranscriptionError signal (job_id, code, message) -- API 1.8.0."""
+        self._subscribe_signal("FileTranscriptionError", callback)
 
     def on_hotkey_state_changed(self, callback: Callable) -> None:
         """Subscribe to HotkeyStateChanged signal (bound, trigger, backend)

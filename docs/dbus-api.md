@@ -534,6 +534,47 @@ only stop between chunks of whichever file(s) are in flight at the moment of
 the request, since `huggingface_hub.snapshot_download()` has no public
 per-file-boundary cancellation hook.
 
+### TranscribeFile
+
+```
+TranscribeFile(s path, a{sv} options) → (s job_id)
+```
+
+Valid in any state (WHISP-96) — entirely independent of the mic-recording
+state machine above; `GetStatus()["state"]` never changes because of a
+`TranscribeFile` job, and a file job can run while mic recording/
+transcription is also in progress.
+
+Starts transcribing the audio/video file at `path` using the daemon's
+already-loaded model (`self.transcriber`) instead of constructing a second
+engine instance — the whole point of the daemon owning the model is that it
+is only ever loaded once. Returns a `job_id` immediately; the actual work
+happens on a background thread, reported via:
+
+- `FileTranscriptionProgress(job_id, stage)` — currently emitted once, with
+  `stage="transcribing"`, right before the engine call starts;
+- `FileTranscriptionReady(job_id, text, meta)` on success;
+- `FileTranscriptionError(job_id, code, message)` on failure.
+
+Returns `""` (and starts nothing) if `path` is not an existing, readable
+file — `Error("file_transcription_invalid_path", <message>)` is emitted in
+that case (the one case this fails synchronously, since there is no job to
+report through yet).
+
+`options` (`a{sv}`) currently recognizes:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `"language"` | `s` | Language code override forwarded to the engine's `transcribe_file()`; omitted or empty uses the engine's configured default (usually auto-detect). |
+
+A history entry is written on success, tagged with the source filename as
+`source:<basename>` (via `UpdateHistoryEntry`'s sibling `add_tag`, not a new
+schema column) so it is visibly distinct from a mic-recorded entry in
+`GetHistory`. The daemon does not copy the result to the clipboard or
+auto-paste it — a file job was never a recording, so none of the
+recording-flow clipboard/paste config applies; the caller (GUI/CLI) decides
+whether to copy the result.
+
 ## Properties
 
 ### ApiVersion
@@ -713,6 +754,39 @@ for the states). `detail` is `""` for `loading`/`ready`, the reason for
 `missing`/`error`, and `"<engine>/<name>"` for `downloading`. A client that
 needs the current state should subscribe first and then call `GetStatus()`
 (`model_state`), so a transition racing the call is never missed.
+
+### FileTranscriptionProgress
+
+```
+FileTranscriptionProgress(s job_id, s stage)
+```
+
+Emitted during a `TranscribeFile()` job (WHISP-96). Currently fires exactly
+once per job, with `stage="transcribing"`, right before the engine call
+starts; more granular stages may be added later without a major version
+bump (additive).
+
+### FileTranscriptionReady
+
+```
+FileTranscriptionReady(s job_id, s text, a{sv} meta)
+```
+
+Emitted when a `TranscribeFile()` job finishes successfully. `meta` keys:
+`duration` (`d`), `language` (`s`), `confidence` (`d`), `history_id` (`i`,
+`-1` if the history write itself failed), `source_path` (`s`, the path that
+was passed to `TranscribeFile`), `source_name` (`s`, its basename).
+
+### FileTranscriptionError
+
+```
+FileTranscriptionError(s job_id, s code, s message)
+```
+
+Emitted when a `TranscribeFile()` job fails after it started (an invalid
+`path` instead fails synchronously via the generic `Error` signal — see
+`TranscribeFile` above). `code` is `"model_not_available"` or
+`"transcription_failed"`.
 
 ### HotkeyStateChanged
 
@@ -960,6 +1034,17 @@ Minor (additive), WHISP-99.
   emitted on every hotkey binding-state transition (see "Signals" above for
   the full list of triggers). Lets a client learn `hotkey_bound` changing
   without re-reading `GetStatus()` on a timer.
+
+### 1.8.0 — 2026-10-04
+
+Minor (additive), WHISP-96 "File transcription in the Flatpak sandbox".
+
+- **New method** `TranscribeFile(s path, a{sv} options) -> (s job_id)`:
+  transcribes a file using the daemon's already-loaded model, independent
+  of the mic-recording state machine.
+- **New signals** `FileTranscriptionProgress(s job_id, s stage)`,
+  `FileTranscriptionReady(s job_id, s text, a{sv} meta)`,
+  `FileTranscriptionError(s job_id, s code, s message)`.
 
 ### 1.7.1 — 2026-10-04
 

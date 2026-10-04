@@ -68,6 +68,11 @@
     <method name="CancelDownload">
       <arg direction="out" type="b" name="success" />
     </method>
+    <method name="TranscribeFile">
+      <arg direction="in" type="s" name="path" />
+      <arg direction="in" type="a{sv}" name="options" />
+      <arg direction="out" type="s" name="job_id" />
+    </method>
     <signal name="RecordingStarted" />
     <signal name="RecordingStopped" />
     <signal name="TranscriptionReady">
@@ -108,6 +113,20 @@
     <signal name="ModelStateChanged">
       <arg type="s" name="state" />
       <arg type="s" name="detail" />
+    </signal>
+    <signal name="FileTranscriptionProgress">
+      <arg type="s" name="job_id" />
+      <arg type="s" name="stage" />
+    </signal>
+    <signal name="FileTranscriptionReady">
+      <arg type="s" name="job_id" />
+      <arg type="s" name="text" />
+      <arg type="a{sv}" name="meta" />
+    </signal>
+    <signal name="FileTranscriptionError">
+      <arg type="s" name="job_id" />
+      <arg type="s" name="code" />
+      <arg type="s" name="message" />
     </signal>
     <signal name="HotkeyStateChanged">
       <arg type="b" name="bound" />
