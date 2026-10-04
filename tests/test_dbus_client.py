@@ -335,6 +335,13 @@ class TestWhisperAloudClient:
         client.on_error(callback)
         mock_proxy.Error.connect.assert_called_once_with(callback)
 
+    def test_signal_subscription_model_state_changed(self):
+        """on_model_state_changed should subscribe callback to the 1.6.0 signal."""
+        _, client, _, mock_proxy = self._make_client()
+        callback = MagicMock()
+        client.on_model_state_changed(callback)
+        mock_proxy.ModelStateChanged.connect.assert_called_once_with(callback)
+
     def test_signal_subscription_when_disconnected(self):
         """Signal subscriptions should not raise when disconnected."""
         _, client, _, _ = self._make_client(daemon_available=False)
