@@ -22,6 +22,7 @@ def test_default_config():
     assert config.model.device == "auto"
     assert config.model.compute_type == "int8"
     assert config.model.download_root is None
+    assert config.model.allow_network_download is True
     assert config.transcription.language == "auto"
     assert config.transcription.beam_size == 5
     assert config.transcription.vad_filter is True
@@ -55,6 +56,24 @@ def test_env_override():
                    'WHISPER_ALOUD_LANGUAGE', 'WHISPER_ALOUD_BEAM_SIZE',
                    'WHISPER_ALOUD_VAD_FILTER']:
             os.environ.pop(key, None)
+
+
+def test_env_override_allow_network_download():
+    """WHISP-94: WHISPER_ALOUD_MODEL_ALLOW_NETWORK_DOWNLOAD overrides the
+    model's network-download gate."""
+    os.environ['WHISPER_ALOUD_MODEL_ALLOW_NETWORK_DOWNLOAD'] = 'false'
+    try:
+        config = WhisperAloudConfig.load()
+        assert config.model.allow_network_download is False
+    finally:
+        os.environ.pop('WHISPER_ALOUD_MODEL_ALLOW_NETWORK_DOWNLOAD', None)
+
+
+def test_to_dict_from_dict_roundtrip_allow_network_download():
+    config = WhisperAloudConfig.load()
+    config.model.allow_network_download = False
+    restored = WhisperAloudConfig.from_dict(config.to_dict())
+    assert restored.model.allow_network_download is False
 
 
 def test_invalid_model_name():
