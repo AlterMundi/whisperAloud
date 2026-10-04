@@ -16,6 +16,9 @@ pytestmark = [
     pytest.mark.dbus_private,
     pytest.mark.skipif(private_bus_address() is None,
                        reason="no private bus: run via scripts/test_private_bus.sh"),
+    # PyGObject's override of the closure-based register_object (fake services only).
+    pytest.mark.filterwarnings(
+        "ignore:Gio.DBusConnection.register_object is deprecated:DeprecationWarning"),
 ]
 
 SHELL_XML = """
