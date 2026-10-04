@@ -25,6 +25,7 @@ from ..config import WhisperAloudConfig, detect_config_changes
 from ..exceptions import ModelNotAvailableError
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
+from ..shell_extension import tray_should_show
 from ..stt import catalog, model_download
 from ..stt.engine import SpeechEngine, create_engine
 from . import model_state
@@ -487,6 +488,7 @@ class WhisperAloudService:
         else:
             logger.info("No DISPLAY/WAYLAND_DISPLAY; skipping tray indicator")
             self.indicator = None
+        self._shell_extension_watcher = self._watch_shell_extension()
 
         # Initialize hotkey manager (skipped entirely in test mode -- no
         # portal contact at all, not even a check, per WHISP-46).
@@ -1831,6 +1833,26 @@ class WhisperAloudService:
 
     # ─── Signal handling ─────────────────────────────────────────────────
 
+    def _watch_shell_extension(self):
+        """Hide the tray icon while the GNOME Shell extension (which shows its
+        own top-bar indicator) owns its bus name. Event-driven bus-name watch;
+        only when there is a tray icon to hide. Never fatal."""
+        if self.indicator is None:
+            return None
+        try:
+            from . import shell_extension_watch
+
+            def _on_change(present: bool) -> None:
+                if self.indicator is not None:
+                    self.indicator.set_suppressed(
+                        not tray_should_show(extension_present=present)
+                    )
+
+            return shell_extension_watch.ShellExtensionWatcher(_on_change)
+        except Exception as e:
+            logger.info(f"GNOME Shell extension presence watch unavailable: {e}")
+            return None
+
     def _signal_handler_glib(self):
         """Handle SIGTERM/SIGINT from GLib main loop (safe for D-Bus emission)."""
         logger.info("Received shutdown signal, shutting down")
@@ -2188,6 +2210,11 @@ class WhisperAloudService:
         # Unregister hotkeys
         if self.hotkey_manager:
             self.hotkey_manager.unregister()
+
+        watcher = getattr(self, "_shell_extension_watcher", None)
+        if watcher is not None:
+            watcher.close()
+            self._shell_extension_watcher = None
 
         # Close any open RemoteDesktop portal session (Flatpak paste path,
         # WHISP-59) -- see clipboard.paste_selection.close_portal_simulator

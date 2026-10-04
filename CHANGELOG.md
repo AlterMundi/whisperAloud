@@ -24,7 +24,6 @@ All notable user-facing changes to this project are documented here.
   the model is still loading is transcribed as soon as it is ready; a model
   that is not downloaded is never fetched automatically and fails with a
   clear "Model not available" error instead.
-
 - "Start in background at login" setting (Settings → General → Startup,
   `startup.autostart_background`, off by default). At login only the daemon
   starts, without the window: the model preloads, the global shortcut is
@@ -37,6 +36,21 @@ All notable user-facing changes to this project are documented here.
   `"autostart"` so an indicator can show "all OK" without the window
   (D-Bus API 1.7.0), and `whisper-aloud status` shows both. The manual
   Flatpak autostart entry in `docs/flatpak.md` stays as a fallback.
+- The optional GNOME Shell extension (`whisperaloud@fede`, version 2) is now
+  a top-bar indicator. It shows "all OK" (model ready and global hotkey
+  bound, D-Bus API 1.7.0), or that the service is not running, starting or
+  loading the model, that the model is missing, that the hotkey is not
+  bound, or that it is recording or transcribing. It follows D-Bus signals.
+  Its menu can toggle recording, start the service and open the window. It
+  supports GNOME Shell 45–51.
+- While the extension is active, the tray icon hides itself.
+- A new Settings → Advanced → "Top bar indicator (GNOME Shell extension)"
+  section shows the extension's status and the exact command to install it,
+  with a Copy button. Native installs also get an Enable/Disable button. The
+  Flatpak ships the extension zip.
+- The Flatpak can now reach the extension's window service
+  (`--talk-name=org.gnome.Shell.Extensions.whisperaloud`), so pasting into
+  the window that was focused when recording started can work there too.
 
 ### Changed
 - Streaming engines (Nemotron) refuse to start recording until the model is

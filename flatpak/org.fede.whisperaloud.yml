@@ -54,7 +54,21 @@ finish-args:
   # default): lists and pauses/resumes MPRIS players over the session bus.
   # Without this the feature silently does nothing.
   - --talk-name=org.mpris.MediaPlayer2.*
+  # Optional GNOME Shell top-bar extension (whisperaloud@fede, shipped as a
+  # zip below and installed on the host by the user). It owns exactly this
+  # name and exports org.fede.whisperaloud.Window (focused-window capture
+  # and re-activation for paste_to_captured_window) and
+  # org.fede.whisperaloud.ShellExtension.GetInfo (version, for Settings).
+  # The daemon also watches this name to hide its tray icon while the
+  # extension shows the top-bar indicator. Exact name, no wildcard: it does
+  # NOT grant org.gnome.Shell.Extensions (see below). docs/flatpak.md.
+  - --talk-name=org.gnome.Shell.Extensions.whisperaloud
   # Deliberately NOT requested:
+  # - --talk-name=org.gnome.Shell.Extensions: GNOME Shell's extension
+  #   manager. It would let the app enable, disable and uninstall ANY
+  #   extension and toggle all of them at once. Settings instead derives
+  #   "running + version" from the name above and shows the host command
+  #   (gnome-extensions install/enable) for the rest.
   # - --own-name: org.fede.whisperaloud and org.fede.whisperaloud.Gui are
   #   at/below the app ID, which Flatpak allows by default.
   # - --talk-name=org.freedesktop.portal.*: portals are always reachable.
@@ -155,6 +169,12 @@ modules:
       - install -Dm644 data/org.fede.whisperaloud.metainfo.xml ${FLATPAK_DEST}/share/metainfo/org.fede.whisperaloud.metainfo.xml
       - install -Dm644 data/icons/hicolor/scalable/apps/org.fede.whisperaloud.svg
         ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/org.fede.whisperaloud.svg
+      # Optional GNOME Shell extension, packed for installation on the host
+      # (an extension cannot be installed from inside the sandbox). Settings
+      # copies it to ~/.var/app/org.fede.whisperaloud/data/ and shows the
+      # `gnome-extensions install` command (docs/flatpak.md).
+      - python3 scripts/pack_shell_extension.py
+        ${FLATPAK_DEST}/share/whisper-aloud/gnome-shell-extension/whisperaloud@fede.shell-extension.zip
     sources:
       # Local checkout. A store build would use `type: git` with a release
       # tag and commit instead.
