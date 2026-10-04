@@ -300,3 +300,37 @@ class TestFinalizeGenerationGuard:
         engine.finalize()
 
         assert engine._session_started is False
+
+
+# ─── 0.3.0 model preload: controllable load_model() for e2e ─────────────────
+
+
+@pytest.mark.parametrize("engine_cls", [FakeSpeechEngine, FakeStreamingSpeechEngine])
+def test_load_model_blocks_on_fifo_until_released(monkeypatch, tmp_path, engine_cls):
+    """WHISPER_ALOUD_FAKE_MODEL_LOAD_FIFO: load_model() blocks until a writer
+    releases the FIFO -- an event (open/write), not a sleep, so e2e tests can
+    hold the daemon in `loading` for exactly as long as they need."""
+    import os
+
+    fifo = tmp_path / "load.fifo"
+    os.mkfifo(fifo)
+    monkeypatch.setenv("WHISPER_ALOUD_FAKE_MODEL_LOAD_FIFO", str(fifo))
+    engine = engine_cls(_config())
+
+    t = threading.Thread(target=engine.load_model, daemon=True)
+    t.start()
+    with open(fifo, "wb") as writer:  # rendezvous: returns once the loader opened it
+        assert not engine.is_loaded
+        writer.write(b"x")
+    t.join(timeout=10)
+    assert not t.is_alive()
+    assert engine.is_loaded
+
+
+@pytest.mark.parametrize("engine_cls", [FakeSpeechEngine, FakeStreamingSpeechEngine])
+def test_load_model_error_injection(monkeypatch, engine_cls):
+    monkeypatch.setenv("WHISPER_ALOUD_FAKE_MODEL_LOAD_ERROR", "simulated load failure")
+    engine = engine_cls(_config())
+    with pytest.raises(Exception, match="simulated load failure"):
+        engine.load_model()
+    assert not engine.is_loaded

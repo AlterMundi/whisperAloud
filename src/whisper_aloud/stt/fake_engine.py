@@ -24,6 +24,26 @@ if TYPE_CHECKING:
     from ..transcriber import TranscriptionResult
 
 
+def _fake_load_model() -> None:
+    """Shared load_model() test hooks (0.3.0 model preload e2e).
+
+    - WHISPER_ALOUD_FAKE_MODEL_LOAD_FIFO=<path to a FIFO>: block until a
+      writer opens the FIFO and writes (or closes it). An event, not a
+      sleep: an e2e test holds the daemon in `loading` for exactly as long
+      as it needs, then releases it.
+    - WHISPER_ALOUD_FAKE_MODEL_LOAD_ERROR=<message>: raise ModelLoadError.
+    """
+    fifo = os.environ.get("WHISPER_ALOUD_FAKE_MODEL_LOAD_FIFO")
+    if fifo:
+        with open(fifo, "rb") as reader:
+            reader.read(1)
+    error = os.environ.get("WHISPER_ALOUD_FAKE_MODEL_LOAD_ERROR")
+    if error:
+        from ..exceptions import ModelLoadError
+
+        raise ModelLoadError(error)
+
+
 class FakeSpeechEngine:
     """Deterministic SpeechEngine double. Reads the expected transcript from a
     sidecar `<wav>.txt` next to WHISPER_ALOUD_FAKE_AUDIO_WAV, re-read fresh on
@@ -44,6 +64,7 @@ class FakeSpeechEngine:
         return self._cancelling
 
     def load_model(self) -> None:
+        _fake_load_model()
         self._loaded = True
 
     def unload_model(self) -> None:
@@ -159,6 +180,7 @@ class FakeStreamingSpeechEngine:
         return self._cancelling
 
     def load_model(self) -> None:
+        _fake_load_model()
         self._loaded = True
 
     def unload_model(self) -> None:
