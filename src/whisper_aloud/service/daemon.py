@@ -1790,43 +1790,90 @@ class WhisperAloudService:
                 self.indicator.set_state("idle")
                 self.indicator.set_last_text(result.text)
             self.TranscriptionReady(result.text, meta)
-            if self.config.clipboard.auto_copy and self.clipboard_manager:
-                try:
-                    self.clipboard_manager.copy(result.text)
-                    logger.info("Transcription copied to clipboard")
-                except Exception as e:
-                    logger.warning(f"Failed to copy to clipboard: {e}")
             # Audit fix (item 4): pop unconditionally, not only inside the
             # auto-paste branch below -- otherwise a job with auto_paste
             # disabled (or running under _test_mode) never releases its
             # captured-window entry.
             captured = self._captured_by_job.pop(job_id, None)
-            if (self.config.clipboard.auto_copy
-                    and self.config.clipboard.auto_paste
-                    and not self._test_mode
-                    and self.clipboard_manager
-                    and result.text):
+            if self.config.clipboard.auto_copy and self.clipboard_manager:
+                # Field bug fix: auto-paste used to fire the instant we
+                # closed wl-copy's stdin, racing wl-copy's fork into the
+                # background (the real "selection owned" event) -- a
+                # background auto-paste would then land the *previous*
+                # clipboard content, while a manual Ctrl+V moments later
+                # (after the race resolved) got the new text. `copy()`'s
+                # on_complete callback is the authoritative, race-free
+                # "copy really finished" signal; everything that must only
+                # happen after a successful copy (the success log, and any
+                # auto-paste) is driven from it instead of from the
+                # synchronous call below.
+                def _on_clipboard_copy_complete(success: bool, _captured=captured):
+                    # On Wayland this callback may arrive on a background
+                    # thread (ClipboardManager waits for wl-copy's exit off
+                    # the main loop) -- hop onto the GLib main loop before
+                    # touching any daemon/portal state, since
+                    # simulate_paste() and friends are otherwise only ever
+                    # touched from main-loop callbacks.
+                    def _finish():
+                        if success:
+                            logger.info("Transcription copied to clipboard")
+                        else:
+                            logger.warning(
+                                "Clipboard copy did not complete successfully "
+                                "(or timed out); skipping auto-paste"
+                            )
+                        if not (success
+                                and self.config.clipboard.auto_paste
+                                and not self._test_mode
+                                and self.clipboard_manager
+                                and result.text):
+                            return
+                        try:
+                            from ..clipboard import build_paste_simulator
+                            simulator = build_paste_simulator(
+                                self.clipboard_manager._session_type,
+                                self.config.clipboard,
+                            )
+
+                            def _trigger_paste():
+                                # simulate_paste() (portal/ydotool/xdotool)
+                                # mutates state that is otherwise only
+                                # touched from main-loop callbacks -- it
+                                # must run here, on the main loop, never
+                                # from a worker thread.
+                                simulator.simulate_paste()
+
+                            if _captured and self.config.clipboard.paste_to_captured_window:
+                                try:
+                                    self.window_manager.activate_window(_captured)
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to activate captured window: {e}"
+                                    )
+                                # paste_delay_ms is kept only as a
+                                # user-configurable settle delay for the
+                                # just-restored window's focus -- never a
+                                # stand-in for waiting on clipboard
+                                # readiness, which `success` above already
+                                # guarantees.
+                                GLib.timeout_add(
+                                    self.config.clipboard.paste_delay_ms,
+                                    _call_once_idle(_trigger_paste),
+                                )
+                            else:
+                                GLib.idle_add(_call_once_idle(_trigger_paste))
+                            logger.info("Auto-paste triggered")
+                        except Exception as e:
+                            logger.warning(f"Failed to trigger auto-paste: {e}")
+
+                    GLib.idle_add(_call_once_idle(_finish))
+
                 try:
-                    from ..clipboard import build_paste_simulator
-                    import threading as _threading
-                    simulator = build_paste_simulator(
-                        self.clipboard_manager._session_type,
-                        self.config.clipboard,
+                    self.clipboard_manager.copy(
+                        result.text, on_complete=_on_clipboard_copy_complete
                     )
-
-                    def _do_paste():
-                        if captured and self.config.clipboard.paste_to_captured_window:
-                            try:
-                                self.window_manager.activate_window(captured)
-                                time.sleep(self.config.clipboard.paste_delay_ms / 1000.0)
-                            except Exception as e:
-                                logger.warning(f"Failed to activate captured window: {e}")
-                        simulator.simulate_paste()
-
-                    _threading.Thread(target=_do_paste, daemon=True).start()
-                    logger.info("Auto-paste triggered")
                 except Exception as e:
-                    logger.warning(f"Failed to trigger auto-paste: {e}")
+                    logger.warning(f"Failed to copy to clipboard: {e}")
             if self.notifications:
                 self.notifications.show_transcription_completed(result.text)
             # WHISP-74: a model reload deferred while this job was in flight

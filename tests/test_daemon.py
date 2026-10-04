@@ -628,7 +628,15 @@ class TestDaemonMethods:
             mock_glib.Variant = lambda t, v: v
             mock_glib.idle_add = lambda fn, *args: fn(*args)
             daemon._transcribe_and_emit(np.zeros(16000, dtype=np.float32))
-        daemon.clipboard_manager.copy.assert_called_once_with("Hello world")
+        # copy() is called with an on_complete callback now (the real
+        # "Transcription copied to clipboard" log / auto-paste trigger
+        # only fire once that callback reports success -- see
+        # test_daemon_clipboard_ordering.py) -- assert the text and that a
+        # callback was supplied, not the exact kwarg value.
+        daemon.clipboard_manager.copy.assert_called_once()
+        call_args, call_kwargs = daemon.clipboard_manager.copy.call_args
+        assert call_args == ("Hello world",)
+        assert callable(call_kwargs.get("on_complete"))
 
     def test_clipboard_not_called_when_disabled(self, daemon):
         """Clipboard copy should be skipped when auto_copy is disabled."""
