@@ -12,6 +12,7 @@ import numpy as np
 
 from .config import WhisperAloudConfig
 from .exceptions import AudioFormatError, ModelLoadError, TranscriptionError
+from .stt import hf_download
 from .utils.validation_helpers import sanitize_language_code
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,29 @@ class Transcriber:
         ]
         return any(indicator in error_str for indicator in cuda_indicators)
 
+    def _resolve_local_files_only(self) -> Optional[bool]:
+        """Whether the configured model is already in the local cache (WHISP-94).
+
+        Returns True/False to be passed straight through to WhisperModel's own
+        `local_files_only` -- the model never gets a network-capable load for a
+        name that's already cached. Returns None if the model is missing from
+        the cache *and* `model.allow_network_download` is disabled, which the
+        caller must treat as "refuse to load", not as "load with
+        local_files_only=False".
+
+        The cache check itself (`hf_download.is_cached`) never touches the
+        network either way -- it performs the same local-only resolution
+        WhisperModel does internally, so "not cached" is determined without
+        any HTTP request.
+        """
+        cached = hf_download.is_cached(self.config.model.name, self.config.model.download_root)
+        if cached:
+            return True
+        if not self.config.model.allow_network_download:
+            return None
+        logger.info("downloading model '%s' (not in cache)", self.config.model.name)
+        return False
+
     def _try_load_model(self, device: str, compute_type: str) -> bool:
         """
         Attempt to load model with specified device.
@@ -81,6 +105,15 @@ class Transcriber:
         Returns:
             True if successful, False otherwise
         """
+        local_files_only = self._resolve_local_files_only()
+        if local_files_only is None:
+            logger.debug(
+                "Model '%s' not cached and network download disabled; "
+                "CPU fallback unavailable", self.config.model.name,
+            )
+            self._model = None
+            return False
+
         try:
             logger.info("Attempting to load model on device: %s", device)
             self._model = WhisperModel(
@@ -88,6 +121,7 @@ class Transcriber:
                 device=device,
                 compute_type=compute_type,
                 download_root=self.config.model.download_root,
+                local_files_only=local_files_only,
             )
 
             # Test with dummy inference
@@ -121,6 +155,13 @@ class Transcriber:
         logger.info("Loading Whisper model: %s on device: %s",
                    self.config.model.name, requested_device)
 
+        local_files_only = self._resolve_local_files_only()
+        if local_files_only is None:
+            raise ModelLoadError(
+                f"Model '{self.config.model.name}' is not in the local cache and "
+                "model.allow_network_download is disabled; refusing to download it."
+            )
+
         # Try loading with requested device
         try:
             self._model = WhisperModel(
@@ -128,6 +169,7 @@ class Transcriber:
                 device=requested_device,
                 compute_type=compute_type,
                 download_root=self.config.model.download_root,
+                local_files_only=local_files_only,
             )
 
             # Test model with dummy inference

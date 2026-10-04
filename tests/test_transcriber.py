@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from whisper_aloud.config import WhisperAloudConfig
-from whisper_aloud.exceptions import AudioFormatError
+from whisper_aloud.exceptions import AudioFormatError, ModelLoadError
 from whisper_aloud.transcriber import Transcriber, TranscriptionResult
 
 
@@ -482,3 +482,90 @@ def test_transcriber_initialization_logging():
             "Transcriber initialized with model: %s, device: %s",
             config.model.name, config.model.device
         )
+
+
+# --- WHISP-94: loading an already-cached model must never touch the network ---
+
+
+def _mock_loadable_model(mock_whisper_model):
+    """Wire `mock_whisper_model` (the patched WhisperModel class) to return an
+    instance whose dummy-inference test call in load_model() succeeds."""
+    mock_model_instance = Mock()
+    mock_segment = Mock(text="test", start=0.0, end=1.0, avg_logprob=-0.1)
+    mock_info = Mock(language="en", duration=1.0)
+    mock_model_instance.transcribe.return_value = ([mock_segment], mock_info)
+    mock_whisper_model.return_value = mock_model_instance
+    return mock_model_instance
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_load_model_passes_local_files_only_true_when_cached(mock_whisper_model):
+    """A model already in the local cache must load with local_files_only=True
+    -- this is what prevents WhisperModel/huggingface_hub from making any
+    network request to check the remote revision."""
+    _mock_loadable_model(mock_whisper_model)
+
+    config = WhisperAloudConfig.load()
+    transcriber = Transcriber(config)
+
+    with patch('whisper_aloud.transcriber.hf_download.is_cached', return_value=True) as mock_is_cached:
+        transcriber.load_model()
+
+    mock_is_cached.assert_called_once_with(config.model.name, config.model.download_root)
+    assert mock_whisper_model.call_args.kwargs["local_files_only"] is True
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_load_model_downloads_when_not_cached(mock_whisper_model, caplog):
+    """When the model genuinely isn't cached yet, load_model() may still fall
+    back to a network-capable load (today's first-use-downloads behavior),
+    but must log clearly that it is about to do so."""
+    _mock_loadable_model(mock_whisper_model)
+
+    config = WhisperAloudConfig.load()
+    assert config.model.allow_network_download is True
+    transcriber = Transcriber(config)
+
+    with patch('whisper_aloud.transcriber.hf_download.is_cached', return_value=False):
+        with caplog.at_level("INFO"):
+            transcriber.load_model()
+
+    assert mock_whisper_model.call_args.kwargs["local_files_only"] is False
+    assert any(
+        "not in cache" in record.message or "not in cache" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_load_model_raises_when_network_disabled_and_not_cached(mock_whisper_model):
+    """model.allow_network_download=False must make a missing model a hard
+    error instead of silently reaching the network -- and WhisperModel must
+    never even be constructed in that case."""
+    config = WhisperAloudConfig.load()
+    config.model.allow_network_download = False
+    transcriber = Transcriber(config)
+
+    with patch('whisper_aloud.transcriber.hf_download.is_cached', return_value=False):
+        with pytest.raises(ModelLoadError):
+            transcriber.load_model()
+
+    mock_whisper_model.assert_not_called()
+
+
+@patch('whisper_aloud.transcriber.WhisperModel')
+def test_try_load_model_cpu_fallback_respects_network_flag(mock_whisper_model):
+    """The CUDA->CPU fallback path (_try_load_model) must apply the same
+    cached/local_files_only logic as load_model, including refusing to reach
+    the network when allow_network_download is False."""
+    _mock_loadable_model(mock_whisper_model)
+
+    config = WhisperAloudConfig.load()
+    config.model.allow_network_download = False
+    transcriber = Transcriber(config)
+
+    with patch('whisper_aloud.transcriber.hf_download.is_cached', return_value=False):
+        result = transcriber._try_load_model("cpu", "int8")
+
+    assert result is False
+    mock_whisper_model.assert_not_called()
