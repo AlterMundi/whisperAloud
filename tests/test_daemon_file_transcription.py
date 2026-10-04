@@ -5,20 +5,39 @@ boundary (D-Bus, GLib, audio, history, engine construction) and runs
 executor jobs inline (see _SyncExecutor), so these tests exercise the real
 TranscribeFile()/_run_file_transcription() code paths without any GTK/D-Bus/
 model runtime dependency.
+
+The model-readiness gating tests near the bottom (TestModelGateConsistency)
+pin TranscribeFile() to the same contract StartRecording()/_transcribe_and_emit
+already have (see tests/test_daemon_model_preload.py's TestBatchJobWaitsForReady,
+which this mirrors for the file-transcription path): `missing`/`error` fails
+fast with Error "model_not_available"; `loading` blocks the job (on the
+executor thread, via the ready EVENT, never a poll) until the load settles.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests._daemon_harness import make_daemon
+from whisper_aloud.service import model_state as ms
+
+
+def _available(daemon_obj, value: bool):
+    """Patch the offline availability check on the module object the daemon
+    under test actually uses (the harness re-imports the daemon module)."""
+    return patch.object(
+        daemon_obj._daemon_module.model_state, "is_model_available", return_value=value
+    )
 
 
 @pytest.fixture
 def daemon():
     service = make_daemon()
     yield service
+    service._model_state.close()
     service._patches.close()
 
 
@@ -121,3 +140,100 @@ def test_progress_signal_emitted_before_result(daemon, tmp_path):
     daemon.FileTranscriptionProgress.assert_called_once()
     job_id_arg, stage = daemon.FileTranscriptionProgress.call_args[0]
     assert stage == "transcribing"
+
+
+class _GatedFileEngine:
+    """Batch engine whose load_model() blocks on `gate`, like
+    test_daemon_model_preload.py's _GatedEngine but with `transcribe_file`
+    instead of `transcribe_numpy`."""
+
+    is_streaming = False
+
+    def __init__(self, gate: threading.Event | None = None):
+        self.gate = gate
+        self.load_entered = threading.Event()
+        self.transcribe_file = MagicMock(return_value=_result("from engine"))
+
+    def load_model(self):
+        self.load_entered.set()
+        if self.gate is not None and not self.gate.wait(timeout=10):
+            raise TimeoutError("test gate never released")
+
+
+class TestModelGateConsistency:
+    """TranscribeFile() must handle model readiness exactly like the
+    recording path (StartRecording -> _transcribe_and_emit): missing/error
+    fails fast with Error("model_not_available", ...); loading blocks the
+    job -- on the executor thread, via the ready event -- until the load
+    settles."""
+
+    def test_waits_for_loading_model_via_ready_event_then_succeeds(self, daemon, tmp_path):
+        audio_file = tmp_path / "clip.wav"
+        audio_file.write_bytes(b"x")
+        gate = threading.Event()
+        engine = _GatedFileEngine(gate=gate)
+        daemon.transcriber = engine
+        daemon.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-wa-file")
+
+        waiting = threading.Event()
+        real_wait = daemon._model_state.wait_while_loading
+
+        def _spy_wait(*a, **kw):
+            waiting.set()
+            return real_wait(*a, **kw)
+
+        with _available(daemon, True):
+            daemon._start_model_load()
+            assert engine.load_entered.wait(timeout=10)
+
+            with patch.object(
+                daemon._model_state, "wait_while_loading", side_effect=_spy_wait
+            ):
+                job_id = daemon.TranscribeFile(str(audio_file), {})
+                assert job_id != ""
+                assert waiting.wait(timeout=10), "file job never blocked on the ready event"
+                engine.transcribe_file.assert_not_called()
+
+                gate.set()  # model finishes loading -> job proceeds
+                daemon.executor.shutdown(wait=True)
+
+        engine.transcribe_file.assert_called_once()
+        daemon.FileTranscriptionReady.assert_called_once()
+        daemon.FileTranscriptionError.assert_not_called()
+
+    def test_rejected_fast_when_model_missing(self, daemon, tmp_path):
+        audio_file = tmp_path / "clip.wav"
+        audio_file.write_bytes(b"x")
+        engine = _GatedFileEngine()
+        daemon.transcriber = engine
+        daemon._model_state.set_state(ms.MISSING, "Model 'base' is not downloaded")
+
+        with _available(daemon, False):
+            job_id = daemon.TranscribeFile(str(audio_file), {})
+
+        assert job_id != ""  # the job starts; it fails asynchronously inside it
+        engine.transcribe_file.assert_not_called()
+        daemon.FileTranscriptionError.assert_called_once()
+        _job_id, code, message = daemon.FileTranscriptionError.call_args[0]
+        assert code == "model_not_available"
+        assert "base" in message
+        daemon.history_manager.add_transcription.assert_not_called()
+        daemon.FileTranscriptionReady.assert_not_called()
+        # Consistent with StartRecording's refusal: never perturbs the
+        # recording state machine/status.
+        daemon.StatusChanged.assert_not_called()
+
+    def test_rejected_fast_when_model_errored(self, daemon, tmp_path):
+        audio_file = tmp_path / "clip.wav"
+        audio_file.write_bytes(b"x")
+        engine = _GatedFileEngine()
+        daemon.transcriber = engine
+        daemon._model_state.set_state(ms.ERROR, "CUDA exploded")
+
+        with _available(daemon, True):
+            daemon.TranscribeFile(str(audio_file), {})
+
+        engine.transcribe_file.assert_not_called()
+        _job_id, code, message = daemon.FileTranscriptionError.call_args[0]
+        assert code == "model_not_available"
+        assert "CUDA exploded" in message
