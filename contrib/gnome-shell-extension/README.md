@@ -14,14 +14,16 @@ The icon and the first menu line follow the daemon's state:
 | Microphone with a slash, "WhisperAloud is not running" | The daemon's bus name `org.fede.whisperaloud` has no owner. |
 | Spinner, "Starting…" | The daemon is starting: we asked D-Bus to activate it, or its `GetStatus()` has not answered yet. |
 | Spinner, "Loading model…" / "Downloading model…" | `model_state` is `loading`, `downloading` or `unloaded`. |
-| Microphone, "Ready" | Idle and the model is loaded. Shows "Ready (no global hotkey)" when the daemon reports no hotkey. |
+| Microphone, "Ready" | **All OK**: idle, `model_state == "ready"` and `hotkey_bound` (D-Bus API 1.7.0), or the extension's fallback keybinding is active. |
+| Amber microphone, "Ready, but no global hotkey" | The model is ready, but the daemon reports `hotkey_bound == false`, for example while GNOME's shortcut dialog is still open after login, or after you declined it. |
 | Red record dot, "Recording…" | The daemon is recording. |
 | Gears, "Transcribing…" | The daemon is transcribing. |
 | Warning, "Model not downloaded" | `model_state` is `missing`. Open WhisperAloud to download it. |
 | Error, "Error: …" | `model_state` is `error` (with its message), or the daemon's state is `error`. |
 
-The menu also shows the configured model (`Model: …`) and the global hotkey
-(`Hotkey: <trigger>`, or `Hotkey: not registered`). Its actions are
+The menu also shows the configured model (`Model: …`), the global hotkey
+(`Hotkey: <trigger>`, or `Hotkey: not registered`) and, when the daemon
+reports `autostart` (1.7.0), whether it starts at login. Its actions are
 **Toggle Recording** (while the daemon runs), **Start WhisperAloud** (while
 it does not; this D-Bus-activates the daemon without recording) and
 **Open WhisperAloud** (launches `org.fede.whisperaloud.desktop`, native or
@@ -35,8 +37,12 @@ Everything is event-driven, with no polling timers:
   carry state changes.
 - One `GetStatus()` call runs when the daemon appears, when it returns to
   `idle` and when its config changes. Every key is read defensively, so
-  older daemons and keys that do not exist yet (for example `hotkey_bound`)
-  are fine.
+  daemons older than API 1.6.0/1.7.0 still work.
+- `hotkey_bound` has no change signal. While it is false and the daemon
+  has a hotkey backend, the extension re-reads `GetStatus()` after 2, 5, 10,
+  20, 40 and 60 s, then stops until the next `ConfigChanged` or daemon
+  restart. This is the extension's only timer. It is bounded and is not
+  used to detect whether the daemon is running.
 
 The pure state logic is in `status.js`. It has no GNOME Shell imports and is
 unit-tested with Node (`tests/test_shell_extension_js.py`).
@@ -47,9 +53,12 @@ The daemon owns the global hotkey, through the XDG GlobalShortcuts portal or
 keybinder. The extension's `toggle-recording` keybinding (default
 `<Super><Alt>r`, gsettings schema `org.gnome.shell.extensions.whisperaloud`)
 is only a **fallback**. The extension grabs it only while the running daemon
-reports that it has no hotkey: `hotkey_bound == false`, or
-`hotkey_backend == "none"` on older daemons. This keeps the same accelerator
-from toggling twice.
+has no hotkey backend at all (`hotkey_backend == "none"`). It does *not*
+grab it when the portal binding is merely pending or was declined
+(`hotkey_bound == false` with backend `portal`), because the portal may
+still bind the same accelerator and both would toggle, cancelling each
+other out. While the fallback is active, the menu says
+`Hotkey: <accel> (via top-bar extension)` and the state counts as ready.
 
 ## What it exports
 
