@@ -11,10 +11,11 @@ from typing import Callable, List, Optional
 import numpy as np
 import sounddevice as sd
 
-from ..config import AudioConfig, AudioProcessingConfig
+from ..config import AudioConfig, AudioProcessingConfig, InputGainConfig
 from ..exceptions import AudioDeviceError, AudioRecordingError
 from .audio_processor import AudioPipeline, AudioProcessor, StreamingResampler
 from .device_manager import AudioDevice, DeviceManager
+from .input_gain import InputNormalizer, NormalizationStats
 from .level_meter import AudioLevel, LevelMeter
 
 logger = logging.getLogger(__name__)
@@ -58,10 +59,20 @@ class _ChunkSession:
     delivered out of session or interleaved between two live workers.
     """
 
-    def __init__(self, pipeline: AudioPipeline, resampler: Optional[StreamingResampler], maxsize: int):
+    def __init__(
+        self,
+        pipeline: AudioPipeline,
+        resampler: Optional[StreamingResampler],
+        maxsize: int,
+        normalizer: Optional[InputNormalizer] = None,
+    ):
         self.queue: "queue.Queue" = queue.Queue(maxsize=maxsize)
         self.pipeline = pipeline
         self.resampler = resampler
+        # Input normalization, the stage in front of the pipeline (None when
+        # input_gain.enabled is false). Per-session: its running estimate
+        # must never leak into another session.
+        self.normalizer = normalizer
         self.thread: Optional[threading.Thread] = None
         # Set ONLY when stop()/cancel() gives up waiting for this session's
         # worker to finish (join() timed out, e.g. a slow hook) -- not set
@@ -162,6 +173,7 @@ class AudioRecorder:
         processing_config: Optional[AudioProcessingConfig] = None,
         auto_stop_callback: Optional[Callable[["np.ndarray"], None]] = None,
         on_processed_chunk: Optional[Callable[[np.ndarray], None]] = None,
+        input_gain_config: Optional[InputGainConfig] = None,
     ):
         """
         Initialize recorder.
@@ -210,6 +222,13 @@ class AudioRecorder:
         self._level_meter = LevelMeter(attack_ms=10.0, release_ms=300.0, sample_rate=config.sample_rate)
         self._processor = AudioProcessor()  # Keep for format conversion utilities
         self._pipeline = AudioPipeline(processing_config or AudioProcessingConfig())
+        self.input_gain_config = input_gain_config or InputGainConfig()
+        self._normalizer = InputNormalizer(self.input_gain_config, sample_rate=16000)
+        # Gain the last batch normalization settled on (None until a recording
+        # with detectable speech); seeds the next streaming session so its
+        # running estimate starts close instead of at 0 dB. In memory only.
+        self._last_input_gain_db: Optional[float] = None
+        self.last_input_gain_stats: Optional[NormalizationStats] = None
 
         # Per-session streaming state (only used when on_processed_chunk is
         # set), owned by a single _ChunkSession object so a slow-to-join
@@ -354,6 +373,8 @@ class AudioRecorder:
                 processed = chunk
                 if session.resampler is not None:
                     processed = session.resampler.process(processed)
+                if session.normalizer is not None and processed.size:
+                    processed = session.normalizer.process_chunk(processed)
                 if session.pipeline is not None and processed.size:
                     processed = session.pipeline.process_chunk(processed, 16000)
                 if self.on_processed_chunk is not None and processed.size and not session.stopped.is_set():
@@ -373,7 +394,14 @@ class AudioRecorder:
             else None
         )
         maxsize = max(1, int(CHUNK_QUEUE_SECONDS / self.config.chunk_duration))
-        session = _ChunkSession(pipeline, resampler, maxsize=maxsize)
+        normalizer = (
+            InputNormalizer(
+                self.input_gain_config, sample_rate=16000, seed_gain_db=self._last_input_gain_db
+            )
+            if self.input_gain_config.enabled
+            else None
+        )
+        session = _ChunkSession(pipeline, resampler, maxsize=maxsize, normalizer=normalizer)
         session.thread = threading.Thread(
             target=self._chunk_worker_loop, args=(session,), name="AudioRecorderChunkWorker", daemon=True
         )
@@ -411,6 +439,9 @@ class AudioRecorder:
                     "leaving it to finish in the background. It will not call "
                     "on_processed_chunk again for this session."
                 )
+                return
+        if session.normalizer is not None:
+            logger.info(session.normalizer.stats.summary())
 
     def start(self, device_id: Optional[int] = None) -> None:
         """
@@ -559,6 +590,12 @@ class AudioRecorder:
             if self.config.sample_rate != 16000:
                 audio = AudioProcessor.resample(audio, self.config.sample_rate, 16000)
 
+            # Input normalization FIRST (docs/design/input-gain-loop.md), so
+            # trim_silence and the unchanged pipeline below both see speech
+            # at a known level instead of whatever the user's mic gain gives.
+            if self.input_gain_config.enabled:
+                audio = self._normalize_batch(audio)
+
             # Trim silence if VAD enabled. AudioProcessor.trim_silence itself
             # logs the noise floor / speech level / kept window at INFO
             # (WHISP-93) -- no need to duplicate that here.
@@ -577,6 +614,16 @@ class AudioRecorder:
         except Exception as e:
             self._set_state(RecordingState.ERROR)
             raise AudioRecordingError(f"Failed to stop recording: {e}") from e
+
+    def _normalize_batch(self, audio: np.ndarray) -> np.ndarray:
+        """Run the batch InputNormalizer, log its summary, remember its gain."""
+        out = self._normalizer.normalize_buffer(audio)
+        stats = self._normalizer.stats
+        self.last_input_gain_stats = stats
+        if stats.limited_by != "no_speech":
+            self._last_input_gain_db = stats.target_gain_db
+        logger.info(stats.summary())
+        return out
 
     def cancel(self) -> None:
         """Cancel recording and discard audio data."""
