@@ -8,7 +8,7 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 from ..config import WhisperAloudConfig
 from ..daemon_hints import gui_daemon_unavailable_hint
@@ -17,6 +17,13 @@ from ..service.history_client import DaemonHistoryManager
 from .daemon_connect_logic import ConnectPhase, decide_after_attempt
 from .error_handler import (
     handle_model_load_error,
+)
+from .file_transcription_logic import (
+    file_dialog_filter_patterns,
+    is_stale_job_response,
+    pick_first_supported_path,
+    status_label_for_file_job,
+    transcribe_options_for_language,
 )
 from .history_panel import HistoryPanel
 from .level_meter import LevelMeterPanel
@@ -76,6 +83,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self._edit_save_timer_id: int = 0
         self._buffer_changed_handler_id: int = 0
 
+        # WHISP-96: the job_id of an in-flight TranscribeFile() call, or None.
+        # Entirely independent of self._state/AppState -- a file transcription
+        # never changes the mic-recording state machine.
+        self._file_job_id: Optional[str] = None
+
         # Live partial-transcript view state (WHISP-58); only advanced by a
         # streaming engine's PartialTranscript signal, see partial_view_logic.py
         self._partial_view = PartialViewState()
@@ -134,6 +146,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.history_toggle.set_active(True)
         self.history_toggle.connect("toggled", self._on_history_toggled)
         self.header_bar.pack_start(self.history_toggle)
+
+        # Transcribe file... button (WHISP-96)
+        self.transcribe_file_button = Gtk.Button()
+        self.transcribe_file_button.set_icon_name("document-open-symbolic")
+        self.transcribe_file_button.set_tooltip_text("Transcribe file… (Ctrl+O)")
+        self.transcribe_file_button.add_css_class("wa-toolbar-btn")
+        self.transcribe_file_button.connect("clicked", self._on_transcribe_file_clicked)
+        self.header_bar.pack_start(self.transcribe_file_button)
 
         # Help/Shortcuts button
         help_button = Gtk.Button()
@@ -293,6 +313,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status_bar.model_download_button.connect("clicked", self._on_settings_clicked)
         main_box.append(self.status_bar)
 
+        # Drag-and-drop a file anywhere on the window to transcribe it
+        # (WHISP-96). Gdk.FileList covers both plain local drops and
+        # document-portal-mounted paths under Flatpak -- Gio.File.get_path()
+        # resolves either.
+        drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop_target.connect("drop", self._on_file_drop)
+        self.add_controller(drop_target)
+
         logger.debug("UI built successfully")
 
     def _setup_keyboard_shortcuts(self) -> None:
@@ -360,6 +388,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # Ctrl+,: Open settings
         if ctrl_pressed and keyval == Gdk.KEY_comma:
             self._on_settings_clicked(None)
+            return True
+
+        # Ctrl+O: Transcribe file... (WHISP-96)
+        if ctrl_pressed and keyval == Gdk.KEY_o:
+            self._on_transcribe_file_clicked(None)
             return True
 
         return False
@@ -460,6 +493,13 @@ class MainWindow(Gtk.ApplicationWindow):
         # Subscribe before reading GetStatus so no transition is missed.
         self.client.on_model_state_changed(self._on_daemon_model_state_changed)
         self._refresh_model_state_from_status()
+
+        # WHISP-96: file transcription job signals.
+        self.client.on_file_transcription_progress(
+            self._on_daemon_file_transcription_progress
+        )
+        self.client.on_file_transcription_ready(self._on_daemon_file_transcription_ready)
+        self.client.on_file_transcription_error(self._on_daemon_file_transcription_error)
 
         # Watch for daemon restart (auto-reconnect)
         self.client.watch_name(
@@ -924,6 +964,154 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status_bar.set_status(f"Error: {message}")
         self._partial_view.reset()
         self.set_state(AppState.ERROR)
+        return False
+
+    # ─── File transcription (WHISP-96) ─────────────────────────────────────
+
+    def _on_transcribe_file_clicked(self, _button) -> None:
+        """"Transcribe file..." header button / Ctrl+O."""
+        if not self.client or not self.client.is_connected:
+            self.status_bar.set_status("Not connected to daemon")
+            return
+
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Transcribe File")
+
+        audio_video_filter = Gtk.FileFilter()
+        audio_video_filter.set_name("Audio/Video")
+        for pattern in file_dialog_filter_patterns():
+            audio_video_filter.add_pattern(pattern)
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(audio_video_filter)
+        dialog.set_filters(filters)
+        dialog.set_default_filter(audio_video_filter)
+
+        dialog.open(self, None, self._on_transcribe_file_dialog_response)
+
+    def _on_transcribe_file_dialog_response(self, dialog, result) -> None:
+        """Gtk.FileDialog.open() async callback. Portal-backed under
+        Flatpak -- the returned Gio.File's get_path() is a document-portal
+        path the sandbox can actually read, not the host path the user saw
+        in the picker."""
+        try:
+            gfile = dialog.open_finish(result)
+        except GLib.Error as e:
+            logger.debug(f"Transcribe-file dialog cancelled or failed: {e}")
+            return
+        if gfile is None:
+            return
+        path = gfile.get_path()
+        if not path:
+            logger.warning("Transcribe-file dialog returned a file with no local path")
+            return
+        self._start_file_transcription(path)
+
+    def _on_file_drop(self, _drop_target, value, _x, _y) -> bool:
+        """Gtk.DropTarget "drop" handler: `value` is a Gdk.FileList (one or
+        more dropped Gio.File). Only the first supported audio/video file
+        is used -- see pick_first_supported_path()'s docstring."""
+        try:
+            gfiles = value.get_files()
+        except AttributeError:
+            gfiles = [value] if value is not None else []
+        path = pick_first_supported_path(f.get_path() for f in gfiles)
+        if not path:
+            return False
+        self._start_file_transcription(path)
+        return True
+
+    def open_file_for_transcription(self, path: str) -> None:
+        """Public entry point for "Open With WhisperAloud" (GApplication
+        do_open) and the command line -- called once the window/daemon
+        connection is up. Retries briefly if the daemon isn't connected yet
+        (e.g. the app was just launched by opening a file)."""
+        self._open_file_when_ready(path, attempts_left=40)
+
+    def _open_file_when_ready(self, path: str, attempts_left: int) -> bool:
+        if self.client and self.client.is_connected:
+            self._start_file_transcription(path)
+            return False
+        if attempts_left <= 0:
+            logger.warning(f"Gave up waiting for daemon connection to open {path!r}")
+            return False
+        GLib.timeout_add(250, self._open_file_when_ready, path, attempts_left - 1)
+        return False
+
+    def _start_file_transcription(self, path: str) -> None:
+        """Kick off TranscribeFile() for `path` and show it as in-flight.
+        Entirely independent of the mic-recording AppState machine -- a
+        file transcription never disables the record button or changes
+        `self._state`."""
+        if not self.client or not self.client.is_connected:
+            self.status_bar.set_status("Not connected to daemon")
+            return
+
+        language = "auto"
+        if self._language_codes:
+            selected = self.lang_dropdown.get_selected()
+            if 0 <= selected < len(self._language_codes):
+                language = self._language_codes[selected]
+        options = transcribe_options_for_language(language)
+
+        job_id = self.client.transcribe_file(path, options)
+        if not job_id:
+            self.status_bar.set_status("Could not start file transcription")
+            return
+
+        self._file_job_id = job_id
+        filename = Path(path).name
+        self.status_bar.set_status(status_label_for_file_job(filename))
+        logger.info(f"Started file transcription job {job_id[:8]} for {filename!r}")
+
+    def _on_daemon_file_transcription_progress(self, job_id: str, stage: str) -> None:
+        """Handle FileTranscriptionProgress signal from daemon."""
+        GLib.idle_add(self._handle_file_transcription_progress, job_id, stage)
+
+    def _handle_file_transcription_progress(self, job_id: str, stage: str) -> bool:
+        if is_stale_job_response(job_id, self._file_job_id):
+            return False
+        self.status_bar.set_status(f"{stage.capitalize()}…")
+        return False
+
+    def _on_daemon_file_transcription_ready(self, job_id: str, text: str, meta: dict) -> None:
+        """Handle FileTranscriptionReady signal from daemon."""
+        GLib.idle_add(self._handle_file_transcription_ready, job_id, text, meta)
+
+    def _handle_file_transcription_ready(self, job_id: str, text: str, meta: dict) -> bool:
+        if is_stale_job_response(job_id, self._file_job_id):
+            logger.info(f"Ignoring stale FileTranscriptionReady for job {job_id!r}")
+            return False
+        self._file_job_id = None
+
+        buffer = self.text_view.get_buffer()
+        history_id = int(meta.get("history_id", -1)) if isinstance(meta, dict) else -1
+        self._set_current_entry(history_id if history_id > 0 else None)
+        buffer.handler_block(self._buffer_changed_handler_id)
+        buffer.set_text(text)
+        buffer.handler_unblock(self._buffer_changed_handler_id)
+
+        self.copy_button.set_sensitive(True)
+        self.clear_button.set_sensitive(True)
+
+        source_name = meta.get("source_name", "") if isinstance(meta, dict) else ""
+        self.status_bar.set_status(
+            f"Ready — transcribed {source_name}" if source_name else "Ready"
+        )
+
+        if hasattr(self, "history_panel"):
+            self.history_panel.refresh_recent()
+        return False
+
+    def _on_daemon_file_transcription_error(self, job_id: str, code: str, message: str) -> None:
+        """Handle FileTranscriptionError signal from daemon."""
+        GLib.idle_add(self._handle_file_transcription_error, job_id, code, message)
+
+    def _handle_file_transcription_error(self, job_id: str, code: str, message: str) -> bool:
+        if is_stale_job_response(job_id, self._file_job_id):
+            return False
+        self._file_job_id = None
+        logger.error(f"File transcription failed [{code}]: {message}")
+        self.status_bar.set_status(f"File transcription failed: {message}")
         return False
 
     # ─── State management ─────────────────────────────────────────────────
