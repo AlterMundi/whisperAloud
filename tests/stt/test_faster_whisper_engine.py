@@ -5,6 +5,31 @@ from whisper_aloud.stt.faster_whisper_engine import FasterWhisperEngine
 from whisper_aloud.stt import Transcript, EngineCapabilities
 
 
+@patch("whisper_aloud.stt.faster_whisper_engine.hf_download")
+@patch("faster_whisper.WhisperModel")
+def test_load_passes_local_files_only_true_when_cached(mock_whisper_model, mock_hf_download):
+    """WHISP-94: a cached model must load with local_files_only=True so no
+    huggingface_hub network call happens for an already-downloaded model."""
+    mock_hf_download.is_cached.return_value = True
+    eng = FasterWhisperEngine()
+
+    eng.load("base", "cpu", "int8")
+
+    mock_hf_download.is_cached.assert_called_once_with("base")
+    assert mock_whisper_model.call_args.kwargs["local_files_only"] is True
+
+
+@patch("whisper_aloud.stt.faster_whisper_engine.hf_download")
+@patch("faster_whisper.WhisperModel")
+def test_load_downloads_when_not_cached(mock_whisper_model, mock_hf_download):
+    mock_hf_download.is_cached.return_value = False
+    eng = FasterWhisperEngine()
+
+    eng.load("base", "cpu", "int8")
+
+    assert mock_whisper_model.call_args.kwargs["local_files_only"] is False
+
+
 def test_capabilities():
     eng = FasterWhisperEngine()
     caps = eng.capabilities
