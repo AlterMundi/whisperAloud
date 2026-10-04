@@ -7,7 +7,7 @@ All notable user-facing changes to this project are documented here.
 ### Added
 - Input normalization is now the first stage of live audio processing. A
   digital, speech-level-driven gain lifts quiet microphones to a known
-  level (-20 dBFS speech by default) before trimming, the noise gate and the
+  level (speech toward -20 dBFS by default, less when background noise would be lifted above -50 dBFS) before trimming, the noise gate and the
   rest of the existing chain run. It only amplifies, never clips, caps how
   far it raises background noise, and never changes the device volume.
   This fixes incomplete transcripts from quiet mics, especially under
