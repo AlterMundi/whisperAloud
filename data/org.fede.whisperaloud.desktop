@@ -1,12 +1,13 @@
 [Desktop Entry]
 Name=WhisperAloud
 Comment=Offline voice transcription
-Exec=/usr/bin/whisper-aloud-gui
+Exec=/usr/bin/whisper-aloud-gui %F
 TryExec=whisper-aloud-gui
 Icon=org.fede.whisperaloud
 Type=Application
 Categories=AudioVideo;Audio;Utility;GTK;
 Keywords=voice;transcription;whisper;speech;audio;
+MimeType=audio/mpeg;audio/x-m4a;audio/mp4;audio/wav;audio/x-wav;audio/ogg;audio/flac;audio/webm;video/mp4;video/webm;video/x-matroska;
 StartupNotify=true
 SingleMainWindow=true
 Actions=Toggle;Cancel;
