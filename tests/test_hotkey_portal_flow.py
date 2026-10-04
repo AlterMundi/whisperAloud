@@ -44,6 +44,31 @@ from tests._private_bus import private_bus_address  # noqa: E402
 from whisper_aloud.service.hotkey_portal import PortalHotkeys  # noqa: E402
 
 
+def _shortcuts_entries(entries):
+    """Build the raw ``[(id, {opt: Variant, ...}), ...]`` list matching the
+    shape of a GlobalShortcuts "shortcuts" result/signal payload -- plain
+    Python structure, suitable either for wrapping in an ``a(sa{sv})``
+    GLib.Variant (`_shortcuts_variant`) or for embedding directly inside a
+    larger `GLib.Variant(format, value)` construction (e.g. a
+    ShortcutsChanged signal's full argument tuple), which rejects a
+    pre-built nested Variant at a non-"v" position."""
+    built = []
+    for sid, opts in entries:
+        opts_variant = {
+            k: (v if hasattr(v, "get_type_string") else GLib.Variant("s", v))
+            for k, v in opts.items()
+        }
+        built.append((sid, opts_variant))
+    return built
+
+
+def _shortcuts_variant(entries):
+    """Build an ``a(sa{sv})`` GLib.Variant from ``[(id, {opt: str, ...}),
+    ...]`` -- the shape of a GlobalShortcuts "shortcuts" result/signal
+    payload."""
+    return GLib.Variant("a(sa{sv})", _shortcuts_entries(entries))
+
+
 class _FakePortalHarness:
     """Drives PortalHotkeys's fully-async Request/Response flow with no
     real D-Bus connection and no real event loop.
@@ -101,9 +126,20 @@ class _FakePortalHarness:
     def _signal_subscribe(self, sender, iface, signal, path, arg0, flags, callback):
         sub_id = self._next_sub_id
         self._next_sub_id += 1
-        self._requests.append(
-            {"sub_id": sub_id, "callback": callback, "method": None, "unsubscribed": False}
-        )
+        entry = {
+            "sub_id": sub_id,
+            "callback": callback,
+            "method": None,
+            "unsubscribed": False,
+            "signal": signal,
+        }
+        if iface == "org.freedesktop.portal.GlobalShortcuts":
+            # Activated/ShortcutsChanged: persistent, session-level
+            # subscriptions, never paired with a future Request/Response
+            # proxy.call() -- mark them as already "claimed" so
+            # _proxy_call's pairing loop (below) skips them.
+            entry["method"] = f"__signal__{signal}"
+        self._requests.append(entry)
         return sub_id
 
     def _signal_unsubscribe(self, sub_id):
@@ -118,6 +154,7 @@ class _FakePortalHarness:
         for req in reversed(self._requests):
             if req["method"] is None:
                 req["method"] = method_name
+                req["args"] = args
                 break
         callback(self.mock_proxy, MagicMock(name="async_result"), None)
 
@@ -133,9 +170,16 @@ class _FakePortalHarness:
         return matches[which]["unsubscribed"]
 
     def pending_count(self) -> int:
-        """Number of Response subscriptions still outstanding (sent a
-        request, no Response delivered yet)."""
-        return sum(1 for r in self._requests if r["method"] is not None and not r["unsubscribed"])
+        """Number of Request::Response subscriptions still outstanding (sent
+        a request, no Response delivered yet) -- excludes the persistent
+        Activated/ShortcutsChanged session-level subscriptions."""
+        return sum(
+            1
+            for r in self._requests
+            if r["method"] is not None
+            and not str(r["method"]).startswith("__signal__")
+            and not r["unsubscribed"]
+        )
 
     def __enter__(self) -> PortalHotkeys:
         self._stack.enter_context(patch.object(Gio, "bus_get_sync", return_value=self.mock_bus))
@@ -155,11 +199,61 @@ class _FakePortalHarness:
 
     def respond_list_shortcuts(self, bound_ids=None):
         ids = self.bound_ids if bound_ids is None else bound_ids
-        shortcuts = GLib.Variant("a(sa{sv})", [(sid, {}) for sid in ids])
+        shortcuts = _shortcuts_variant([(sid, {}) for sid in ids])
         self.respond("ListShortcuts", 0, {"shortcuts": shortcuts})
 
+    def _last_bind_requested_ids(self) -> list:
+        matches = [r for r in self._requests if r["method"] == "BindShortcuts"]
+        args = matches[-1]["args"]
+        _session, shortcuts, _parent, _opts = args.unpack()
+        return [sid for sid, _opts in shortcuts]
+
     def respond_bind_shortcuts(self, response=0, results=None):
-        self.respond("BindShortcuts", response, results or {})
+        """Deliver BindShortcuts' Response.
+
+        With `results=None`, defaults to "bound" (shortcuts for every id
+        just requested, each with a trigger_description) when response==0,
+        and to "nothing bound" for any non-zero response -- matching the
+        normal (non-GNOME-quirk) portal behavior. Pass `results` explicitly
+        to simulate GNOME's response=2-with-shortcuts quirk, or any other
+        combination.
+        """
+        if results is None:
+            if response == 0:
+                ids = self._last_bind_requested_ids()
+                results = {
+                    "shortcuts": _shortcuts_variant(
+                        [(sid, {"trigger_description": "Press <Control>space"}) for sid in ids]
+                    )
+                }
+            else:
+                results = {}
+        self.respond("BindShortcuts", response, results)
+
+    def emit_shortcuts_changed(self, bound_ids, trigger_description="Press <Control>space"):
+        """Emit a ShortcutsChanged signal for the current session, as if
+        the compositor reported `bound_ids` bound out-of-band (e.g. after
+        an initial BindShortcuts failure)."""
+        shortcuts = _shortcuts_entries(
+            [(sid, {"trigger_description": trigger_description}) for sid in bound_ids]
+        )
+        for req in self._requests:
+            if req.get("signal") == "ShortcutsChanged":
+                params = GLib.Variant("(oa(sa{sv}))", (self.portal._session_path, shortcuts))
+                req["callback"](None, None, None, None, None, params)
+                return
+        raise AssertionError("ShortcutsChanged was never subscribed to")
+
+    def emit_activated(self, shortcut_id, timestamp=0):
+        """Emit an Activated signal for the current session."""
+        for req in self._requests:
+            if req.get("signal") == "Activated":
+                params = GLib.Variant(
+                    "(osta{sv})", (self.portal._session_path, shortcut_id, timestamp, {})
+                )
+                req["callback"](None, None, None, None, None, params)
+                return
+        raise AssertionError("Activated was never subscribed to")
 
 
 class TestRegisterCalledBeforeCreateSession:
@@ -200,9 +294,17 @@ class TestRegisterCalledBeforeCreateSession:
 
         assert bound_results == [True]
 
-    def test_second_run_skips_bind_when_already_bound(self):
-        """Second run: our shortcut id is already in ListShortcuts' result,
-        so BindShortcuts must NOT be called again (that's what re-prompts)."""
+    def test_second_run_still_calls_bind_even_when_already_bound(self):
+        """Second run: even though ListShortcuts' result already lists our
+        shortcut id, BindShortcuts must still be called -- on a real GNOME
+        session ListShortcuts reliably comes back *empty* for a brand new
+        session even when a binding already exists elsewhere, so it can
+        never be trusted to skip Bind (that's the WHISP field bug: skipping
+        Bind here meant GNOME's actual response=2-with-shortcuts quirk on
+        BindShortcuts was never even reached, or rather: Bind itself was
+        skipped on a stale signal and the real bind flow never happened).
+        GNOME reuses the stored trigger and completes without a dialog in
+        this case -- no behavioral downside to always calling it."""
         harness = _FakePortalHarness(bound_ids={"toggle"})
         with harness as portal:
             bound_results = []
@@ -219,9 +321,16 @@ class TestRegisterCalledBeforeCreateSession:
             )
             harness.respond_create_session()
             harness.respond_list_shortcuts()
+            assert harness.call_log == [
+                "Register",
+                "CreateSession",
+                "ListShortcuts",
+                "BindShortcuts",
+            ]
+            harness.respond_bind_shortcuts(
+                results={"shortcuts": _shortcuts_variant([("toggle", {})])}
+            )
 
-        assert harness.call_log == ["Register", "CreateSession", "ListShortcuts"]
-        assert "BindShortcuts" not in harness.call_log
         assert bound_results == [True]
 
     def test_bind_called_again_when_a_new_shortcut_is_added(self):
@@ -476,6 +585,198 @@ class TestBindShortcutsResponseTwo:
         assert portal._bind_pending is False
 
 
+class TestGnomeResponseTwoWithShortcutsQuirk:
+    """Reproduces the exact field bug: a real GNOME 49/51 session reports
+    BindShortcuts' Request::Response with response=2 ("ended without a
+    normal user response") even though `results` contains our shortcut,
+    fully bound, with a trigger_description -- both right after the
+    consent dialog was completed and when a session silently reuses an
+    already-stored binding. The response *code* must never be treated as
+    authoritative on its own; the `shortcuts` results are."""
+
+    def test_response_two_with_shortcuts_is_treated_as_bound(self, caplog):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal, caplog.at_level("INFO"):
+            bound_results = []
+            portal.bind(
+                shortcuts=[
+                    {"id": "toggle", "description": "Toggle", "accelerators": ["<Super><Alt>r"]}
+                ],
+                on_activated=lambda sid: None,
+                on_bound=bound_results.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts(
+                response=2,
+                results={
+                    "shortcuts": _shortcuts_variant(
+                        [("toggle", {"trigger_description": "Press <Control>space"})]
+                    )
+                },
+            )
+
+        assert bound_results == [True]
+        assert portal.is_bound("toggle")
+        assert portal.get_trigger_description("toggle") == "Press <Control>space"
+        assert portal._bind_pending is False
+        # The quirk must be visible in the logs (not silently swallowed),
+        # but must never be reported as a plain failure.
+        assert any("response=2" in rec.message for rec in caplog.records)
+        assert not any(
+            rec.levelname == "WARNING" and "No hotkey was bound" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_response_two_with_empty_shortcuts_is_still_a_failure(self, caplog):
+        """Contrast case: response=2 with genuinely nothing bound (e.g. the
+        dialog really was abandoned) must still be reported as a failure."""
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal, caplog.at_level("WARNING"):
+            bound_results = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+                on_bound=bound_results.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts(response=2, results={})
+
+        assert bound_results == [False]
+        assert not portal.is_bound("toggle")
+        assert any("response=2" in rec.message for rec in caplog.records)
+
+    def test_response_zero_but_no_shortcuts_reported_is_a_failure(self):
+        """The inverse edge case: a "normal" response=0 that nonetheless
+        reports nothing bound must not be treated as success either --
+        bound-ness is decided purely from the shortcuts results."""
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            bound_results = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+                on_bound=bound_results.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts(response=0, results={})
+
+        assert bound_results == [False]
+        assert not portal.is_bound("toggle")
+
+
+class TestShortcutsChangedRecovery:
+    """Field bug follow-up: GNOME can report a shortcut bound via
+    ShortcutsChanged even after BindShortcuts itself reported failure --
+    the subscription for it is set up right after CreateSession succeeds,
+    independent of the Bind outcome, specifically so this can recover
+    without ever re-issuing BindShortcuts (which would re-prompt)."""
+
+    def test_shortcuts_changed_after_bind_failure_marks_bound_and_fires_on_bound(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            bound_results = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+                on_bound=bound_results.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts(response=2, results={})
+            assert bound_results == [False]
+            assert not portal.is_bound("toggle")
+
+            harness.emit_shortcuts_changed(["toggle"])
+
+        assert bound_results == [False, True]
+        assert portal.is_bound("toggle")
+        assert portal.get_trigger_description("toggle") == "Press <Control>space"
+        # BindShortcuts must never be re-issued to "fix" this -- that's
+        # exactly what would re-prompt the user.
+        assert harness.call_log.count("BindShortcuts") == 1
+
+    def test_shortcuts_changed_does_not_refire_on_bound_once_already_true(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            bound_results = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+                on_bound=bound_results.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts(response=0)
+            assert bound_results == [True]
+
+            harness.emit_shortcuts_changed(["toggle"])
+
+        assert bound_results == [True]  # not called again
+
+    def test_shortcuts_changed_for_unrelated_id_is_ignored(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            bound_results = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=lambda sid: None,
+                on_bound=bound_results.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts(response=2, results={})
+            assert bound_results == [False]
+
+            harness.emit_shortcuts_changed(["some-other-app-shortcut"])
+
+        assert bound_results == [False]  # unrelated id, no recovery
+        assert not portal.is_bound("toggle")
+
+
+class TestActivatedSubscribedIndependentlyOfBind:
+    """Activated/ShortcutsChanged are subscribed right after CreateSession
+    succeeds -- before BindShortcuts is even issued -- so an Activated
+    signal for our shortcut must dispatch regardless of whether it arrives
+    before or after BindShortcuts' own Response."""
+
+    def test_activated_dispatches_before_bind_response_arrives(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            activations = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=activations.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            # BindShortcuts has been issued but not yet answered.
+            assert harness.call_log[-1] == "BindShortcuts"
+
+            harness.emit_activated("toggle")
+            assert activations == ["toggle"]
+
+            harness.respond_bind_shortcuts()
+            assert activations == ["toggle"]
+
+    def test_activated_dispatches_after_bind_response_arrives(self):
+        harness = _FakePortalHarness(bound_ids=set())
+        with harness as portal:
+            activations = []
+            portal.bind(
+                shortcuts=[{"id": "toggle", "description": "", "accelerators": []}],
+                on_activated=activations.append,
+            )
+            harness.respond_create_session()
+            harness.respond_list_shortcuts()
+            harness.respond_bind_shortcuts()
+
+            harness.emit_activated("toggle")
+            assert activations == ["toggle"]
+
+
 class TestSessionClose:
     """Sessions must be closed via org.freedesktop.portal.Session.Close() on
     the session's own path, not a nonexistent GlobalShortcuts.EndSession."""
@@ -558,7 +859,13 @@ class TestPortalIntegrationOnPrivateBus:
     address for the duration of each D-Bus call it makes.
     """
 
-    def test_bind_once_then_skipped_on_second_run(self, tmp_path):
+    def test_bind_called_every_session_even_when_already_bound(self, tmp_path):
+        """Both runs must call BindShortcuts -- the old "skip Bind if
+        ListShortcuts already lists it" optimization is gone (see
+        hotkey_portal.py's module docstring): on real GNOME, ListShortcuts
+        comes back empty for a brand new session even when a binding
+        already exists, so skipping Bind on that basis meant the hotkey
+        was simply never (re-)bound for that session."""
         bus_addr = private_bus_address()
         fake_portal_script = tmp_path / "fake_portal.py"
         fake_portal_script.write_text(_FAKE_PORTAL_SERVICE_SRC)
@@ -571,21 +878,51 @@ class TestPortalIntegrationOnPrivateBus:
             time.sleep(1.0)  # let the fake service claim the bus name
 
             with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": bus_addr}):
-                bind_calls_run1 = _run_daemon_bind_once()
+                bind_calls_run1, success1 = _run_daemon_bind_once()
                 assert bind_calls_run1 == 1
+                assert success1 is True
 
-                bind_calls_run2 = _run_daemon_bind_once()
-                assert bind_calls_run2 == 0
+                bind_calls_run2, success2 = _run_daemon_bind_once()
+                assert bind_calls_run2 == 1
+                assert success2 is True
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_gnome_response_two_with_shortcuts_quirk_is_still_treated_as_bound(self, tmp_path):
+        """Integration-level reproduction of the exact field bug: the fake
+        portal here is configured (via FAKE_PORTAL_GNOME_QUIRK) to answer
+        BindShortcuts with response=2 while still reporting our shortcut
+        bound in the results -- exactly what the real GNOME dbus-monitor
+        capture showed. on_bound must still report True."""
+        bus_addr = private_bus_address()
+        fake_portal_script = tmp_path / "fake_portal.py"
+        fake_portal_script.write_text(_FAKE_PORTAL_SERVICE_SRC)
+
+        env = dict(
+            os.environ, DBUS_SESSION_BUS_ADDRESS=bus_addr, FAKE_PORTAL_GNOME_QUIRK="1"
+        )
+        proc = subprocess.Popen([sys.executable, str(fake_portal_script)], env=env)
+        try:
+            import time
+
+            time.sleep(1.0)  # let the fake service claim the bus name
+
+            with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": bus_addr}):
+                bind_calls, success = _run_daemon_bind_once()
+                assert bind_calls == 1
+                assert success is True
         finally:
             proc.terminate()
             proc.wait(timeout=5)
 
 
-def _run_daemon_bind_once() -> int:
+def _run_daemon_bind_once() -> tuple:
     """Run the async bind() flow against the fake portal running on the
     current (private) session bus, pumping a real GLib.MainLoop until it
-    settles, then return BindShortcuts call count as reported by the fake
-    service over an auxiliary D-Bus method."""
+    settles, then return (bind_call_count, success) -- the call count as
+    reported by the fake service over an auxiliary D-Bus method, and
+    whatever on_bound ultimately reported."""
     portal = PortalHotkeys(app_id="org.fede.whisperaloud")
 
     loop = GLib.MainLoop()
@@ -636,20 +973,29 @@ def _run_daemon_bind_once() -> int:
         2000,
         None,
     )
-    return count
+    success = done[0] if done else None
+    return count, success
 
 
 _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
     """
-    # Minimal fake org.freedesktop.portal.Desktop for WHISP-64 integration
-    # testing: implements just enough of Registry + GlobalShortcuts to
-    # exercise the real Request/Response wait loop in PortalHotkeys.
+    # Minimal fake org.freedesktop.portal.Desktop for WHISP-64/field-bug
+    # integration testing: implements just enough of Registry +
+    # GlobalShortcuts to exercise the real Request/Response wait loop in
+    # PortalHotkeys.
+    import os
     import gi
     gi.require_version("Gio", "2.0")
     from gi.repository import Gio, GLib
 
     BUS_NAME = "org.freedesktop.portal.Desktop"
     PATH = "/org/freedesktop/portal/desktop"
+
+    # Reproduces the real GNOME quirk (see hotkey_portal.py's module
+    # docstring and the field-bug dbus-monitor capture) when set:
+    # BindShortcuts answers with response=2 ("ended without a normal user
+    # response") while still reporting the shortcut bound in `results`.
+    GNOME_QUIRK = bool(os.environ.get("FAKE_PORTAL_GNOME_QUIRK"))
 
     bound_ids = set()
     bind_call_count = [0]
@@ -735,23 +1081,37 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
             options = args[0]
             handle_token = options.get("handle_token")
             invocation.return_value(GLib.Variant("(o)", ("/session/1",)))
-            GLib.idle_add(
-                _emit_response, conn, sender, handle_token, 0, {"session_handle": GLib.Variant("o", "/session/1")}
-            )
+            session_result = {"session_handle": GLib.Variant("o", "/session/1")}
+            GLib.idle_add(_emit_response, conn, sender, handle_token, 0, session_result)
         elif method == "ListShortcuts":
             _session, options = args
             handle_token = options.get("handle_token")
             invocation.return_value(GLib.Variant("(o)", ("/request/list",)))
-            shortcuts = GLib.Variant("a(sa{sv})", [(sid, {}) for sid in bound_ids])
-            GLib.idle_add(_emit_response, conn, sender, handle_token, 0, {"shortcuts": shortcuts})
+            # Real GNOME reliably reports nothing here for a brand new
+            # session, even when a binding already exists from a prior
+            # one -- see hotkey_portal.py's module docstring. Emulate that
+            # unconditionally; nothing in PortalHotkeys may rely on this to
+            # decide whether to call BindShortcuts.
+            GLib.idle_add(
+                _emit_response, conn, sender, handle_token, 0,
+                {"shortcuts": GLib.Variant("a(sa{sv})", [])},
+            )
         elif method == "BindShortcuts":
             _session, shortcuts, _parent, options = args
             handle_token = options.get("handle_token")
             bind_call_count[0] += 1
+            trigger_opts = {"trigger_description": GLib.Variant("s", "Press <Control>space")}
+            bound = []
             for sid, _opts in shortcuts:
                 bound_ids.add(sid)
+                bound.append((sid, trigger_opts))
+            bound_variant = GLib.Variant("a(sa{sv})", bound)
             invocation.return_value(GLib.Variant("(o)", ("/request/bind",)))
-            GLib.idle_add(_emit_response, conn, sender, handle_token, 0, {})
+            response = 2 if GNOME_QUIRK else 0
+            GLib.idle_add(
+                _emit_response, conn, sender, handle_token, response,
+                {"shortcuts": bound_variant},
+            )
         elif method == "EnableShortcuts":
             invocation.return_value(None)
         elif method == "EndSession":

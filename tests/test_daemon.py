@@ -122,6 +122,7 @@ def _make_daemon(indicator_fails=False, hotkey_fails=False):
         else:
             mock_hk_cls.return_value.available = True
             mock_hk_cls.return_value.backend = "keybinder"
+            mock_hk_cls.return_value.get_bound_trigger.return_value = None
 
         from whisper_aloud.config import WhisperAloudConfig
         config = WhisperAloudConfig()
@@ -752,6 +753,31 @@ class TestDaemonMethods:
             result = daemon.GetStatus()
         assert "hotkey_backend" in result
         assert result["hotkey_backend"] == "keybinder"
+
+    def test_get_status_includes_hotkey_trigger(self, daemon):
+        """GetStatus should include hotkey_trigger, reflecting whatever the
+        portal actually bound (e.g. a GNOME-chosen accelerator), not just
+        the configured preference."""
+        daemon.recorder.state = MagicMock()
+        daemon.recorder.state.value = "idle"
+        daemon._transcribing = False
+        daemon.hotkey_manager.get_bound_trigger.return_value = "Press <Control>space"
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            result = daemon.GetStatus()
+        assert result["hotkey_trigger"] == "Press <Control>space"
+
+    def test_get_status_hotkey_trigger_defaults_empty(self, daemon):
+        """When nothing has been bound yet (or backend isn't portal),
+        hotkey_trigger must be an empty string, never None/a MagicMock."""
+        daemon.recorder.state = MagicMock()
+        daemon.recorder.state.value = "idle"
+        daemon._transcribing = False
+        daemon.hotkey_manager.get_bound_trigger.return_value = None
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
+            mock_glib.Variant = lambda t, v: v
+            result = daemon.GetStatus()
+        assert result["hotkey_trigger"] == ""
 
 
 class TestDownloadModel:
