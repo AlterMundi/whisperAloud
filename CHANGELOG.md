@@ -25,6 +25,19 @@ All notable user-facing changes to this project are documented here.
   that is not downloaded is never fetched automatically and fails with a
   clear "Model not available" error instead.
 
+- "Start in background at login" setting (Settings → General → Startup,
+  `startup.autostart_background`, off by default). At login only the daemon
+  starts, without the window: the model preloads, the global shortcut is
+  bound and paste is prewarmed, so the shortcut dictates right away. In the
+  Flatpak it asks GNOME through the Background portal (the switch waits for
+  your answer, with no time limit, and shows if it was refused); native
+  installs get an XDG autostart entry
+  (`whisper-aloud-autostart.desktop`, reusing the installer's name and
+  reporting older duplicates). `GetStatus()` gains `"hotkey_bound"` and
+  `"autostart"` so an indicator can show "all OK" without the window
+  (D-Bus API 1.7.0), and `whisper-aloud status` shows both. The manual
+  Flatpak autostart entry in `docs/flatpak.md` stays as a fallback.
+
 ### Changed
 - Streaming engines (Nemotron) refuse to start recording until the model is
   loaded (`Error("model_not_ready")`) instead of loading it synchronously

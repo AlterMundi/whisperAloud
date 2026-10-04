@@ -71,6 +71,21 @@ limited the gain.
 separate and unchanged. It raises the shared mic volume to
 `target_gain_linear` while recording and restores it afterwards.
 
+## Start in background at login (`startup`)
+
+| key | default | env override |
+|---|---|---|
+| `startup.autostart_background` | `false` | `WHISPER_ALOUD_STARTUP_AUTOSTART_BACKGROUND` |
+
+Set it from Settings → General → Startup, not by hand: the switch is what
+creates or removes the login entry (the Background portal inside Flatpak,
+`~/.config/autostart/whisper-aloud-autostart.desktop` natively), and it
+stores here the state that was actually confirmed. Editing the key alone
+(or `SetConfig` over D-Bus) changes what `GetStatus()["autostart"]`
+reports, not what starts at login. The login entry runs the daemon only
+(`whisper-aloud --daemon`), never the window. See
+[`flatpak.md`](flatpak.md#start-in-background-at-login-background-portal).
+
 ## Live dictation high-pass filter
 
 Live dictation's audio pipeline (`gate -> AGC -> denoise -> limiter`) can
