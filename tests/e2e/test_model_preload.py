@@ -79,10 +79,11 @@ def test_recording_before_ready_transcribes_once_model_is_ready(daemon, audio_fi
     client.disconnect()
 
 
-def test_missing_model_reports_missing_and_recording_fails_clearly(daemon):
-    """A model that is not available locally is never auto-downloaded: the
-    state is `missing` (with a reason), and a recording fails with an
-    explicit Error instead of silently waiting or vanishing."""
+def test_missing_model_rejects_start_immediately(daemon):
+    """1.6.1: a model that is not available locally is never
+    auto-downloaded, and StartRecording() now refuses up front -- for every
+    engine, not only streaming -- instead of recording into a job that was
+    always going to fail on StopRecording()."""
     handle = daemon(
         fake_audio="tone",
         config_overrides={"FAKE_MODEL_MISSING": "1"},
@@ -90,18 +91,44 @@ def test_missing_model_reports_missing_and_recording_fails_clearly(daemon):
     )
     client = handle.client()
     errors = SignalCapture(client, "Error")
-    status = SignalCapture(client, "StatusChanged")
 
     current = client.get_status()
     assert current["model_state"] == "missing"
     assert "fake" in current["model_error"]
 
-    assert client.start_recording() is True
-    assert client.stop_recording() == "transcribing"
+    assert client.start_recording() is False
 
     code, message = errors.wait(timeout=10.0, predicate=lambda c, m: c == "model_not_available")
     assert message.startswith("Model not available")
-    status.wait(timeout=5.0, predicate=lambda s: s == "idle")
+    status = client.get_status()
+    assert status["state"] == "idle"
+    assert status["model_state"] == "missing"
+    client.disconnect()
+
+
+def test_model_load_error_rejects_start_immediately(daemon):
+    """A model that fails to load (WHISPER_ALOUD_FAKE_MODEL_LOAD_ERROR)
+    settles into `error`; StartRecording() refuses it exactly like
+    `missing`, with the same `model_not_available` code."""
+    handle = daemon(
+        fake_audio="tone",
+        config_overrides={"FAKE_MODEL_LOAD_ERROR": "simulated load failure"},
+        wait_model_state="error",
+    )
+    client = handle.client()
+    errors = SignalCapture(client, "Error")
+
+    current = client.get_status()
+    assert current["model_state"] == "error"
+    assert "simulated load failure" in current["model_error"]
+
+    assert client.start_recording() is False
+
+    code, message = errors.wait(timeout=10.0, predicate=lambda c, m: c == "model_not_available")
+    assert "simulated load failure" in message
+    status = client.get_status()
+    assert status["state"] == "idle"
+    assert status["model_state"] == "error"
     client.disconnect()
 
 
