@@ -63,6 +63,47 @@ report if the recorder failed to initialize (see `GetStatus`, below). It is
 not entered or left via a tracked transition and has no corresponding
 `StatusChanged("error")` emission today.
 
+## Model readiness
+
+Independently of the recording state above, the daemon tracks whether the
+configured speech model is usable (1.6.0). It is reported by
+`GetStatus()["model_state"]` (plus `"model_error"`) and broadcast via the
+`ModelStateChanged(s state, s detail)` signal:
+
+| State | Meaning |
+|---|---|
+| `loading` | A background load (preceded by an offline availability check) is in flight. |
+| `ready` | The model is loaded; a transcription starts immediately. |
+| `missing` | The configured model is not available locally. The daemon never downloads it on its own; call `DownloadModel()` (explicit user action). `detail` says which model. |
+| `downloading` | A `DownloadModel()` for the configured model is in flight (progress via `DownloadProgress`). |
+| `error` | The last load failed; `detail` carries the message (also sent as `Error("model_load_failed", …)`). |
+| `unloaded` | No load attempted yet. Not observable over D-Bus in practice: the preload enters `loading` before the main loop starts. |
+
+```
+startup (object registered) ──► loading ──┬──► ready
+                                          ├──► missing ──DownloadModel()──► downloading ──► loading ...
+                                          └──► error
+SetConfig/ReloadConfig switching model (when idle) ──► loading ──► ...
+```
+
+- **Preload**: once the bus name is acquired and the object is registered,
+  the daemon starts loading the configured model on a background thread.
+  The check never touches the network for a cached model (WHISP-94
+  `local_files_only` resolution) and never auto-downloads a missing one.
+- **Recording while not ready**: batch engines may record anyway; on stop,
+  the transcription job waits for the `ready` event and then runs. If the
+  model is (still) `missing`/`error`, the job fails with
+  `Error("model_not_available", …)` — never silently. `StartRecording()` on a
+  `missing`/`error` model re-runs the availability check in the background
+  (the model may have been downloaded out-of-band).
+- **Streaming engines** are refused until `ready`
+  (`StartRecording()` → `false` + `Error("model_not_ready", …)`): a streaming
+  session needs the loaded recognizer from the first chunk on. The main loop
+  never blocks on a model load.
+- A model-switching config change (`SetConfig`/`ReloadConfig`) goes through
+  the same `loading → ready` path in the background; a load superseded by a
+  newer one never reports `ready`.
+
 ## Methods
 
 All methods are synchronous D-Bus calls with no timeout override — the
@@ -193,6 +234,8 @@ Valid in any state. Returns a dict of GLib variants:
 | `downloading` | `b` | True while a `DownloadModel()` job is in flight (WHISP-68) |
 | `mic_gain_control` | `b` | Whether the wpctl hardware-gain raise (`recording_flow.raise_mic_gain`) is usable. False under Flatpak and in test mode (WHISP-93) |
 | `input_gain` | `a{sv}` | Input normalization stage (see [`design/input-gain-loop.md`](design/input-gain-loop.md)): `mode` (`s`: `digital` or `off`), `enabled` (`b`), `hardware_control` (`b`, a reserved key that is not implemented), `target_dbfs` (`d`), `max_gain_db` (`d`), `last_gain_db` and `last_speech_dbfs` (`d`, from the last recording's normalization; NaN before the first one) |
+| `model_state` | `s` | Model readiness (1.6.0): `loading`, `ready`, `missing`, `downloading`, `error` (or `unloaded`, see "Model readiness") |
+| `model_error` | `s` | Human-readable reason when `model_state` is `missing` or `error`, else `""` (1.6.0) |
 
 ### GetHistory
 
@@ -585,7 +628,9 @@ can fail (see each method's "Error behaviour" above for the specific
 `component_error`, `stop_failed`, `history_search_failed`,
 `history_fetch_failed`, `history_update_failed`, `history_delete_failed`,
 `config_invalid`, `reload_failed`, `download_invalid_model`,
-`download_license_review_required`). `code` values are stable identifiers
+`download_license_review_required`, and since 1.6.0 `model_not_ready`,
+`model_not_available`, `model_load_failed` -- see "Model readiness").
+`code` values are stable identifiers
 intended for programmatic matching; `message` is a free-form, untranslated
 diagnostic string not intended for parsing.
 
@@ -626,6 +671,22 @@ successfully, with an error, or because `CancelDownload()` was called
 (`ok == false` and `error == "cancelled"` in that case). Clients should treat
 this as the point to re-check the model's downloaded state (e.g. re-query
 `stt.catalog`/refresh a model picker row) rather than polling.
+
+When the downloaded model is the configured one, the daemon then re-runs its
+availability check and loads it in the background (`ModelStateChanged`
+`loading` → `ready`, or back to `missing` after a failed/cancelled download).
+
+### ModelStateChanged
+
+```
+ModelStateChanged(s state, s detail)
+```
+
+Emitted on every model-readiness transition (1.6.0; see "Model readiness"
+for the states). `detail` is `""` for `loading`/`ready`, the reason for
+`missing`/`error`, and `"<engine>/<name>"` for `downloading`. A client that
+needs the current state should subscribe first and then call `GetStatus()`
+(`model_state`), so a transition racing the call is never missed.
 
 ## Activation
 
@@ -847,6 +908,24 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.6.0 — 2026-10-04
+
+Minor (additive), 0.3.0 model preload: model readiness is an explicit,
+observable state, and the model loads in the background at daemon startup
+instead of on the first transcription.
+
+- **New signal** `ModelStateChanged(s state, s detail)`.
+- **`GetStatus`'s `a{sv}` return value gains two keys**: `"model_state"`
+  (`s`) and `"model_error"` (`s`).
+- **`Error`'s `code` values gain three entries**: `model_not_ready`
+  (streaming `StartRecording()` refused until the model is ready),
+  `model_not_available` (a transcription job failed because the model is
+  missing/failed to load), `model_load_failed` (background load failed).
+- Behaviour: a streaming-engine `StartRecording()` no longer loads the model
+  synchronously (it returns `false` with `model_not_ready` until `ready`);
+  `SetConfig`/`ReloadConfig` model switches load in the background instead
+  of blocking the call.
 
 ### 1.5.0 — 2026-10-04
 

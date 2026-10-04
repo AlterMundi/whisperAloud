@@ -105,6 +105,10 @@
       <arg type="b" name="ok" />
       <arg type="s" name="error" />
     </signal>
+    <signal name="ModelStateChanged">
+      <arg type="s" name="state" />
+      <arg type="s" name="detail" />
+    </signal>
     <property name="ApiVersion" type="s" access="read" />
   </interface>
 </node>

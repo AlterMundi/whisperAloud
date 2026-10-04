@@ -80,9 +80,14 @@ def _result(text="hello world", confidence=0.9, duration=1.0, language="en"):
     return result
 
 
-def _install_streaming_engine(daemon_obj) -> _StreamingEngineDouble:
+def _install_streaming_engine(daemon_obj, ready: bool = True) -> _StreamingEngineDouble:
+    """Install a streaming engine double. `ready=True` (the default) marks the
+    model as already loaded -- a streaming StartRecording is refused until
+    then (0.3.0), see TestStreamingStartRecording below."""
     engine = _StreamingEngineDouble()
     daemon_obj.transcriber = engine
+    if ready:
+        daemon_obj._model_loaded = True
     return engine
 
 
@@ -99,13 +104,21 @@ class TestStreamingStartRecording:
         assert daemon._streaming_session is True
         assert daemon._current_session_id
 
-    def test_start_recording_loads_model_before_session(self, daemon):
-        _install_streaming_engine(daemon)
-        daemon._model_loaded = False
+    def test_start_recording_never_loads_model_on_calling_thread(self, daemon):
+        """0.3.0: the old contract loaded the model synchronously here, on the
+        D-Bus/main-loop thread. Now a not-ready model refuses the streaming
+        session with an explicit Error and loads in the background."""
+        engine = _install_streaming_engine(daemon, ready=False)
+        load_threads = []
+        engine.load_model.side_effect = lambda: load_threads.append(threading.current_thread())
         daemon.recorder.is_recording = False
 
-        daemon.ToggleRecording()
+        assert daemon.ToggleRecording() == "error"
+        daemon._model_load_thread.join(timeout=10)
 
+        engine.start_session.assert_not_called()
+        assert daemon.Error.call_args[0][0] == "model_not_ready"
+        assert load_threads and all(t is not threading.current_thread() for t in load_threads)
         assert daemon._model_loaded is True
 
     def test_start_recording_starts_partial_timer(self, daemon):
@@ -383,6 +396,8 @@ class TestStreamingRealConcurrency:
         gate = threading.Event()
         engine = FakeStreamingSpeechEngine(daemon.config, finalize_gate=gate)
         daemon.transcriber = engine
+        engine.load_model()
+        daemon._model_loaded = True  # streaming StartRecording requires `ready`
         daemon.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         daemon.history_manager.add_transcription.return_value = 1
 

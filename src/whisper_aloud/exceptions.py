@@ -54,3 +54,9 @@ class ClipboardNotAvailableError(ClipboardError):
 class ClipboardPermissionError(ClipboardError):
     """Raised when clipboard operations lack permissions."""
     pass
+
+
+class ModelNotAvailableError(WhisperAloudError):
+    """Raised when a transcription cannot run because the configured model is
+    missing, failed to load, or the daemon shut down while it was loading."""
+    pass
