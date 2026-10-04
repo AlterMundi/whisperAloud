@@ -5,9 +5,11 @@
 //     global hotkey is registered, and the recording/transcribing state;
 //   - lets you toggle recording and open the window from the top bar;
 //   - exports org.fede.whisperaloud.Window (focused-window capture and
-//     re-activation, used by the daemon's "gnome-extension" WindowManager
-//     backend) and org.fede.whisperaloud.ShellExtension (version info, used
-//     by the app's Settings) under the bus name EXT_BUS_NAME.
+//     re-activation, plus a FocusChanged signal the daemon uses to CONFIRM
+//     a captured window actually regained focus -- WHISP-88 -- used by the
+//     daemon's "gnome-extension" WindowManager backend) and
+//     org.fede.whisperaloud.ShellExtension (version info, used by the
+//     app's Settings) under the bus name EXT_BUS_NAME.
 //
 // Event-driven: the daemon's presence is tracked with a bus-name watch and
 // its state with StatusChanged / ModelStateChanged / ConfigChanged /
@@ -302,6 +304,9 @@ const SERVICE_XML = `
       <arg direction="in" type="u" name="window_id"/>
       <arg direction="out" type="b" name="success"/>
     </method>
+    <signal name="FocusChanged">
+      <arg type="s" name="window_id"/>
+    </signal>
   </interface>
   <interface name="org.fede.whisperaloud.ShellExtension">
     <method name="GetInfo">
@@ -316,6 +321,7 @@ class ExtensionDBusService {
         this._windowImpl = null;
         this._infoImpl = null;
         this._nameId = 0;
+        this._focusHandlerId = 0;
     }
 
     enable() {
@@ -330,12 +336,30 @@ class ExtensionDBusService {
         this._nameId = Gio.bus_own_name(
             Gio.BusType.SESSION, EXT_BUS_NAME, Gio.BusNameOwnerFlags.NONE,
             null, null, null);
+        // WHISP-88: emit FocusChanged on every real focus-window change, so
+        // the daemon's WindowManager can CONFIRM a captured window actually
+        // regained focus (instead of assuming so after a fixed settle
+        // delay following ActivateWindow). global.display's own
+        // 'notify::focus-window' is the authoritative compositor event --
+        // no polling.
+        this._focusHandlerId = global.display.connect(
+            'notify::focus-window', () => this._emitFocusChanged());
+    }
+
+    _emitFocusChanged() {
+        const win = global.display.get_focus_window();
+        const windowId = win ? String(win.get_id()) : '';
+        this._windowImpl?.emit_signal('FocusChanged', GLib.Variant.new('(s)', [windowId]));
     }
 
     disable() {
         if (this._nameId) {
             Gio.bus_unown_name(this._nameId);
             this._nameId = 0;
+        }
+        if (this._focusHandlerId) {
+            global.display.disconnect(this._focusHandlerId);
+            this._focusHandlerId = 0;
         }
         this._windowImpl?.unexport();
         this._windowImpl = null;
