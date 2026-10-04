@@ -850,6 +850,24 @@ class TestDownloadModel:
         result = daemon.GetStatus()
         assert "downloading" in result
 
+    def test_get_status_includes_mic_gain_control_true(self, daemon):
+        """WHISP-93: GetStatus must surface whether hardware gain control is
+        actually usable (e.g. False under Flatpak -- a structural no-op)."""
+        daemon._gain._wpctl = "/usr/bin/wpctl"
+        result = daemon.GetStatus()
+        assert "mic_gain_control" in result
+        assert bool(result["mic_gain_control"]) is True
+
+    def test_get_status_includes_mic_gain_control_false(self, daemon):
+        daemon._gain._wpctl = None
+        result = daemon.GetStatus()
+        assert bool(result["mic_gain_control"]) is False
+
+    def test_get_status_mic_gain_control_false_when_no_gain_controller(self, daemon):
+        daemon._gain = None
+        result = daemon.GetStatus()
+        assert bool(result["mic_gain_control"]) is False
+
     def test_download_model_unknown_model_refused(self, daemon):
         result = daemon.DownloadModel("faster-whisper", "does-not-exist", False)
         assert result is False

@@ -35,6 +35,16 @@ CHUNK_WORKER_JOIN_TIMEOUT_S = 2.0
 _DROP_WARNING_INTERVAL_S = 1.0
 
 
+def _linear_to_dbfs(value: float) -> float:
+    """Convert a linear amplitude/RMS value to dBFS, -inf for 0 (WHISP-93
+    observability: stop() logs raw level in dBFS so a quiet/under-gained
+    recording is visible in the log without needing to reproduce the bug
+    with extra instrumentation each time)."""
+    if value <= 0:
+        return float("-inf")
+    return 20.0 * np.log10(value)
+
+
 class _ChunkSession:
     """Owns everything one recording session's streaming hook needs.
 
@@ -528,7 +538,19 @@ class AudioRecorder:
                 return np.array([], dtype=np.float32)
 
             raw_audio = np.concatenate(frames_snapshot)
-            logger.info(f"Recorded {len(raw_audio) / self.config.sample_rate:.2f}s of audio")
+            raw_duration = len(raw_audio) / self.config.sample_rate
+            # WHISP-93 observability: raw RMS/peak in dBFS makes a quiet/
+            # under-gained recording (e.g. Flatpak's GainController no-op,
+            # WHISP-61) visible in the log without extra instrumentation --
+            # this is exactly the data point that was missing from the
+            # original field reports (see docs/audits/
+            # 2026-10-04-runtime-assumptions-pass2.md's WHISP-93 section).
+            raw_rms = float(np.sqrt(np.mean(raw_audio.astype(np.float64) ** 2))) if raw_audio.size else 0.0
+            raw_peak = float(np.max(np.abs(raw_audio))) if raw_audio.size else 0.0
+            logger.info(
+                f"Recorded {raw_duration:.2f}s of audio "
+                f"(rms={_linear_to_dbfs(raw_rms):.1f}dBFS peak={_linear_to_dbfs(raw_peak):.1f}dBFS)"
+            )
 
             # Format conversion (mono, resample)
             audio = raw_audio
@@ -537,7 +559,9 @@ class AudioRecorder:
             if self.config.sample_rate != 16000:
                 audio = AudioProcessor.resample(audio, self.config.sample_rate, 16000)
 
-            # Trim silence if VAD enabled
+            # Trim silence if VAD enabled. AudioProcessor.trim_silence itself
+            # logs the noise floor / speech level / kept window at INFO
+            # (WHISP-93) -- no need to duplicate that here.
             if self.config.vad_enabled:
                 audio, _, _ = AudioProcessor.trim_silence(audio, 16000, self.config.vad_threshold)
 

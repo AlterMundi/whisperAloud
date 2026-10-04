@@ -166,6 +166,19 @@ class GainController:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    @property
+    def gain_control_available(self) -> bool:
+        """Whether hardware mic gain raise/restore is actually usable right
+        now (``wpctl`` resolved and not disabled by test mode/Flatpak
+        sandboxing). WHISP-93: surfaced via ``WhisperAloudService.GetStatus``
+        (``mic_gain_control``) so a silent, structural no-op (e.g. every
+        Flatpak install, WHISP-61) is an observable condition instead of
+        something a user can only infer from truncated transcripts -- the
+        disable itself is still logged at INFO in ``__post_init__`` above,
+        this just makes the resulting state queryable afterwards too.
+        """
+        return bool(self._wpctl)
+
     def raise_to(self, target_linear: float) -> bool:
         """
         Save current gain and raise to target_linear if current < target.
