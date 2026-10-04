@@ -264,3 +264,47 @@ class TestNative:
         assert ctl.enabled is False
         assert ctl.error is True
         assert persist.values == []
+
+
+class TestPersistAutostartSetting:
+    """Where the confirmed state is stored: through the daemon's SetConfig
+    when connected (so GetStatus "autostart" follows), else on disk."""
+
+    def test_goes_through_the_daemon(self):
+        from whisper_aloud.ui.startup_logic import persist_autostart_setting
+
+        class _Client:
+            def __init__(self):
+                self.changes = []
+
+            def set_config(self, changes):
+                self.changes.append(changes)
+                return True
+
+        client = _Client()
+
+        def _load():
+            raise AssertionError("must not touch the file when the daemon took it")
+
+        assert persist_autostart_setting(True, client, load_config=_load) == "daemon"
+        assert client.changes == [{"startup.autostart_background": True}]
+
+    def test_falls_back_to_the_config_file(self, tmp_path, monkeypatch):
+        from whisper_aloud.config import WhisperAloudConfig
+        from whisper_aloud.ui.startup_logic import persist_autostart_setting
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+        class _Down:
+            def set_config(self, changes):
+                return False
+
+        for client in (None, _Down()):
+            assert (
+                persist_autostart_setting(True, client, load_config=WhisperAloudConfig.load)
+                == "file"
+            )
+            assert WhisperAloudConfig.load().startup.autostart_background is True
+            persist_autostart_setting(False, client, load_config=WhisperAloudConfig.load)
+            assert WhisperAloudConfig.load().startup.autostart_background is False

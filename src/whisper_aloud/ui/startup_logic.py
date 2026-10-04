@@ -225,3 +225,23 @@ def _default_portal_factory():
     from ..background_portal import BackgroundPortal
 
     return BackgroundPortal()
+
+
+CONFIG_KEY = "startup.autostart_background"
+
+
+def persist_autostart_setting(enabled: bool, client, *, load_config) -> str:
+    """Store the confirmed state. Through the daemon's SetConfig when it is
+    reachable (it saves the file and GetStatus "autostart" follows), else
+    straight into the config file. Returns "daemon" or "file"; raises if
+    the file cannot be written either."""
+    if client is not None:
+        try:
+            if client.set_config({CONFIG_KEY: bool(enabled)}):
+                return "daemon"
+        except Exception:
+            logger.debug("SetConfig(%s) failed; writing the file instead", CONFIG_KEY, exc_info=True)
+    config = load_config()
+    config.startup.autostart_background = bool(enabled)
+    config.save()
+    return "file"
