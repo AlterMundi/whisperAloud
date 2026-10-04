@@ -91,11 +91,26 @@ without touching daemon/GUI VAD settings, and `--normalize` applies a
 dynamic loudness pass (reusing the daemon's own AGC) before transcription,
 useful for quiet or unevenly leveled recordings.
 
-## Config validation
+## Config show / validation
 
 ```bash
+whisper-aloud config show             # grouped, human-readable text (default action for `config` too)
+whisper-aloud config show --json      # machine-readable: full config + which keys are env-overridden
 whisper-aloud config validate
 ```
+
+`config show` prints the **full** effective configuration (every section
+of `WhisperAloudConfig.to_dict()`: model, transcription, audio, clipboard,
+notifications, persistence, audio_processing, hotkey, recording_flow,
+input_gain, startup) — defaults, overridden by the config file, overridden
+again by any `WHISPER_ALOUD_*` env var, in that order. A value currently
+set by an env var is marked `(env)` in the text output, and listed under
+`"env_overrides"` (a `{"section.field": "ENV_VAR_NAME"}` map) in the
+`--json` output, so it's clear a value didn't come from `config.json`. It
+never writes the file; a malformed `config.json` prints a warning to
+stderr and falls back to defaults instead of failing. `config validate`
+instead reports whether `config.json` parses and summarizes a few key
+settings, failing loudly (non-zero exit) on malformed JSON.
 
 ## Browsing and exporting history
 

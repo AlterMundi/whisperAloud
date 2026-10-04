@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from whisper_aloud.config import MODEL_RELOAD_FIELDS, WhisperAloudConfig
+from whisper_aloud.config import (
+    ENV_OVERRIDE_VARS,
+    MODEL_RELOAD_FIELDS,
+    WhisperAloudConfig,
+    active_env_overrides,
+)
 from whisper_aloud.exceptions import ConfigurationError
 
 
@@ -67,6 +72,39 @@ def test_env_override_allow_network_download():
         assert config.model.allow_network_download is False
     finally:
         os.environ.pop('WHISPER_ALOUD_MODEL_ALLOW_NETWORK_DOWNLOAD', None)
+
+
+def test_active_env_overrides_empty_by_default():
+    """With no WHISPER_ALOUD_* env vars set, nothing is reported as overridden."""
+    assert active_env_overrides() == {}
+
+
+def test_active_env_overrides_reports_set_vars():
+    """WHISP-97: active_env_overrides() must report the dotted config path
+    for every WHISPER_ALOUD_* env var that is currently set, so `whisper-
+    aloud config show` can mark effective values that came from the
+    environment."""
+    os.environ['WHISPER_ALOUD_MODEL_NAME'] = 'medium'
+    os.environ['WHISPER_ALOUD_VAD_FILTER'] = 'false'
+    try:
+        overrides = active_env_overrides()
+        assert overrides['model.name'] == 'WHISPER_ALOUD_MODEL_NAME'
+        assert overrides['transcription.vad_filter'] == 'WHISPER_ALOUD_VAD_FILTER'
+        assert set(overrides) == {'model.name', 'transcription.vad_filter'}
+    finally:
+        os.environ.pop('WHISPER_ALOUD_MODEL_NAME', None)
+        os.environ.pop('WHISPER_ALOUD_VAD_FILTER', None)
+
+
+def test_env_override_vars_map_every_path_resolves_on_default_config():
+    """Every dotted path in ENV_OVERRIDE_VARS must resolve against a fresh
+    WhisperAloudConfig's to_dict(), so the map can't drift from to_dict()'s
+    section/field names."""
+    data = WhisperAloudConfig().to_dict()
+    for path in ENV_OVERRIDE_VARS:
+        section, field_name = path.split(".", 1)
+        assert section in data, f"unknown section in ENV_OVERRIDE_VARS: {path}"
+        assert field_name in data[section], f"unknown field in ENV_OVERRIDE_VARS: {path}"
 
 
 def test_to_dict_from_dict_roundtrip_allow_network_download():

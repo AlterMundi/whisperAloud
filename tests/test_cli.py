@@ -747,6 +747,65 @@ def test_config_show(capsys):
         assert "[Audio]" in output
 
 
+def test_config_show_prints_full_effective_config(capsys):
+    """WHISP-97: `config show` must print every section of to_dict(), not
+    a curated subset -- previously it silently omitted engine,
+    audio_processing, transcription.highpass_hz/vad_*, startup,
+    model.allow_network_download, recording_flow, input_gain and hotkey."""
+    with patch('sys.argv', ['whisper-aloud', 'config', 'show']):
+        exit_code = main()
+        assert exit_code == 0
+        output = capsys.readouterr().out
+        for section in [
+            "[Model]", "[Transcription]", "[Audio]", "[Clipboard]",
+            "[Notifications]", "[Persistence]", "[Audio Processing]",
+            "[Hotkey]", "[Recording Flow]", "[Input Gain]", "[Startup]",
+        ]:
+            assert section in output, f"missing section {section!r}"
+        for field in [
+            "engine", "allow_network_download", "highpass_hz",
+            "vad_min_speech_ms", "autostart_background",
+            "raise_mic_gain", "target_dbfs",
+        ]:
+            assert field in output, f"missing field {field!r}"
+
+
+def test_config_show_json_contains_full_config(capsys):
+    """`config show --json` must emit machine-readable JSON with the full
+    effective config, matching WhisperAloudConfig.to_dict()."""
+    with patch('sys.argv', ['whisper-aloud', 'config', 'show', '--json']):
+        exit_code = main()
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "config" in payload
+        assert "env_overrides" in payload
+        assert payload["config"]["model"]["engine"]
+        assert "audio_processing" in payload["config"]
+        assert payload["config"]["audio_processing"]["highpass_hz"] is not None
+        assert payload["config"]["startup"]["autostart_background"] is False
+
+
+def test_config_show_marks_env_overridden_values(capsys, monkeypatch):
+    """A value overridden via WHISPER_ALOUD_* must be flagged as coming
+    from the environment, in both text and JSON output."""
+    monkeypatch.setenv("WHISPER_ALOUD_MODEL_NAME", "medium")
+    with patch('sys.argv', ['whisper-aloud', 'config', 'show']):
+        exit_code = main()
+        assert exit_code == 0
+        output = capsys.readouterr().out
+        assert "name" in output
+        name_line = next(line for line in output.splitlines() if line.strip().startswith("name"))
+        assert "medium" in name_line
+        assert "(env)" in name_line
+
+    with patch('sys.argv', ['whisper-aloud', 'config', 'show', '--json']):
+        exit_code = main()
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["env_overrides"]["model.name"] == "WHISPER_ALOUD_MODEL_NAME"
+        assert payload["config"]["model"]["name"] == "medium"
+
+
 def test_config_no_action_defaults_to_show(capsys):
     """Config with no action defaults to show."""
     with patch('sys.argv', ['whisper-aloud', 'config']):
