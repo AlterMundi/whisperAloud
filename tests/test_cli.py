@@ -400,6 +400,50 @@ def test_status_shows_bound_trigger_when_present(mock_check, mock_call, capsys):
 
 @patch('whisper_aloud.__main__.call_service_method')
 @patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_status_shows_model_state(mock_check, mock_call, capsys):
+    """API 1.6.0: status reports the model readiness state."""
+    mock_call.return_value = {
+        "state": "idle", "version": "0.3.0", "model": "base", "device": "cpu",
+        "hotkey_backend": "none", "uptime": 5.0,
+        "model_state": "loading", "model_error": "",
+    }
+    with patch('sys.argv', ['whisper-aloud', 'status']):
+        assert main() == 0
+        output = capsys.readouterr().out
+        assert "Model:    base (cpu) [loading]" in output
+        assert "Model error" not in output
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_status_shows_model_error_detail(mock_check, mock_call, capsys):
+    mock_call.return_value = {
+        "state": "idle", "version": "0.3.0", "model": "base", "device": "cpu",
+        "hotkey_backend": "none", "uptime": 5.0,
+        "model_state": "missing", "model_error": "Model 'base' is not downloaded",
+    }
+    with patch('sys.argv', ['whisper-aloud', 'status']):
+        assert main() == 0
+        output = capsys.readouterr().out
+        assert "[missing]" in output
+        assert "Model 'base' is not downloaded" in output
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_status_without_model_state_from_older_daemon(mock_check, mock_call, capsys):
+    mock_call.return_value = {
+        "state": "idle", "version": "0.2.0", "model": "base", "device": "cpu",
+        "hotkey_backend": "none", "uptime": 5.0,
+    }
+    with patch('sys.argv', ['whisper-aloud', 'status']):
+        assert main() == 0
+        output = capsys.readouterr().out
+        assert "Model:    base (cpu)\n" in output
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
 def test_start_command(mock_check, mock_call, capsys):
     """Start command calls daemon and prints confirmation."""
     with patch('sys.argv', ['whisper-aloud', 'start']):
