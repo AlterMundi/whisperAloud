@@ -298,7 +298,13 @@ def daemon(tmp_path, request) -> Callable[..., DaemonHandle]:
         *,
         fake_audio: Optional[str] = None,
         ready_timeout: float = 5.0,
+        wait_model_state: Optional[str] = "ready",
     ) -> DaemonHandle:
+        """`wait_model_state` (0.3.0 model preload): after the bus name is
+        up, also wait -- on the ModelStateChanged signal, not a sleep --
+        until the daemon's model reaches that state (default "ready", so
+        scenario tests start from a loaded model exactly as before the
+        preload existed). Pass None to skip, e.g. to observe `loading`."""
         xdg_home = tmp_path / f"home-{len(spawned)}"
         xdg_home.mkdir(parents=True, exist_ok=True)
         env = _build_daemon_env(xdg_home, config_overrides)
@@ -340,6 +346,9 @@ def daemon(tmp_path, request) -> Callable[..., DaemonHandle]:
             except Exception:
                 pass
             pytest.fail(f"daemon failed to become ready -- log tail:\n{tail}")
+
+        if wait_model_state is not None:
+            wait_for_model_state(handle.client(), wait_model_state, timeout=ready_timeout)
 
         return handle
 
@@ -426,6 +435,34 @@ class SignalCapture:
                     return args
             time.sleep(0.01)
         raise AssertionError(f"timed out after {timeout}s waiting for a matching signal")
+
+
+_SETTLED_MODEL_STATES = ("ready", "missing", "error")
+
+
+def wait_for_model_state(client: WhisperAloudClient, expected: str, timeout: float = 5.0) -> None:
+    """Block until the daemon's model readiness is `expected`, driven by the
+    ModelStateChanged signal (API 1.6.0). Subscribes BEFORE reading
+    GetStatus so a transition racing the call can't be missed; fails fast if
+    the model settles into a different terminal state."""
+    capture = SignalCapture(client, "ModelStateChanged")
+    try:
+        current = client.get_status().get("model_state")
+        if current == expected:
+            return
+        # The daemon never leaves a settled state on its own, so settling
+        # elsewhere is a definitive failure, not something to wait out.
+        assert current not in _SETTLED_MODEL_STATES, (
+            f"model already settled in {current!r} "
+            f"({client.get_status().get('model_error')}), expected {expected!r}"
+        )
+        state, detail = capture.wait(
+            timeout=timeout,
+            predicate=lambda s, d: s == expected or (s in _SETTLED_MODEL_STATES),
+        )
+        assert state == expected, f"model settled in {state!r} ({detail}), expected {expected!r}"
+    finally:
+        client.disconnect()
 
 
 def _to_snake(signal_name: str) -> str:
