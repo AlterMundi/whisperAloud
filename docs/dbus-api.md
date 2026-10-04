@@ -236,6 +236,16 @@ Valid in any state. Returns a dict of GLib variants:
 | `input_gain` | `a{sv}` | Input normalization stage (see [`design/input-gain-loop.md`](design/input-gain-loop.md)): `mode` (`s`: `digital` or `off`), `enabled` (`b`), `hardware_control` (`b`, a reserved key that is not implemented), `target_dbfs` (`d`), `max_gain_db` (`d`), `last_gain_db` and `last_speech_dbfs` (`d`, from the last recording's normalization; NaN before the first one) |
 | `model_state` | `s` | Model readiness (1.6.0): `loading`, `ready`, `missing`, `downloading`, `error` (or `unloaded`, see "Model readiness") |
 | `model_error` | `s` | Human-readable reason when `model_state` is `missing` or `error`, else `""` (1.6.0) |
+| `hotkey_trigger` | `s` | Trigger the desktop actually bound for the toggle shortcut, as the GlobalShortcuts portal describes it (e.g. `Press <Super><Alt>r`); `""` when unknown or not using the portal |
+| `hotkey_bound` | `b` | True once the global toggle shortcut is really bound: the portal reported it bound (false while GNOME's consent dialog is still open), or libkeybinder3 grabbed it. Always false with backend `none` and in test mode (1.7.0) |
+| `autostart` | `b` | Whether "Start in background at login" is on (`startup.autostart_background`): the state the Background portal (Flatpak) or the XDG autostart entry (native) confirmed when the GUI last changed it (1.7.0) |
+
+**Readiness summary for indicators.** A tray icon or Shell extension can show
+"all OK" without the main window when `model_state == "ready"` and
+`hotkey_bound` is true. Neither key has a change signal of its own:
+`ModelStateChanged` covers the model, `ConfigChanged` covers `autostart`, and
+`hotkey_bound` must be re-read with `GetStatus()` (for example on
+`StatusChanged`, or on a slow poll).
 
 ### GetHistory
 
@@ -908,6 +918,20 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.7.0 — 2026-10-04
+
+Minor (additive), WHISP-87 "Start in background at login".
+
+- **`GetStatus`'s `a{sv}` return value gains two keys**: `"hotkey_bound"`
+  (`b`) and `"autostart"` (`b`). Together with `"model_state"` they let an
+  indicator show "all OK" while only the daemon runs.
+- **`GetConfig`/`SetConfig` gain the key** `"startup.autostart_background"`
+  (`b`). The GUI writes it after the Background portal (Flatpak) or the
+  native XDG autostart entry confirms the change; setting it over D-Bus by
+  itself does not create or remove any autostart entry.
+- `hotkey_trigger` (present since the portal hotkey work) is now listed in
+  the `GetStatus` table.
 
 ### 1.6.0 — 2026-10-04
 
