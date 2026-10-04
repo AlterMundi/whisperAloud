@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import threading
 from typing import Callable, Optional
 
@@ -32,6 +33,42 @@ class DownloadCancelled(Exception):
 def repo_id_for(name: str) -> str:
     """The Hugging Face Hub repo id for a canonical faster-whisper model name."""
     return _REPO_TEMPLATE.format(name=name)
+
+
+def is_cached(model_size_or_path: str, cache_dir: Optional[str] = None) -> bool:
+    """Whether `model_size_or_path` (a canonical faster-whisper model name, a
+    Hub repo id, or a local directory) is already fully available offline.
+
+    WHISP-94: WhisperAloud promises offline transcription, but `WhisperModel`
+    resolves a model name via `huggingface_hub.snapshot_download`, which --
+    unless told `local_files_only=True` -- always makes a network call to
+    check the remote revision, even when every file it needs is already in
+    the local cache. Deciding "is this cached" by guessing at
+    `~/.cache/huggingface` directory layouts is fragile (custom `HF_HOME`,
+    custom `download_root`, cache format changes), so instead this performs
+    the real resolution `WhisperModel` itself would do
+    (`faster_whisper.utils.download_model`, which maps the name to its Hub
+    repo id and applies the same `allow_patterns`) but with
+    `local_files_only=True`. `huggingface_hub` honors that flag purely from
+    local cache metadata -- it never issues an HTTP request when it's set --
+    so this call itself never touches the network, whether the model is
+    cached or not: a `LocalEntryNotFoundError` (or any other failure to
+    resolve locally) simply means "not cached yet", not an error.
+
+    A literal filesystem path (`os.path.isdir`) is always already-local --
+    `WhisperModel` never consults the Hub for it either (see
+    `faster_whisper.transcribe.WhisperModel.__init__`) -- so it is reported
+    cached without attempting any Hub resolution at all.
+    """
+    if os.path.isdir(model_size_or_path):
+        return True
+    try:
+        from faster_whisper.utils import download_model as _fw_download_model
+
+        _fw_download_model(model_size_or_path, local_files_only=True, cache_dir=cache_dir)
+        return True
+    except Exception:
+        return False
 
 
 def _snapshot_download_supports_tqdm_class() -> bool:

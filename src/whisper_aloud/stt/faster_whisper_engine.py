@@ -1,9 +1,14 @@
 """faster-whisper (CTranslate2) adapter."""
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
+from whisper_aloud.stt import hf_download
 from whisper_aloud.stt.base import EngineCapabilities, STTEngine, Transcript
+
+logger = logging.getLogger(__name__)
 
 
 class FasterWhisperEngine(STTEngine):
@@ -16,7 +21,18 @@ class FasterWhisperEngine(STTEngine):
     def load(self, model: str, device: str, compute_type: str) -> None:
         from faster_whisper import WhisperModel
 
-        self._model = WhisperModel(model, device=device, compute_type=compute_type)
+        # WHISP-94: never let an already-cached model trigger a network call
+        # (huggingface_hub otherwise checks the remote revision on every
+        # load). `is_cached` performs the same local-only resolution
+        # WhisperModel does internally, so this check itself never touches
+        # the network either.
+        local_files_only = hf_download.is_cached(model)
+        if not local_files_only:
+            logger.info("downloading model '%s' (not in cache)", model)
+
+        self._model = WhisperModel(
+            model, device=device, compute_type=compute_type, local_files_only=local_files_only
+        )
 
     def transcribe_numpy(self, samples: np.ndarray, sample_rate: int,
                          language: str | None = None) -> Transcript:

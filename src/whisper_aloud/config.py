@@ -114,6 +114,11 @@ class ModelConfig:
     device: str = "auto"
     compute_type: str = "int8"
     download_root: Optional[str] = None
+    # WHISP-94: when False, Transcriber.load_model() never falls back to a
+    # network download for a model that isn't in the local cache yet -- it
+    # raises ModelLoadError instead. Default True preserves the existing
+    # first-use-downloads behavior.
+    allow_network_download: bool = True
 
 
 # Fields that trigger model reload when changed (class-level constant)
@@ -324,6 +329,7 @@ class WhisperAloudConfig:
                 "device": self.model.device,
                 "compute_type": self.model.compute_type,
                 "download_root": self.model.download_root,
+                "allow_network_download": self.model.allow_network_download,
             },
             "transcription": {
                 "language": self.transcription.language,
@@ -524,6 +530,9 @@ class WhisperAloudConfig:
         self.model.device = os.getenv('WHISPER_ALOUD_MODEL_DEVICE', self.model.device)
         self.model.compute_type = os.getenv('WHISPER_ALOUD_MODEL_COMPUTE_TYPE', self.model.compute_type)
         self.model.download_root = os.getenv('WHISPER_ALOUD_MODEL_DOWNLOAD_ROOT', self.model.download_root)
+        self.model.allow_network_download = parse_bool_env(
+            'WHISPER_ALOUD_MODEL_ALLOW_NETWORK_DOWNLOAD', self.model.allow_network_download
+        )
 
         # Transcription
         self.transcription.language = os.getenv('WHISPER_ALOUD_LANGUAGE', self.transcription.language)
