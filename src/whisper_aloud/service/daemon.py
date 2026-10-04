@@ -933,6 +933,13 @@ class WhisperAloudService:
             ),
             "uptime": GLib.Variant("d", time.monotonic() - self._start_time),
             "downloading": GLib.Variant("b", self._downloading),
+            # WHISP-93: surface whether hardware mic-gain-raise is actually
+            # usable (wpctl resolved, not disabled by Flatpak/test mode) --
+            # previously a silent no-op (WHISP-61) with no observable trace
+            # beyond an INFO log line at startup.
+            "mic_gain_control": GLib.Variant(
+                "b", bool(self._gain.gain_control_available) if self._gain else False
+            ),
         }
 
     def GetHistory(self, limit: int) -> list:

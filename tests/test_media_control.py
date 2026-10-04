@@ -263,6 +263,34 @@ class TestGainControllerFlatpakSandbox:
         controller.restore_from_crash_file()
 
 
+class TestGainControllerAvailability:
+    """WHISP-93: GetStatus surfaces whether gain control is actually usable."""
+
+    def test_gain_control_available_true_when_wpctl_resolved(self, monkeypatch):
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        monkeypatch.setattr(media_control, "is_flatpak_sandbox", lambda: False)
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wpctl" if name == "wpctl" else None)
+        controller = GainController()
+        assert controller.gain_control_available is True
+
+    def test_gain_control_available_false_without_wpctl(self, monkeypatch):
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        monkeypatch.setattr(media_control, "is_flatpak_sandbox", lambda: False)
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        controller = GainController()
+        assert controller.gain_control_available is False
+
+    def test_gain_control_available_false_in_flatpak_sandbox(self, monkeypatch):
+        """Flatpak's structural no-op (WHISP-61) must be observable, not
+        just silently logged -- this is what the ticket's GetStatus fix
+        (mic_gain_control) ultimately reads."""
+        monkeypatch.delenv("WHISPER_ALOUD_TEST_MODE", raising=False)
+        monkeypatch.setattr(media_control, "is_flatpak_sandbox", lambda: True)
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/wpctl")
+        controller = GainController()
+        assert controller.gain_control_available is False
+
+
 class TestGainController:
     def test_no_wpctl_is_noop(self):
         """GainController gracefully does nothing when wpctl is absent."""
