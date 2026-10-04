@@ -146,17 +146,49 @@ class HotkeyManager:
         Returns:
             True if the hotkey was registered successfully, False otherwise.
         """
-        if self._backend == "portal":
-            return self._register_portal(accel, callback)
-        elif self._backend == "keybinder":
-            return self._register_keybinder(accel, callback)
-        else:
+        if self._backend == "none":
             logger.warning(
                 "No hotkey backend available. Cannot register '%s'. "
                 "Please configure a system keyboard shortcut manually.",
                 accel,
             )
             return False
+
+        ok = self._register_with_current_backend(accel, callback)
+        if not ok:
+            # WHISP-90: a registration failure on a backend that was
+            # detected as available at __init__/last re-probe is an
+            # observable sign the environment changed since then (portal
+            # service restarted differently, libkeybinder3 became
+            # unusable, ...) -- re-probe once and retry, instead of
+            # caching the stale backend for the rest of the daemon's life.
+            self._reprobe("registration failed")
+            if self._backend != "none":
+                ok = self._register_with_current_backend(accel, callback)
+        return ok
+
+    def _register_with_current_backend(
+        self, accel: str, callback: Callable[[], None]
+    ) -> bool:
+        if self._backend == "portal":
+            return self._register_portal(accel, callback)
+        if self._backend == "keybinder":
+            return self._register_keybinder(accel, callback)
+        return False
+
+    def _reprobe(self, reason: str) -> None:
+        """Re-detect the backend (WHISP-90) instead of trusting the one
+        chosen once at `__init__` for the daemon's entire lifetime -- the
+        portal service or libkeybinder3 availability can change while the
+        daemon keeps running. Called when `register()` fails on the
+        currently selected backend. Never on a timer."""
+        old = self._backend
+        new = self.detect_backend()
+        self._backend = new
+        if new != old:
+            logger.info("Hotkey backend changed (%s): %s -> %s", reason, old, new)
+        else:
+            logger.debug("Hotkey backend re-probed (%s): still %s", reason, new)
 
     def unregister(self) -> None:
         """Unregister all hotkeys. Idempotent and never raises."""
