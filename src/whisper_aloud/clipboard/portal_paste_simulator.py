@@ -203,13 +203,6 @@ class PortalPasteSimulator:
         # setup fails. Only one slot: a prewarm is expected to finish well
         # before a second paste could ever be requested.
         self._queued_paste_shortcut: Optional[str] = None
-        # The restore_token actually sent to SelectDevices for the current
-        # (or most recent) setup chain, captured so `_on_started` can tell
-        # a silently-reused token (same token echoed back by Start) apart
-        # from one the portal rejected and re-prompted for (Start returns a
-        # *new* token after showing a dialog despite `prewarm()` having
-        # intended a non-interactive setup) -- see `_on_started`.
-        self._restore_token_used_for_setup: Optional[str] = None
 
     @staticmethod
     def _new_token(prefix: str) -> str:
@@ -436,7 +429,6 @@ class PortalPasteSimulator:
 
     def _select_devices_async(self, restore_token: Optional[str], on_done) -> None:
         GLib = self._GLib  # noqa: N806
-        self._restore_token_used_for_setup = restore_token
 
         def _build_args(handle_token):
             opts_dict = {
@@ -501,24 +493,27 @@ class PortalPasteSimulator:
             return
         if restore_token:
             self._save_restore_token(restore_token)
-        # A prewarm (restore_token already on disk) that still ends up
-        # with Start returning a *different* restore_token than the one
-        # we sent means the portal didn't silently reuse it after all --
-        # it must have shown a consent dialog (stale/revoked token), i.e.
-        # this setup was interactive in practice even though it was
-        # started non-interactively. In that case the user's attention may
-        # have just been on that dialog, not on the app a queued paste
-        # would land in, so the queued paste must be dropped, not fired --
-        # see `_finish_session_setup`.
-        interactive_after_all = (
-            self._prewarm_active
-            and bool(self._restore_token_used_for_setup)
-            and bool(restore_token)
-            and restore_token != self._restore_token_used_for_setup
-        )
-        self._finish_session_setup(True, interactive_after_all=interactive_after_all)
+        # Note: per the RemoteDesktop portal spec, a restore_token is
+        # invalidated after a single use -- "To restore the same session
+        # again, use the new restore token sent in response to starting
+        # this session." A *normal, fully silent* restore therefore also
+        # returns a brand-new token, different from the one just sent to
+        # SelectDevices. That means "Start's token differs from the one we
+        # sent" is NOT a usable signal that a consent dialog was shown --
+        # it's true on every successful restore, silent or not. There is
+        # no reliable way from these D-Bus responses alone to tell a
+        # silent restore-token reuse apart from a re-prompted consent
+        # dialog (the portal gives no such signal). This is a deliberately
+        # accepted edge case: if `prewarm()`'s restore_token turns out to
+        # be stale and the portal pops a dialog anyway, a paste queued
+        # during that setup still fires as soon as setup completes, once
+        # the user has answered the dialog -- not ideal (it may land after
+        # the user's attention moved), but preferable to silently dropping
+        # a paste on every normal, successful prewarm, which comparing
+        # tokens would do.
+        self._finish_session_setup(True)
 
-    def _finish_session_setup(self, ok: bool, *, interactive_after_all: bool = False) -> None:
+    def _finish_session_setup(self, ok: bool) -> None:
         self._session_pending = False
         was_prewarm = self._prewarm_active
         self._prewarm_active = False
@@ -532,16 +527,8 @@ class PortalPasteSimulator:
             self._session_path = self._session_handle
             logger.info("RemoteDesktop portal session ready for paste")
             if was_prewarm and queued_shortcut is not None:
-                if interactive_after_all:
-                    logger.warning(
-                        "RemoteDesktop prewarm turned out interactive (restore_token was "
-                        "stale and the portal re-prompted); dropping paste queued during "
-                        "setup instead of firing it, since user interaction likely moved "
-                        "focus away from the paste target"
-                    )
-                else:
-                    logger.info("Delivering paste queued during RemoteDesktop prewarm")
-                    self.simulate_paste(queued_shortcut)
+                logger.info("Delivering paste queued during RemoteDesktop prewarm")
+                self.simulate_paste(queued_shortcut)
         else:
             self._session_failed = True
             self._session_handle = None

@@ -222,7 +222,14 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
     session_count = [0]
     notify_calls = []
     last_select_devices_restore_token = [""]
-    issued_restore_token = "fake-restore-token-abc123"
+    # Real RemoteDesktop portals invalidate a restore_token after one use
+    # ("To restore the same session again, use the new restore token sent
+    # in response to starting this session") -- Start returns a brand-new
+    # token on every call, silent restore or not. This fake mirrors that
+    # instead of returning the same token every time, so tests can't
+    # accidentally rely on "Start's token == the one just sent" as a
+    # signal of anything.
+    start_call_count = [0]
 
     INTROSPECTION = \"\"\"
     <node>
@@ -318,6 +325,8 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
             _session, _parent, options = args
             handle_token = options.get("handle_token")
             invocation.return_value(GLib.Variant("(o)", ("/request/start",)))
+            start_call_count[0] += 1
+            issued_restore_token = f"fake-restore-token-{start_call_count[0]}"
             results = {"restore_token": GLib.Variant("s", issued_restore_token)}
             GLib.idle_add(_emit_response, conn, sender, handle_token, 0, results)
         elif method == "NotifyKeyboardKeysym":

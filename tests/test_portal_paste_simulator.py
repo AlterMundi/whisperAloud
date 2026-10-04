@@ -690,18 +690,23 @@ class TestPrewarm:
             assert sim._queued_paste_shortcut is None
             assert harness.call_log.count("CreateSession") == 1
 
-    def test_stale_restore_token_reprompt_drops_queued_paste(self, caplog):
-        """Start() returning a *different* restore_token than the one sent
-        means the portal didn't silently reuse it -- it must have shown a
-        dialog despite prewarm() intending a non-interactive setup. The
-        queued paste must be dropped (logged), not fired blindly."""
+    def test_new_restore_token_from_start_still_delivers_queued_paste(self):
+        """Per the RemoteDesktop portal spec, a restore_token is
+        invalidated after one use -- Start always returns a *new* token on
+        a normal, fully silent restore, not just when a dialog was shown.
+        So a prewarm whose Start response carries a different token than
+        the one sent to SelectDevices is not evidence of user interaction
+        -- it's what every successful restore looks like. The queued paste
+        must still be delivered in this (normal) case."""
         harness = _FakeHarness(start_restore_token="brand-new-token")
         with (
             patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
             patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
         ):
+            saved = {}
             sim = PortalPasteSimulator(
-                restore_token_loader=lambda: "stale-token", restore_token_saver=lambda t: None
+                restore_token_loader=lambda: "stale-token",
+                restore_token_saver=lambda t: saved.setdefault("token", t),
             )
             sim.prewarm()
             assert sim.simulate_paste("ctrl+v") is False
@@ -710,18 +715,18 @@ class TestPrewarm:
                 "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
             )
             harness.respond("SelectDevices", 0, {})
+            harness.respond("Start", 0, {"restore_token": GLib.Variant("s", "brand-new-token")})
 
-            import logging
-
-            with caplog.at_level(logging.WARNING):
-                harness.respond("Start", 0, {"restore_token": GLib.Variant("s", "brand-new-token")})
-
-        # Session is still ready for *future* pastes -- only the queued one
-        # is dropped.
         assert sim._session_path == "/session/1"
         assert sim._queued_paste_shortcut is None
-        assert not any(isinstance(c, tuple) for c in harness.call_log)
-        assert any("turned out interactive" in r.message for r in caplog.records)
+        assert saved["token"] == "brand-new-token"
+        notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
+        assert notify_calls == [
+            ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_PRESSED),
+            ("NotifyKeyboardKeysym", XK_v, KEY_STATE_PRESSED),
+            ("NotifyKeyboardKeysym", XK_v, KEY_STATE_RELEASED),
+            ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_RELEASED),
+        ]
 
 
 class TestPortalSessionClose:
