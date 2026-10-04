@@ -20,11 +20,32 @@ writeup with sources):
   new, never-before-seen app — hence the "Add Keyboard Shortcuts" dialog
   reappearing on every start.
 - ``ListShortcuts(session_handle, options)`` (an async Request/Response
-  call like CreateSession/BindShortcuts) returns the shortcuts already
-  bound for *this app_id* in a previous session, even though the handle
-  passed in is for the session just created. ``BindShortcuts`` only needs
-  to be called when our shortcut id is missing from that list — calling
-  it again when already bound is what re-triggers the consent dialog.
+  call like CreateSession/BindShortcuts) is **not reliable for deciding
+  whether to skip BindShortcuts**, at least on GNOME: a dbus-monitor
+  capture of a real GNOME 49/51 session shows ListShortcuts replying with
+  an *empty* list on a brand new session even when the compositor already
+  has a stored binding for this app_id, and only resolves it once
+  BindShortcuts itself is called (GNOME then reuses the stored trigger
+  and completes without showing a dialog again). So ``BindShortcuts`` is
+  now called unconditionally, every session; ListShortcuts is issued only
+  as a diagnostic (logged, never gates anything).
+- On GNOME, ``BindShortcuts``'s Request::Response can arrive with
+  **response=2** ("ended without a normal user response") *even though
+  the shortcut was actually bound* — the same capture shows
+  ``results = {"shortcuts": [("toggle", {...})]}`` alongside response=2,
+  both for a fresh interactive bind (dialog completed, Ctrl+Space chosen)
+  and for a session that silently reused an existing stored binding. The
+  authoritative signal is therefore the *contents* of the ``"shortcuts"``
+  result (and/or a later ``ShortcutsChanged`` signal for the same ids),
+  never the bare response code. A response code is logged for visibility
+  but only treated as fatal when no shortcuts were reported bound at all.
+- ``GlobalShortcuts.Activated`` and ``GlobalShortcuts.ShortcutsChanged``
+  are subscribed right after ``CreateSession`` succeeds, independent of
+  whatever ``BindShortcuts`` later reports -- GNOME can deliver
+  ``Activated`` for a shortcut the compositor already considers bound
+  before our own ``BindShortcuts`` Response arrives, and can report a
+  shortcut as bound via ``ShortcutsChanged`` after an initial
+  ``BindShortcuts`` failure (recoverable: no need to retry Bind).
 
 Design note (maintainer directive, field bug 2 second pass): every
 Request-pattern call (CreateSession, ListShortcuts, BindShortcuts) is
@@ -95,6 +116,7 @@ class PortalHotkeys:
         self._session_path = None
         self._activated_cb = None
         self._act_sub_id = None
+        self._shortcuts_changed_sub_id = None
         # Guards against two interactive BindShortcuts requests in flight at
         # once (see bind()'s docstring) -- this is what produced an observed
         # response=2 on an abandoned prior request.
@@ -102,6 +124,20 @@ class PortalHotkeys:
         # Set by close(): once True, any in-flight Response callback is a
         # no-op (the flow it belongs to is no longer wanted).
         self._closed = False
+
+        # Shortcut ids requested by the current/last bind() call, and the
+        # state we've learned about them so far -- fed by BindShortcuts'
+        # Response, ListShortcuts' Response (diagnostic only) and
+        # ShortcutsChanged signals alike, since GNOME can report a shortcut
+        # as bound through any of the three (see module docstring).
+        self._required_ids: set = set()
+        self._bound_ids: set = set()
+        self._trigger_descriptions: dict = {}
+        # on_bound callback for the current bind() flow, and whether it has
+        # already been told "bound" once -- a later ShortcutsChanged must
+        # not re-fire it once we've already reported success.
+        self._on_bound_cb = None
+        self._bind_notified = False
 
     @staticmethod
     def _new_token(prefix: str) -> str:
@@ -277,19 +313,28 @@ class PortalHotkeys:
     # ─── Public entry point: the whole CreateSession -> bind flow ─────────
 
     def bind(self, shortcuts: list, on_activated, on_bound=None) -> None:
-        """Create a session and bind `shortcuts` if not already bound, async.
+        """Create a session and bind `shortcuts`, async.
 
         shortcuts: [{"id": str, "description": str, "accelerators": [str]}]
         on_activated: callable(shortcut_id: str) -> None, called whenever
             the portal reports a shortcut activation.
-        on_bound: optional callable(success: bool) -> None, called once the
-            flow settles (CreateSession/ListShortcuts/BindShortcuts all
-            happened, or one of them failed).
+        on_bound: optional callable(success: bool) -> None. Called once
+            BindShortcuts' Response settles the question of whether *any*
+            of our shortcut ids got bound (see `_bind_shortcuts_async` for
+            exactly how that's decided -- never just the response code).
+            May be called again later, with True, if a `ShortcutsChanged`
+            signal reports one of our ids bound after an initial failure
+            (it is never called a second time once it has already fired
+            True once).
 
         Non-blocking: returns immediately. The actual CreateSession ->
-        ListShortcuts -> BindShortcuts-if-needed -> Activated-subscribe
-        chain runs entirely from Response callbacks on the main loop.
+        subscribe(Activated, ShortcutsChanged) -> ListShortcuts
+        (diagnostic only) -> BindShortcuts (always) chain runs entirely
+        from Response/signal callbacks on the main loop.
         """
+        self._required_ids = {sc["id"] for sc in shortcuts}
+        self._on_bound_cb = on_bound
+        self._bind_notified = False
         self._create_session_async(
             on_done=lambda ok: self._on_session_created(ok, shortcuts, on_activated, on_bound)
         )
@@ -333,16 +378,77 @@ class PortalHotkeys:
             if on_bound:
                 on_bound(False)
             return
+        # Subscribe to Activated/ShortcutsChanged right away, independent of
+        # whatever BindShortcuts ends up reporting (see module docstring) --
+        # GNOME can deliver either signal before our own BindShortcuts
+        # Response arrives.
+        self._subscribe_session_signals(on_activated)
+        # Diagnostic only: on GNOME this reliably comes back empty for a
+        # brand new session even when a binding already exists, so it must
+        # never be used to decide whether to skip BindShortcuts (see module
+        # docstring). We always proceed to BindShortcuts below.
         self._list_shortcuts_async(
-            on_done=lambda existing_ids: self._on_shortcuts_listed(
-                existing_ids, shortcuts, on_activated, on_bound
-            )
+            on_done=lambda _ids: self._bind_shortcuts_async(shortcuts, on_activated, on_bound)
         )
+
+    @staticmethod
+    def _unpack(value):
+        return value.unpack() if hasattr(value, "unpack") else value
+
+    def _extract_shortcuts_result(self, results) -> list:
+        """Parse a Request result's (or ShortcutsChanged signal's) shortcuts
+        array into a plain list of ``(id, options_dict)`` tuples.
+
+        Never raises; returns ``[]`` for anything missing or malformed.
+        """
+        if not isinstance(results, dict):
+            return []
+        raw = results.get("shortcuts")
+        if raw is None:
+            return []
+        raw = self._unpack(raw)
+        out = []
+        for entry in raw:
+            try:
+                sid, opts = entry[0], entry[1]
+            except Exception:
+                continue
+            opts = self._unpack(opts)
+            out.append((sid, opts if isinstance(opts, dict) else {}))
+        return out
+
+    def _record_bound(self, entries) -> set:
+        """Update `_bound_ids`/`_trigger_descriptions` from a list of
+        (id, options_dict) tuples, for the ids we actually asked to bind.
+
+        Returns the subset of `_required_ids` newly confirmed bound by
+        `entries` (i.e. present in `entries`, regardless of whether they
+        were already known to be bound)."""
+        matched = set()
+        for sid, opts in entries:
+            if sid not in self._required_ids:
+                continue
+            matched.add(sid)
+            self._bound_ids.add(sid)
+            trig = opts.get("trigger_description") if isinstance(opts, dict) else None
+            if trig is not None:
+                self._trigger_descriptions[sid] = self._unpack(trig)
+        return matched
+
+    def get_trigger_description(self, shortcut_id: str) -> "str | None":
+        """Human-readable trigger (e.g. 'Press <Control>space') the portal
+        reported for `shortcut_id`, or None if unknown/not bound yet."""
+        return self._trigger_descriptions.get(shortcut_id)
+
+    def is_bound(self, shortcut_id: str) -> bool:
+        return shortcut_id in self._bound_ids
 
     def _list_shortcuts_async(self, on_done) -> None:
         """Call on_done(set_of_bound_ids) -- always, even on failure (empty
-        set), matching the module's "recoverable, never fatal" policy for
-        this non-interactive call."""
+        set). Diagnostic only (see module docstring): the result is logged
+        and folded into `_bound_ids`/`_trigger_descriptions` for whatever
+        it's worth, but nothing downstream depends on it to decide whether
+        to call BindShortcuts."""
         assert self._session_path, "create a session first"
         GLib = self._GLib  # noqa: N806
 
@@ -351,63 +457,47 @@ class PortalHotkeys:
             return GLib.Variant.new_tuple(GLib.Variant("o", self._session_path), opts)
 
         def _on_response(response, results):
-            ids = set()
-            if response == _RESPONSE_SUCCESS and isinstance(results, dict):
-                shortcuts_result = results.get("shortcuts")
-                if shortcuts_result is not None:
-                    shortcuts_result = (
-                        shortcuts_result.unpack()
-                        if hasattr(shortcuts_result, "unpack")
-                        else shortcuts_result
-                    )
-                    for entry in shortcuts_result:
-                        try:
-                            ids.add(entry[0])
-                        except Exception:
-                            continue
-                logger.info("ListShortcuts response=%s bound_ids=%s", response, sorted(ids))
+            entries = (
+                self._extract_shortcuts_result(results) if response == _RESPONSE_SUCCESS else []
+            )
+            self._record_bound(entries)
+            ids = {sid for sid, _ in entries}
+            if response == _RESPONSE_SUCCESS:
+                logger.info(
+                    "ListShortcuts (diagnostic) response=%s bound_ids=%s", response, sorted(ids)
+                )
             else:
                 logger.info(
-                    "ListShortcuts returned no usable results (response=%s); will attempt "
-                    "BindShortcuts (recoverable, not fatal)",
+                    "ListShortcuts (diagnostic) returned no usable results (response=%s); "
+                    "will call BindShortcuts regardless",
                     response,
                 )
             on_done(ids)
 
         self._request_async("ListShortcuts", _build_args, _on_response, interactive=False)
 
-    def _on_shortcuts_listed(self, existing_ids, shortcuts, on_activated, on_bound) -> None:
-        required_ids = {sc["id"] for sc in shortcuts}
-
-        if required_ids and required_ids.issubset(existing_ids):
-            logger.info(
-                "Shortcuts already bound for app_id '%s' (%s); skipping BindShortcuts",
-                self._app_id,
-                sorted(required_ids),
-            )
-            self._finish_binding(on_activated)
-            if on_bound:
-                on_bound(True)
-            return
-
-        self._bind_shortcuts_async(shortcuts, on_activated, on_bound)
-
     def _bind_shortcuts_async(self, shortcuts: list, on_activated, on_bound) -> None:
         """Issue BindShortcuts, async, with no Response deadline.
 
+        Always called, every session -- see module docstring for why the
+        old "skip Bind if ListShortcuts already lists it" optimization was
+        removed (GNOME's ListShortcuts reliably comes back empty for a
+        fresh session even when a binding already exists elsewhere).
+
         Guards against a second interactive request while one is already
-        pending (see module docstring) -- issuing a second one while the
-        first is unanswered is what produces an observed response=2 on the
-        abandoned first request.
+        pending: issuing a second one while the first is unanswered is one
+        known way to make the *first* request end up abandoned on the
+        portal's side.
         """
         assert self._session_path, "create a session first"
         GLib = self._GLib  # noqa: N806
 
         if self._bind_pending:
             logger.warning(
-                "BindShortcuts requested while a previous request is still pending; "
-                "refusing to issue a second interactive request (this is what produces "
-                "a response=2 on the abandoned one)"
+                "BindShortcuts requested while a previous request on this session is "
+                "still awaiting its Response; refusing to issue a second interactive "
+                "request concurrently (the first one is still being tracked and will "
+                "be honored whenever it answers)"
             )
             if on_bound:
                 on_bound(False)
@@ -439,26 +529,45 @@ class PortalHotkeys:
 
         def _on_response(response, results):
             self._bind_pending = False
-            if response == _RESPONSE_SUCCESS:
-                bound_ids = [sc["id"] for sc in shortcuts]
-                logger.info(
-                    "BindShortcuts succeeded: response=%s bound=%s accelerators=%s",
-                    response,
-                    bound_ids,
-                    {sc["id"]: sc.get("accelerators", []) for sc in shortcuts},
-                )
-                self._finish_binding(on_activated)
-                if on_bound:
-                    on_bound(True)
+            entries = self._extract_shortcuts_result(results)
+            bound_now = self._record_bound(entries)
+
+            if bound_now:
+                triggers = {sid: self._trigger_descriptions.get(sid) for sid in bound_now}
+                if response == _RESPONSE_SUCCESS:
+                    logger.info(
+                        "BindShortcuts succeeded: bound=%s triggers=%s",
+                        sorted(bound_now),
+                        triggers,
+                    )
+                else:
+                    # GNOME quirk (see module docstring): response!=0 does
+                    # NOT mean the shortcut wasn't bound -- trust the
+                    # "shortcuts" results instead of the bare code.
+                    logger.info(
+                        "BindShortcuts returned response=%s but reported our shortcut(s) "
+                        "bound anyway (known GNOME quirk -- trusting the results over the "
+                        "response code): bound=%s triggers=%s",
+                        response,
+                        sorted(bound_now),
+                        triggers,
+                    )
+                if not self._bind_notified:
+                    self._bind_notified = True
+                    if on_bound:
+                        on_bound(True)
             else:
-                if response == _RESPONSE_OTHER:
+                if response == _RESPONSE_SUCCESS:
+                    logger.warning(
+                        "BindShortcuts returned response=0 but no shortcuts were reported "
+                        "bound; treating as a failed bind"
+                    )
+                elif response == _RESPONSE_OTHER:
                     logger.warning(
                         "BindShortcuts returned response=2 (ended without a normal user "
-                        "response). This usually means a previous request on this app_id "
-                        "was abandoned (dialog closed without choosing, or the daemon "
-                        "restarted mid-prompt) and the portal considers it stale. No "
-                        "hotkey was bound this run; restarting the daemon and responding "
-                        "promptly to the dialog next time should recover."
+                        "response) and reported no shortcuts bound. No hotkey was bound "
+                        "this run; if the compositor later reports it bound via "
+                        "ShortcutsChanged this will still recover automatically."
                     )
                 else:
                     logger.warning(
@@ -469,11 +578,16 @@ class PortalHotkeys:
 
         self._request_async("BindShortcuts", _build_args, _on_response, interactive=True)
 
-    def _finish_binding(self, on_activated) -> None:
-        """Subscribe to Activated and best-effort EnableShortcuts.
+    def _subscribe_session_signals(self, on_activated) -> None:
+        """Subscribe to Activated and ShortcutsChanged, and best-effort
+        EnableShortcuts, right after CreateSession succeeds.
 
-        Shared by the "just bound" and "already bound, skipped Bind" paths.
-        Neither Activated-subscribe nor EnableShortcuts is a Request-pattern
+        Independent of whatever BindShortcuts later reports (see module
+        docstring) -- GNOME can deliver Activated for a shortcut it
+        already considers bound before our own BindShortcuts Response
+        arrives, and can report a shortcut bound via ShortcutsChanged
+        after an initial BindShortcuts failure. Neither Activated/
+        ShortcutsChanged-subscribe nor EnableShortcuts is a Request-pattern
         call (no handle_token/Response signal in the portal spec for
         either), so a short bounded call_sync for EnableShortcuts remains
         appropriate here -- it is a plain method call with a direct, fast
@@ -498,6 +612,23 @@ class PortalHotkeys:
                 self._session_path,
                 self._act_sub_id,
             )
+
+        if self._shortcuts_changed_sub_id is None:
+            self._shortcuts_changed_sub_id = self._bus.signal_subscribe(
+                _PORTAL_BUS,
+                _IFACE_GS,
+                "ShortcutsChanged",
+                None,
+                self._session_path,
+                Gio.DBusSignalFlags.NO_MATCH_RULE,
+                self._on_shortcuts_changed,
+            )
+            logger.info(
+                "Subscribed to ShortcutsChanged for session=%s (sub_id=%s)",
+                self._session_path,
+                self._shortcuts_changed_sub_id,
+            )
+
         try:
             self._proxy.call_sync(
                 "EnableShortcuts",
@@ -527,6 +658,27 @@ class PortalHotkeys:
         if callable(self._activated_cb):
             self._activated_cb(sc_id)
 
+    def _on_shortcuts_changed(self, conn, sender, path, iface, signal, params):
+        """Handle GlobalShortcuts.ShortcutsChanged(session_handle, shortcuts).
+
+        Recovery path (see module docstring): if BindShortcuts initially
+        failed to report one of our ids bound, a later ShortcutsChanged
+        for that id still marks it bound and fires on_bound(True) once.
+        """
+        try:
+            _session, shortcuts = params.unpack()
+        except Exception:
+            logger.exception("Unparseable ShortcutsChanged signal: %r", params)
+            return
+        entries = self._extract_shortcuts_result({"shortcuts": shortcuts})
+        newly_bound = self._record_bound(entries)
+        if not newly_bound:
+            return
+        logger.info("ShortcutsChanged reports bound shortcuts: %s", sorted(newly_bound))
+        if not self._bind_notified and callable(self._on_bound_cb):
+            self._bind_notified = True
+            self._on_bound_cb(True)
+
     def close(self) -> None:
         """Unsubscribe from signals and end the portal session.
 
@@ -548,6 +700,9 @@ class PortalHotkeys:
         if self._act_sub_id is not None:
             self._bus.signal_unsubscribe(self._act_sub_id)
         self._act_sub_id = None
+        if self._shortcuts_changed_sub_id is not None:
+            self._bus.signal_unsubscribe(self._shortcuts_changed_sub_id)
+        self._shortcuts_changed_sub_id = None
         if self._session_path:
             try:
                 self._bus.call_sync(
