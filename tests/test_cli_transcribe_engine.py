@@ -6,6 +6,7 @@ non-faster-whisper code path can be exercised deterministically and fast, with
 no real model. See stt/fake_engine.py and stt/catalog.py's TEST_MODE gating.
 """
 import importlib
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -224,3 +225,72 @@ def test_cli_transcribe_invalid_model_still_rejected_at_parse_time():
     with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args(["transcribe", "--model", "not-a-real-model", "x.wav"])
     assert excinfo.value.code == 2
+
+
+# ─── WHISP-96: `transcribe -` reads audio from stdin ───────────────────────
+
+
+def test_cli_transcribe_stdin_dash_reads_audio_from_stdin(
+    fake_engine_mode, tmp_path, monkeypatch, capsys
+):
+    """`whisper-aloud transcribe -` buffers stdin to a temp file and
+    transcribes that, same as passing a real path -- covers both the
+    piping use case and the Flatpak `--file-forwarding ... @@ file @@`
+    documentation's stdin alternative."""
+    import io
+
+    wav = _fake_wav_with_sidecar(tmp_path, text="piped from stdin")
+    monkeypatch.setenv("WHISPER_ALOUD_FAKE_AUDIO_WAV", str(wav))
+    wav_bytes = wav.read_bytes()
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "sys.argv",
+            ["whisper-aloud", "transcribe", "--engine", "fake", "--model", "fake", "-"],
+        )
+        m.setattr("sys.stdin", type("Stdin", (), {"buffer": io.BytesIO(wav_bytes)})())
+        exit_code = main()
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == "piped from stdin"
+
+
+def test_cli_transcribe_stdin_dash_cleans_up_temp_file(
+    fake_engine_mode, tmp_path, monkeypatch
+):
+    """The temp file created to buffer stdin must not be left behind."""
+    import io
+
+    import tempfile
+
+    wav = _fake_wav_with_sidecar(tmp_path, text="cleanup check")
+    monkeypatch.setenv("WHISPER_ALOUD_FAKE_AUDIO_WAV", str(wav))
+    wav_bytes = wav.read_bytes()
+
+    before = set(Path(tempfile.gettempdir()).glob("whisper-aloud-stdin-*"))
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "sys.argv",
+            ["whisper-aloud", "transcribe", "--engine", "fake", "--model", "fake", "-"],
+        )
+        m.setattr("sys.stdin", type("Stdin", (), {"buffer": io.BytesIO(wav_bytes)})())
+        exit_code = main()
+
+    after = set(Path(tempfile.gettempdir()).glob("whisper-aloud-stdin-*"))
+    assert exit_code == 0
+    assert after == before
+
+
+def test_cli_transcribe_stdin_dash_rejects_empty_stdin(monkeypatch, capsys):
+    """Empty stdin is a clear user error, not a confusing downstream failure
+    from handing an empty file to the audio decoder."""
+    import io
+
+    with monkeypatch.context() as m:
+        m.setattr("sys.argv", ["whisper-aloud", "transcribe", "-"])
+        m.setattr("sys.stdin", type("Stdin", (), {"buffer": io.BytesIO(b"")})())
+        exit_code = main()
+
+    assert exit_code == 1
+    assert "no data received on stdin" in capsys.readouterr().err

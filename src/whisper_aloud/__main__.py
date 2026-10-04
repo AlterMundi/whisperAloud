@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from . import __version__
 from .config import WhisperAloudConfig, active_env_overrides, user_config_dir
@@ -436,6 +437,18 @@ def cmd_transcribe(args) -> int:
     catalog's recommendation for --language), chunks long audio for engines
     without native long-form support, and writes plain or timestamped
     (srt/vtt/json) output to stdout or --output (WHISP-76).
+
+    WHISP-96: `file` may be `-` to read audio from stdin instead of a path --
+    useful both for piping (`arecord ... | whisper-aloud transcribe -`) and
+    for the Flatpak `--file-forwarding` invocation documented in
+    docs/flatpak.md, where the host file is exposed to the sandboxed process
+    as a `@@ ... @@`-forwarded argument rather than stdin, so stdin is the
+    simpler of the two for a script that already has the bytes in hand
+    (e.g. piped from another sandboxed process). The bytes are buffered to a
+    temp file under the process's own TMPDIR (which in the Flatpak sandbox
+    is the sandbox's private tmp, never a host path) since every engine's
+    `transcribe_file()`/`load_audio_16k_mono()` needs a real seekable path,
+    not a stream; the temp file is removed before returning.
     """
     if args.verbose:
         logging.basicConfig(
@@ -446,10 +459,35 @@ def cmd_transcribe(args) -> int:
     else:
         logging.basicConfig(level=logging.WARNING)
 
-    audio_file = Path(args.file)
-    if not audio_file.exists():
-        return _error(f"file not found: {audio_file}")
+    stdin_temp_path: Optional[Path] = None
+    if args.file == "-":
+        import tempfile
 
+        data = sys.stdin.buffer.read()
+        if not data:
+            return _error("no data received on stdin")
+        with tempfile.NamedTemporaryFile(
+            prefix="whisper-aloud-stdin-", suffix=".audio", delete=False
+        ) as handle:
+            handle.write(data)
+            stdin_temp_path = Path(handle.name)
+        audio_file = stdin_temp_path
+    else:
+        audio_file = Path(args.file)
+        if not audio_file.exists():
+            return _error(f"file not found: {audio_file}")
+
+    try:
+        return _transcribe_file(args, audio_file)
+    finally:
+        if stdin_temp_path is not None:
+            stdin_temp_path.unlink(missing_ok=True)
+
+
+def _transcribe_file(args, audio_file: Path) -> int:
+    """The actual transcription work for cmd_transcribe(), factored out so
+    the stdin-tempfile cleanup in cmd_transcribe() applies to every return
+    path (including exceptions) via a single try/finally."""
     from .stt import catalog as stt_catalog
     from .stt.formatters import format_json, format_srt, format_txt, format_vtt
 
@@ -1021,7 +1059,9 @@ examples:
         "transcribe", help="transcribe an audio file",
         description="Transcribe an audio file, choosing an engine/model from the catalog.",
     )
-    p_transcribe.add_argument("file", help="path to audio file")
+    p_transcribe.add_argument(
+        "file", help="path to audio file, or '-' to read audio from stdin"
+    )
     p_transcribe.add_argument(
         "--engine", default=None, choices=engine_choices,
         help="STT engine (default: the catalog's recommendation for --language)",
