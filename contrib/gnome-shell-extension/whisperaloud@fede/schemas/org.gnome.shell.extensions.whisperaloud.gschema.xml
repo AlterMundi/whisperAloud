@@ -4,7 +4,7 @@
     <key name="toggle-recording" type="as">
       <default><![CDATA[['<Super><Alt>r']]]></default>
       <summary>Fallback toggle recording shortcut</summary>
-      <description>Keybinding to toggle recording. Only grabbed while the WhisperAloud daemon is running and reports that it has no global hotkey of its own (XDG GlobalShortcuts portal or keybinder), so it never fires together with the daemon's shortcut.</description>
+      <description>Keybinding to toggle recording. Only grabbed while the WhisperAloud daemon is running and reports no global-hotkey backend at all (neither the XDG GlobalShortcuts portal nor keybinder), so it never fires together with the daemon's shortcut.</description>
     </key>
   </schema>
 </schemalist>

@@ -2,3 +2,8 @@
 .whisperaloud-recording {
     color: #e01b24;
 }
+
+/* Model ready but no global hotkey: not "all OK" yet. */
+.whisperaloud-degraded {
+    color: #e5a50a;
+}

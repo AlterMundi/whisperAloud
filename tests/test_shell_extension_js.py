@@ -92,12 +92,42 @@ check('no fallback while daemon has a hotkey',
       s.needsFallbackKeybinding({running: true, status: st({})}), false);
 check('no fallback when unknown',
       s.needsFallbackKeybinding({running: true, status: st({hotkey_trigger: ''})}), false);
+check('no fallback while the portal binding is pending/declined (1.7.0)',
+      s.needsFallbackKeybinding({running: true, status: st({hotkey_bound: false, hotkey_trigger: ''})}), false);
 check('no fallback when not running',
       s.needsFallbackKeybinding({running: false, status: null}), false);
 
+// "All OK" (1.7.0): model ready AND hotkey_bound.
+check('all OK', s.deriveState({running: true, status: st({hotkey_bound: true})}), S.READY);
+check('ready but hotkey not bound',
+      s.deriveState({running: true, status: st({hotkey_bound: false})}), S.READY_NO_HOTKEY);
+check('ready, no backend, fallback grabbed',
+      s.deriveState({running: true, fallbackHotkey: true,
+                     status: st({hotkey_backend: 'none', hotkey_trigger: '', hotkey_bound: false})}), S.READY);
+check('loading wins over hotkey',
+      s.deriveState({running: true, status: st({model_state: 'loading', hotkey_bound: false})}), S.LOADING);
+check('degraded style', s.STYLE_CLASSES[S.READY_NO_HOTKEY], 'whisperaloud-degraded');
+check('recording style', s.STYLE_CLASSES[S.RECORDING], 'whisperaloud-recording');
+
+check('recheck while portal pending',
+      s.shouldRecheckHotkey({running: true, status: st({hotkey_bound: false, hotkey_trigger: ''})}), true);
+check('no recheck once bound', s.shouldRecheckHotkey({running: true, status: st({hotkey_bound: true})}), false);
+check('no recheck without backend',
+      s.shouldRecheckHotkey({running: true, status: st({hotkey_backend: 'none', hotkey_bound: false})}), false);
+check('no recheck when not running', s.shouldRecheckHotkey({running: false, status: null}), false);
+check('no recheck for pre-1.7 portal pending (unknown)',
+      s.shouldRecheckHotkey({running: true, status: st({hotkey_trigger: ''})}), false);
+check('recheck delays bounded', s.HOTKEY_RECHECK_DELAYS_S.reduce((a, b) => a + b, 0) <= 300, true);
+
 check('label ready', s.statusLabel(S.READY, st({})), 'Ready');
-check('label ready no hotkey',
-      s.statusLabel(S.READY, st({hotkey_backend: 'none', hotkey_trigger: ''})), 'Ready (no global hotkey)');
+check('label ready no hotkey', s.statusLabel(S.READY_NO_HOTKEY, st({})), 'Ready, but no global hotkey');
+check('hotkey label fallback', s.hotkeyLabel(st({hotkey_backend: 'none'}), '<Super><Alt>r'),
+      'Hotkey: <Super><Alt>r (via top-bar extension)');
+check('hotkey label bound false wins over trigger',
+      s.hotkeyLabel(st({hotkey_bound: false})), 'Hotkey: not registered');
+check('autostart on', s.autostartLabel(st({autostart: true})), 'Starts at login');
+check('autostart off', s.autostartLabel(st({autostart: false})), 'Does not start at login');
+check('autostart unknown', s.autostartLabel(st({})), '');
 check('label downloading', s.statusLabel(S.LOADING, st({model_state: 'downloading'})), 'Downloading model…');
 check('label error detail', s.statusLabel(S.ERROR, st({model_error: 'boom'})), 'Error: boom');
 check('label error no status', s.statusLabel(S.ERROR, null), 'Error');

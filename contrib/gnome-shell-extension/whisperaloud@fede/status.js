@@ -7,13 +7,17 @@
 // `status` is the daemon's GetStatus() dict, unpacked to plain JS values
 // (see docs/dbus-api.md), later patched in place by the StatusChanged and
 // ModelStateChanged signals. Every key is read defensively: older daemons
-// lack model_state/hotkey_trigger, and hotkey_bound may not exist yet.
+// lack model_state (< 1.6.0) and hotkey_bound/autostart (< 1.7.0).
+//
+// "All OK" (API 1.7.0): model_state == "ready" and hotkey_bound.
 
 export const IndicatorState = Object.freeze({
     NOT_RUNNING: 'not-running',
     STARTING: 'starting',
     LOADING: 'loading',
     READY: 'ready',
+    // Model ready, but no working global hotkey (yet).
+    READY_NO_HOTKEY: 'ready-no-hotkey',
     RECORDING: 'recording',
     TRANSCRIBING: 'transcribing',
     ERROR: 'error',
@@ -25,14 +29,50 @@ export const ICONS = Object.freeze({
     'starting': 'content-loading-symbolic',
     'loading': 'content-loading-symbolic',
     'ready': 'audio-input-microphone-symbolic',
+    'ready-no-hotkey': 'audio-input-microphone-symbolic',
     'recording': 'media-record-symbolic',
     'transcribing': 'system-run-symbolic',
     'error': 'dialog-error-symbolic',
     'model-missing': 'dialog-warning-symbolic',
 });
 
+// Extra style class per state (stylesheet.css), '' for none.
+export const STYLE_CLASSES = Object.freeze({
+    'recording': 'whisperaloud-recording',
+    'ready-no-hotkey': 'whisperaloud-degraded',
+});
+
+// hotkey_bound has no change signal (docs/dbus-api.md): while the daemon
+// says "not bound yet" (e.g. GNOME's shortcut consent dialog is still open)
+// the extension re-reads GetStatus at these delays, then gives up until the
+// next ConfigChanged or daemon restart (a return to idle still re-reads
+// GetStatus once). Bounded on purpose: this is not a presence poll.
+export const HOTKEY_RECHECK_DELAYS_S = Object.freeze([2, 5, 10, 20, 40, 60]);
+
 function str(value) {
     return typeof value === 'string' ? value : '';
+}
+
+/**
+ * Global-hotkey summary from GetStatus.
+ *
+ * bound: true / false / null (unknown). Uses the explicit `hotkey_bound`
+ * key (1.7.0) when present; otherwise only backend 'none' counts as
+ * "definitely not bound" and a bound trigger as "bound".
+ */
+export function hotkeyInfo(status) {
+    if (!status)
+        return {bound: null, trigger: '', backend: ''};
+    const backend = str(status.hotkey_backend);
+    const trigger = str(status.hotkey_trigger);
+    let bound = null;
+    if (typeof status.hotkey_bound === 'boolean')
+        bound = status.hotkey_bound;
+    else if (backend === 'none')
+        bound = false;
+    else if (trigger)
+        bound = true;
+    return {bound, trigger, backend};
 }
 
 /**
@@ -42,9 +82,11 @@ function str(value) {
  * @param {boolean} args.running - the daemon's bus name has an owner
  * @param {boolean} [args.starting] - we asked D-Bus to activate the daemon
  * @param {object|null} args.status - GetStatus() dict, null until it answers
+ * @param {boolean} [args.fallbackHotkey] - the extension's own fallback
+ *   keybinding is grabbed (so dictation by hotkey works anyway)
  * @returns {string} one of IndicatorState
  */
-export function deriveState({running, starting = false, status}) {
+export function deriveState({running, starting = false, status, fallbackHotkey = false}) {
     if (!running)
         return starting ? IndicatorState.STARTING : IndicatorState.NOT_RUNNING;
     if (!status)
@@ -73,41 +115,30 @@ export function deriveState({running, starting = false, status}) {
         return IndicatorState.LOADING;
     default:
         // 'ready', or a pre-1.6.0 daemon without model_state.
+        if (hotkeyInfo(status).bound === false && !fallbackHotkey)
+            return IndicatorState.READY_NO_HOTKEY;
         return IndicatorState.READY;
     }
 }
 
 /**
- * Global-hotkey summary from GetStatus.
+ * Whether the extension should grab its own fallback keybinding.
  *
- * bound: true / false / null (unknown). Prefers the explicit `hotkey_bound`
- * key when the daemon provides it; otherwise only backend 'none' counts as
- * "definitely not bound" (a portal session may still be pending).
- */
-export function hotkeyInfo(status) {
-    if (!status)
-        return {bound: null, trigger: '', backend: ''};
-    const backend = str(status.hotkey_backend);
-    const trigger = str(status.hotkey_trigger);
-    let bound = null;
-    if (typeof status.hotkey_bound === 'boolean')
-        bound = status.hotkey_bound;
-    else if (backend === 'none')
-        bound = false;
-    else if (trigger)
-        bound = true;
-    return {bound, trigger, backend};
-}
-
-/**
- * Whether the extension should register its own fallback keybinding.
- *
- * Only when the daemon is running and reports that it has no global hotkey
- * of its own: grabbing the same accelerator as the daemon's portal shortcut
- * could fire both and toggle twice.
+ * Only when the running daemon has no hotkey backend at all. NOT when the
+ * portal binding is merely pending or was declined (hotkey_bound false with
+ * a backend): the portal may still bind the same accelerator, and both
+ * firing would toggle twice.
  */
 export function needsFallbackKeybinding({running, status}) {
-    return Boolean(running && status) && hotkeyInfo(status).bound === false;
+    return Boolean(running && status) && hotkeyInfo(status).backend === 'none';
+}
+
+/** Whether hotkey_bound may still flip to true without any signal. */
+export function shouldRecheckHotkey({running, status}) {
+    if (!running || !status)
+        return false;
+    const {bound, backend} = hotkeyInfo(status);
+    return bound === false && backend !== 'none' && backend !== '';
 }
 
 /** One-line status for the panel menu header. */
@@ -121,8 +152,9 @@ export function statusLabel(state, status) {
         return status && status.model_state === 'downloading'
             ? 'Downloading model…' : 'Loading model…';
     case IndicatorState.READY:
-        return hotkeyInfo(status).bound === false
-            ? 'Ready (no global hotkey)' : 'Ready';
+        return 'Ready';
+    case IndicatorState.READY_NO_HOTKEY:
+        return 'Ready, but no global hotkey';
     case IndicatorState.RECORDING:
         return 'Recording…';
     case IndicatorState.TRANSCRIBING:
@@ -144,18 +176,33 @@ export function modelLabel(status) {
     return model ? `Model: ${model}` : '';
 }
 
-/** "Hotkey: …" menu line, or '' when unknown. */
-export function hotkeyLabel(status) {
+/**
+ * "Hotkey: …" menu line, or '' when unknown.
+ *
+ * @param {object|null} status
+ * @param {string} [fallbackAccel] - accelerator of the extension's fallback
+ *   keybinding while it is grabbed
+ */
+export function hotkeyLabel(status, fallbackAccel = '') {
     if (!status)
         return '';
+    if (fallbackAccel)
+        return `Hotkey: ${fallbackAccel} (via top-bar extension)`;
     const {bound, trigger} = hotkeyInfo(status);
-    if (trigger)
-        return `Hotkey: ${trigger}`;
     if (bound === false)
         return 'Hotkey: not registered';
+    if (trigger)
+        return `Hotkey: ${trigger}`;
     if (bound === true)
         return 'Hotkey: registered';
     return '';
+}
+
+/** "Starts at login" menu line (1.7.0 `autostart`), '' when unknown. */
+export function autostartLabel(status) {
+    if (!status || typeof status.autostart !== 'boolean')
+        return '';
+    return status.autostart ? 'Starts at login' : 'Does not start at login';
 }
 
 /**

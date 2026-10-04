@@ -9,9 +9,10 @@
 //     backend) and org.fede.whisperaloud.ShellExtension (version info, used
 //     by the app's Settings) under the bus name EXT_BUS_NAME.
 //
-// Event-driven only: the daemon's presence is tracked with a bus-name watch
-// and its state with StatusChanged / ModelStateChanged / ConfigChanged. No
-// polling timers.
+// Event-driven: the daemon's presence is tracked with a bus-name watch and
+// its state with StatusChanged / ModelStateChanged / ConfigChanged. The one
+// timer is a short, bounded re-read of GetStatus while hotkey_bound (which
+// has no change signal) is still false after the daemon starts.
 
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
@@ -27,8 +28,9 @@ import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {
-    ICONS, IndicatorState, applyModelState, deriveState, hotkeyLabel, modelLabel,
-    needsFallbackKeybinding, statusLabel,
+    HOTKEY_RECHECK_DELAYS_S, ICONS, IndicatorState, STYLE_CLASSES, applyModelState,
+    autostartLabel, deriveState, hotkeyLabel, modelLabel, needsFallbackKeybinding,
+    shouldRecheckHotkey, statusLabel,
 } from './status.js';
 
 // The daemon (see docs/dbus-api.md).
@@ -57,6 +59,8 @@ class WhisperAloudIndicator extends PanelMenu.Button {
         this._status = null;
         this._generation = 0;
         this._fallbackBound = false;
+        this._recheckId = 0;
+        this._recheckIndex = 0;
         this._cancellable = new Gio.Cancellable();
 
         this._icon = new St.Icon({
@@ -90,6 +94,7 @@ class WhisperAloudIndicator extends PanelMenu.Button {
         this._running = true;
         this._status = null;
         this._generation++;
+        this._recheckIndex = 0;
         this._refreshUi();
         this._fetchStatus();
     }
@@ -98,6 +103,7 @@ class WhisperAloudIndicator extends PanelMenu.Button {
         this._running = false;
         this._status = null;
         this._generation++;
+        this._cancelHotkeyRecheck();
         this._refreshUi();
     }
 
@@ -115,6 +121,8 @@ class WhisperAloudIndicator extends PanelMenu.Button {
             applyModelState(this._status, state, detail);
             this._refreshUi();
         } else if (signal === 'ConfigChanged') {
+            // A hotkey change re-registers: allow a fresh round of re-checks.
+            this._recheckIndex = 0;
             this._fetchStatus();
         }
     }
@@ -147,6 +155,7 @@ class WhisperAloudIndicator extends PanelMenu.Button {
             // (a{sv}) -> plain object, nested variants included.
             [this._status] = reply.recursiveUnpack();
             this._refreshUi();
+            this._scheduleHotkeyRecheck();
         });
     }
 
@@ -183,6 +192,8 @@ class WhisperAloudIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._modelItem);
         this._hotkeyItem = new PopupMenu.PopupMenuItem('', {reactive: false});
         this.menu.addMenuItem(this._hotkeyItem);
+        this._autostartItem = new PopupMenu.PopupMenuItem('', {reactive: false});
+        this.menu.addMenuItem(this._autostartItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -200,30 +211,69 @@ class WhisperAloudIndicator extends PanelMenu.Button {
     }
 
     _refreshUi() {
+        // Fallback keybinding first: whether it is grabbed changes the state.
+        this._syncFallbackKeybinding();
+
         const state = deriveState({
             running: this._running, starting: this._starting, status: this._status,
+            fallbackHotkey: this._fallbackBound,
         });
         const label = statusLabel(state, this._status);
 
         this._icon.icon_name = ICONS[state] ?? ICONS[IndicatorState.READY];
-        if (state === IndicatorState.RECORDING)
-            this._icon.add_style_class_name('whisperaloud-recording');
-        else
-            this._icon.remove_style_class_name('whisperaloud-recording');
+        for (const cls of Object.values(STYLE_CLASSES))
+            this._icon.remove_style_class_name(cls);
+        if (STYLE_CLASSES[state])
+            this._icon.add_style_class_name(STYLE_CLASSES[state]);
         this.accessible_name = `WhisperAloud: ${label}`;
 
         this._statusItem.label.text = label;
-        const model = modelLabel(this._status);
-        this._modelItem.label.text = model;
-        this._modelItem.visible = Boolean(model);
-        const hotkey = hotkeyLabel(this._status);
-        this._hotkeyItem.label.text = hotkey;
-        this._hotkeyItem.visible = Boolean(hotkey);
+        this._setLine(this._modelItem, modelLabel(this._status));
+        this._setLine(this._hotkeyItem, hotkeyLabel(this._status, this._fallbackAccel()));
+        this._setLine(this._autostartItem, autostartLabel(this._status));
 
         this._toggleItem.visible = this._running;
         this._startItem.visible = !this._running && !this._starting;
+    }
 
-        this._syncFallbackKeybinding();
+    _setLine(item, text) {
+        item.label.text = text;
+        item.visible = Boolean(text);
+    }
+
+    _fallbackAccel() {
+        if (!this._fallbackBound)
+            return '';
+        return this._settings.get_strv(KEYBINDING)[0] ?? '';
+    }
+
+    // ── Hotkey re-check ────────────────────────────────────────────────────
+    //
+    // hotkey_bound has no change signal (docs/dbus-api.md). While the daemon
+    // reports "not bound yet" with a backend (e.g. GNOME's shortcut dialog
+    // is still open after login), re-read GetStatus a few times with
+    // growing delays, then stop. Not a poll for the daemon's presence, which
+    // is the bus-name watch above.
+
+    _scheduleHotkeyRecheck() {
+        this._cancelHotkeyRecheck();
+        if (!shouldRecheckHotkey({running: this._running, status: this._status}))
+            return;
+        if (this._recheckIndex >= HOTKEY_RECHECK_DELAYS_S.length)
+            return;
+        const delay = HOTKEY_RECHECK_DELAYS_S[this._recheckIndex++];
+        this._recheckId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, delay, () => {
+            this._recheckId = 0;
+            this._fetchStatus();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _cancelHotkeyRecheck() {
+        if (this._recheckId) {
+            GLib.source_remove(this._recheckId);
+            this._recheckId = 0;
+        }
     }
 
     // ── Fallback keybinding ────────────────────────────────────────────────
@@ -252,6 +302,7 @@ class WhisperAloudIndicator extends PanelMenu.Button {
 
     destroy() {
         this._cancellable.cancel();
+        this._cancelHotkeyRecheck();
         if (this._watchId) {
             Gio.bus_unwatch_name(this._watchId);
             this._watchId = 0;
