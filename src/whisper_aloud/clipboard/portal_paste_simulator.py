@@ -182,6 +182,27 @@ class PortalPasteSimulator:
         # duplicating, the first interactive request in flight.
         self._session_pending = False
         self._closed = False
+        # Field bug (0.3.0 Flatpak, first auto-paste of every daemon run
+        # lost): session setup used to start lazily on the first
+        # simulate_paste() call only, so that first paste always fell back
+        # to clipboard-only even when a restore_token was already on disk
+        # from a previous run (no dialog needed, setup just hadn't had time
+        # to finish yet). `prewarm()` lets the daemon start setup at
+        # startup instead, but only non-interactively (restore_token
+        # present). `_prewarm_active` is True only while a setup chain
+        # started by `prewarm()` is in flight -- it governs whether a
+        # concurrent simulate_paste() call gets queued (see
+        # `simulate_paste`/`_finish_session_setup`) instead of the usual
+        # immediate clipboard-only fallback, which still applies to a
+        # setup chain started interactively (no token) by simulate_paste()
+        # itself.
+        self._prewarm_active = False
+        # The single paste queued while a prewarm setup is in flight (its
+        # `paste_shortcut` argument), delivered from the setup-completion
+        # callback once the session is ready, or dropped with a WARNING if
+        # setup fails. Only one slot: a prewarm is expected to finish well
+        # before a second paste could ever be requested.
+        self._queued_paste_shortcut: Optional[str] = None
 
     @staticmethod
     def _new_token(prefix: str) -> str:
@@ -324,6 +345,36 @@ class PortalPasteSimulator:
 
     # ─── Session setup state machine ───────────────────────────────────────
 
+    def prewarm(self) -> None:
+        """Start RemoteDesktop session setup now, non-interactively only.
+
+        Intended to be called once, right after the daemon's main loop
+        starts (service/daemon.py), so that session setup has already
+        completed -- or is at least already in flight -- by the time the
+        first transcription finishes and triggers an auto-paste, instead
+        of only starting on that first paste (the field bug this fixes:
+        the very first auto-paste of every daemon run was lost to
+        clipboard-only fallback, even though a restore_token from a prior
+        consent was sitting on disk the whole time).
+
+        A no-op unless a persisted restore_token exists: without one, a
+        consent dialog is expected, and popping it unprompted at daemon
+        startup -- before the user ever asked to paste anything -- would
+        be a worse experience than today's lazy-start-on-first-paste
+        behavior, which this function leaves untouched in that case. Also
+        a no-op if a session already exists, already permanently failed,
+        or setup is already in flight (idempotent, like
+        `_start_session_setup_if_needed` itself).
+        """
+        if self._session_path is not None or self._session_failed or self._session_pending:
+            return
+        if not self._load_restore_token():
+            logger.debug("No persisted RemoteDesktop restore_token; skipping paste prewarm")
+            return
+        logger.info("Prewarming RemoteDesktop portal session (restore_token present)")
+        self._prewarm_active = True
+        self._start_session_setup_if_needed()
+
     def _start_session_setup_if_needed(self) -> None:
         """Kick off CreateSession -> SelectDevices -> Start, async, unless
         a session already exists, one permanently failed, or one is already
@@ -442,10 +493,32 @@ class PortalPasteSimulator:
             return
         if restore_token:
             self._save_restore_token(restore_token)
+        # Note: per the RemoteDesktop portal spec, a restore_token is
+        # invalidated after a single use -- "To restore the same session
+        # again, use the new restore token sent in response to starting
+        # this session." A *normal, fully silent* restore therefore also
+        # returns a brand-new token, different from the one just sent to
+        # SelectDevices. That means "Start's token differs from the one we
+        # sent" is NOT a usable signal that a consent dialog was shown --
+        # it's true on every successful restore, silent or not. There is
+        # no reliable way from these D-Bus responses alone to tell a
+        # silent restore-token reuse apart from a re-prompted consent
+        # dialog (the portal gives no such signal). This is a deliberately
+        # accepted edge case: if `prewarm()`'s restore_token turns out to
+        # be stale and the portal pops a dialog anyway, a paste queued
+        # during that setup still fires as soon as setup completes, once
+        # the user has answered the dialog -- not ideal (it may land after
+        # the user's attention moved), but preferable to silently dropping
+        # a paste on every normal, successful prewarm, which comparing
+        # tokens would do.
         self._finish_session_setup(True)
 
     def _finish_session_setup(self, ok: bool) -> None:
         self._session_pending = False
+        was_prewarm = self._prewarm_active
+        self._prewarm_active = False
+        queued_shortcut = self._queued_paste_shortcut
+        self._queued_paste_shortcut = None
         if ok:
             # Only now -- after Start's Response actually arrived -- is the
             # session ready for NotifyKeyboardKeysym. See __init__'s comment
@@ -453,10 +526,17 @@ class PortalPasteSimulator:
             # happen any earlier (e.g. right after CreateSession).
             self._session_path = self._session_handle
             logger.info("RemoteDesktop portal session ready for paste")
+            if was_prewarm and queued_shortcut is not None:
+                logger.info("Delivering paste queued during RemoteDesktop prewarm")
+                self.simulate_paste(queued_shortcut)
         else:
             self._session_failed = True
             self._session_handle = None
             self._session_path = None
+            if was_prewarm and queued_shortcut is not None:
+                logger.warning(
+                    "Dropping paste queued during RemoteDesktop prewarm: session setup failed"
+                )
             self._emit_fallback("RemoteDesktop portal session setup failed")
 
     def _notify_keysym(self, keysym: int, state: int) -> None:
@@ -511,6 +591,22 @@ class PortalPasteSimulator:
         if self._session_path is None:
             if self._session_failed:
                 self._emit_fallback("RemoteDesktop session previously failed")
+            elif self._session_pending and self._prewarm_active:
+                # A non-interactive prewarm setup (restore_token present,
+                # kicked off by `prewarm()` at daemon startup) is already
+                # in flight -- it's expected to finish shortly without any
+                # dialog, so queue this one paste instead of giving up on
+                # it; it's delivered from `_finish_session_setup` once the
+                # session is ready (or dropped with a WARNING if setup
+                # fails). Deliberately NOT done for an *interactive* setup
+                # (no token) -- there the first paste stays clipboard-only,
+                # same as before this fix, since we can't know how long a
+                # consent dialog the user hasn't answered yet will take.
+                self._queued_paste_shortcut = paste_shortcut
+                logger.info(
+                    "RemoteDesktop prewarm still in flight; queuing this paste for "
+                    "delivery once the session is ready"
+                )
             else:
                 self._start_session_setup_if_needed()
                 self._emit_fallback(

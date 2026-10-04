@@ -585,6 +585,28 @@ class WhisperAloudService:
                 except Exception as e:
                     logger.warning(f"WHISPER_ALOUD_TEST_MODE: failed to hook bus-closed shutdown: {e}")
 
+            # Field bug fix (0.3.0 Flatpak, first auto-paste of every daemon
+            # run lost): kick off RemoteDesktop portal session setup now,
+            # once the main loop is actually running, instead of only ever
+            # starting it lazily on the first paste request. This only ever
+            # does anything when auto-paste is enabled (otherwise nothing
+            # would ever call simulate_paste() anyway) and a restore_token
+            # from a previous consent is already on disk (see
+            # clipboard.paste_selection.prewarm_portal_paste_backend /
+            # PortalPasteSimulator.prewarm() for why a missing token keeps
+            # setup lazy -- it's exactly when the consent dialog is
+            # expected, and popping it unprompted at startup would be
+            # worse). Skipped under _test_mode: tests exercise the portal
+            # paste path directly against their own fake/mocked portal,
+            # never through this daemon-startup hook.
+            if (
+                not self._test_mode
+                and self.config.clipboard.auto_copy
+                and self.config.clipboard.auto_paste
+                and self.clipboard_manager
+            ):
+                GLib.idle_add(self._prewarm_paste_backend)
+
             loop.run()
 
         except Exception as e:
@@ -594,6 +616,17 @@ class WhisperAloudService:
             raise
         finally:
             self._cleanup()
+
+    def _prewarm_paste_backend(self) -> bool:
+        """GLib.idle_add callback (see run()): best-effort, never raises,
+        always removes itself (runs at most once)."""
+        try:
+            from ..clipboard.paste_selection import prewarm_portal_paste_backend
+
+            prewarm_portal_paste_backend()
+        except Exception:
+            logger.debug("Paste backend prewarm failed", exc_info=True)
+        return GLib.SOURCE_REMOVE
 
     # ─── D-Bus Properties ───────────────────────────────────────────────
 

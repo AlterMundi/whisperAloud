@@ -526,6 +526,209 @@ class TestResponseNeverArrives:
             assert sim._session_path is None
 
 
+class TestPrewarm:
+    """Field bug fix: the first auto-paste of every daemon run was lost to
+    clipboard-only fallback because session setup only ever started
+    lazily, on the first simulate_paste() call. `prewarm()` lets the
+    daemon kick off setup at startup instead -- but only when a
+    restore_token is already on disk, so it never pops an unprompted
+    consent dialog."""
+
+    def test_prewarm_without_token_does_nothing(self):
+        harness = _FakeHarness()
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: None, restore_token_saver=lambda t: None
+            )
+            sim.prewarm()
+
+        assert harness.call_log == []
+        assert sim._session_pending is False
+        assert sim._prewarm_active is False
+
+    def test_prewarm_with_token_starts_setup_non_interactively(self):
+        harness = _FakeHarness()
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: "existing-token", restore_token_saver=lambda t: None
+            )
+            sim.prewarm()
+
+            assert harness.call_log == ["Register", "CreateSession"]
+            assert sim._session_pending is True
+            assert sim._prewarm_active is True
+
+    def test_prewarm_is_idempotent(self):
+        harness = _FakeHarness()
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: "existing-token", restore_token_saver=lambda t: None
+            )
+            sim.prewarm()
+            sim.prewarm()
+
+        assert harness.call_log.count("CreateSession") == 1
+
+    def test_prewarm_completes_session_ready_with_no_paste_requested(self):
+        harness = _FakeHarness(start_restore_token="existing-token")
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: "existing-token", restore_token_saver=lambda t: None
+            )
+            sim.prewarm()
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            harness.respond("SelectDevices", 0, {})
+            harness.respond("Start", 0, {"restore_token": GLib.Variant("s", "existing-token")})
+
+        assert sim._session_path == "/session/1"
+        assert sim._prewarm_active is False
+
+    def test_paste_requested_during_prewarm_is_queued_and_delivered_on_ready(self):
+        harness = _FakeHarness(start_restore_token="existing-token")
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: "existing-token", restore_token_saver=lambda t: None
+            )
+            sim.prewarm()
+            assert harness.call_log == ["Register", "CreateSession"]
+
+            # A paste comes in while non-interactive setup is still in
+            # flight -- must be queued, not dropped, and must not start a
+            # second (duplicate) setup chain.
+            assert sim.simulate_paste("ctrl+v") is False
+            assert harness.call_log.count("CreateSession") == 1
+            assert sim._queued_paste_shortcut == "ctrl+v"
+
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            harness.respond("SelectDevices", 0, {})
+            harness.respond("Start", 0, {"restore_token": GLib.Variant("s", "existing-token")})
+
+            notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
+            assert notify_calls == [
+                ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_PRESSED),
+                ("NotifyKeyboardKeysym", XK_v, KEY_STATE_PRESSED),
+                ("NotifyKeyboardKeysym", XK_v, KEY_STATE_RELEASED),
+                ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_RELEASED),
+            ]
+            assert sim._queued_paste_shortcut is None
+
+    def test_queued_paste_is_dropped_with_warning_when_setup_fails(self, caplog):
+        harness = _FakeHarness(fail_at="SelectDevices")
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: "existing-token", restore_token_saver=lambda t: None
+            )
+            sim.prewarm()
+            assert sim.simulate_paste("ctrl+v") is False  # queued while CreateSession pending
+            assert sim._queued_paste_shortcut == "ctrl+v"
+
+            import logging
+
+            # Responding to CreateSession cascades synchronously into
+            # SelectDevices, which `fail_at` makes fail right away (same
+            # synchronous-failure behavior as TestFailureFallback above).
+            with caplog.at_level(logging.WARNING):
+                harness.respond(
+                    "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+                )
+
+        assert sim._session_failed is True
+        assert sim._queued_paste_shortcut is None
+        assert any(
+            "Dropping paste queued during RemoteDesktop prewarm" in r.message
+            for r in caplog.records
+        )
+        assert not any(isinstance(c, tuple) for c in harness.call_log)
+
+    def test_second_concurrent_paste_during_prewarm_does_not_requeue(self):
+        """Only one slot: a second paste while the first is already queued
+        simply replaces it rather than starting anything new."""
+        harness = _FakeHarness(start_restore_token="existing-token")
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: "existing-token", restore_token_saver=lambda t: None
+            )
+            sim.prewarm()
+            assert sim.simulate_paste("ctrl+v") is False
+            assert sim.simulate_paste("ctrl+shift+v") is False
+            assert sim._queued_paste_shortcut == "ctrl+shift+v"
+            assert harness.call_log.count("CreateSession") == 1
+
+    def test_interactive_setup_is_not_queued(self):
+        """No restore_token -> simulate_paste()'s own (interactive) setup
+        path is unchanged: a second paste while it's pending still falls
+        back immediately instead of being queued."""
+        harness = _FakeHarness()
+        with harness as sim:
+            assert sim.simulate_paste("ctrl+v") is False  # starts interactive setup
+            assert sim.simulate_paste("ctrl+v") is False  # still pending
+            assert sim._queued_paste_shortcut is None
+            assert harness.call_log.count("CreateSession") == 1
+
+    def test_new_restore_token_from_start_still_delivers_queued_paste(self):
+        """Per the RemoteDesktop portal spec, a restore_token is
+        invalidated after one use -- Start always returns a *new* token on
+        a normal, fully silent restore, not just when a dialog was shown.
+        So a prewarm whose Start response carries a different token than
+        the one sent to SelectDevices is not evidence of user interaction
+        -- it's what every successful restore looks like. The queued paste
+        must still be delivered in this (normal) case."""
+        harness = _FakeHarness(start_restore_token="brand-new-token")
+        with (
+            patch.object(Gio, "bus_get_sync", return_value=harness.mock_bus),
+            patch.object(Gio.DBusProxy, "new_sync", return_value=harness.mock_proxy),
+        ):
+            saved = {}
+            sim = PortalPasteSimulator(
+                restore_token_loader=lambda: "stale-token",
+                restore_token_saver=lambda t: saved.setdefault("token", t),
+            )
+            sim.prewarm()
+            assert sim.simulate_paste("ctrl+v") is False
+
+            harness.respond(
+                "CreateSession", 0, {"session_handle": GLib.Variant("o", "/session/1")}
+            )
+            harness.respond("SelectDevices", 0, {})
+            harness.respond("Start", 0, {"restore_token": GLib.Variant("s", "brand-new-token")})
+
+        assert sim._session_path == "/session/1"
+        assert sim._queued_paste_shortcut is None
+        assert saved["token"] == "brand-new-token"
+        notify_calls = [c for c in harness.call_log if isinstance(c, tuple)]
+        assert notify_calls == [
+            ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_PRESSED),
+            ("NotifyKeyboardKeysym", XK_v, KEY_STATE_PRESSED),
+            ("NotifyKeyboardKeysym", XK_v, KEY_STATE_RELEASED),
+            ("NotifyKeyboardKeysym", XK_CONTROL_L, KEY_STATE_RELEASED),
+        ]
+
+
 class TestPortalSessionClose:
     """Sessions must be closed via org.freedesktop.portal.Session.Close() on
     the session's own path, not a nonexistent RemoteDesktop.EndSession."""

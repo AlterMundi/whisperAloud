@@ -36,6 +36,24 @@ def reset_portal_simulator_for_tests() -> None:
     _portal_simulator = None
 
 
+def prewarm_portal_paste_backend() -> None:
+    """Kick off RemoteDesktop session setup now, if (and only if) the
+    portal paste backend is the one that will actually be used (Flatpak
+    sandbox) and a persisted restore_token already exists, so setup
+    completes without popping a consent dialog.
+
+    Called once by service/daemon.py's run(), via GLib.idle_add right
+    after the main loop starts (field bug: the first auto-paste of every
+    daemon run was lost to clipboard-only fallback because session setup
+    previously only ever started lazily on that first paste). Safe to call
+    unconditionally -- a no-op outside the sandbox, or when no
+    restore_token is on disk yet (see PortalPasteSimulator.prewarm()).
+    """
+    if not is_flatpak_sandbox():
+        return
+    _get_portal_simulator().prewarm()
+
+
 def close_portal_simulator() -> None:
     """Close the cached PortalPasteSimulator's RemoteDesktop session, if one
     was ever created, and drop the singleton. Called on daemon shutdown

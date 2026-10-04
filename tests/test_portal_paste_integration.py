@@ -151,6 +151,61 @@ class TestPortalPasteIntegrationOnPrivateBus:
             proc.terminate()
             proc.wait(timeout=5)
 
+    def test_prewarm_with_existing_token_delivers_queued_paste(self, tmp_path):
+        """Field bug fix: with a restore_token already on disk (as if from a
+        prior daemon run), `prewarm()` should get the session ready without
+        any simulate_paste() call ever starting it, and a paste requested
+        while that non-interactive setup is still in flight must be
+        delivered once it completes -- not lost to clipboard-only fallback,
+        which was the original bug (first auto-paste of every daemon run
+        lost)."""
+        bus_addr = private_bus_address()
+        fake_portal_script = tmp_path / "fake_remote_desktop_portal.py"
+        fake_portal_script.write_text(_FAKE_PORTAL_SERVICE_SRC)
+
+        env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=bus_addr)
+        proc = subprocess.Popen([sys.executable, str(fake_portal_script)], env=env)
+        try:
+            time.sleep(1.0)  # let the fake service claim the bus name
+
+            data_home = tmp_path / "xdg-data-home"
+            token_dir = data_home / "whisper_aloud"
+            token_dir.mkdir(parents=True)
+            (token_dir / "portal_restore_token").write_text("fake-restore-token-abc123")
+
+            with patch.dict(
+                os.environ,
+                {"DBUS_SESSION_BUS_ADDRESS": bus_addr, "XDG_DATA_HOME": str(data_home)},
+            ):
+                sim = PortalPasteSimulator()
+                sim.prewarm()  # non-interactive: a restore_token is already on disk
+                assert sim._prewarm_active is True
+
+                # A paste request arrives before setup has finished -- must
+                # be queued, not dropped to clipboard-only.
+                assert sim.simulate_paste("ctrl+v") is False
+                assert sim._queued_paste_shortcut == "ctrl+v"
+
+                _pump_until(lambda: sim._session_path is not None)
+
+                # The queued paste must have been delivered automatically,
+                # with no further simulate_paste() call from this test.
+                assert sim._queued_paste_shortcut is None
+
+                bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+                notify_calls = _control_call(
+                    bus, "NotifyCalls", None, GLib.VariantType("(a(ii))")
+                ).unpack()[0]
+                assert notify_calls == [
+                    (XK_CONTROL_L, KEY_STATE_PRESSED),
+                    (XK_v, KEY_STATE_PRESSED),
+                    (XK_v, KEY_STATE_RELEASED),
+                    (XK_CONTROL_L, KEY_STATE_RELEASED),
+                ]
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
 
 _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
     """
@@ -167,7 +222,14 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
     session_count = [0]
     notify_calls = []
     last_select_devices_restore_token = [""]
-    issued_restore_token = "fake-restore-token-abc123"
+    # Real RemoteDesktop portals invalidate a restore_token after one use
+    # ("To restore the same session again, use the new restore token sent
+    # in response to starting this session") -- Start returns a brand-new
+    # token on every call, silent restore or not. This fake mirrors that
+    # instead of returning the same token every time, so tests can't
+    # accidentally rely on "Start's token == the one just sent" as a
+    # signal of anything.
+    start_call_count = [0]
 
     INTROSPECTION = \"\"\"
     <node>
@@ -263,6 +325,8 @@ _FAKE_PORTAL_SERVICE_SRC = textwrap.dedent(
             _session, _parent, options = args
             handle_token = options.get("handle_token")
             invocation.return_value(GLib.Variant("(o)", ("/request/start",)))
+            start_call_count[0] += 1
+            issued_restore_token = f"fake-restore-token-{start_call_count[0]}"
             results = {"restore_token": GLib.Variant("s", issued_restore_token)}
             GLib.idle_add(_emit_response, conn, sender, handle_token, 0, results)
         elif method == "NotifyKeyboardKeysym":
