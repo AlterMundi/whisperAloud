@@ -101,6 +101,7 @@ class WhisperAloudIndicator:
         self._last_text_item = None
         self._last_text = ""
         self._available = HAS_INDICATOR
+        self._suppressed = False
 
         if not self._available:
             logger.warning("AppIndicator not available, tray icon disabled")
@@ -176,6 +177,30 @@ class WhisperAloudIndicator:
             return
         icon = self.ICONS.get(state, self.ICONS["idle"])
         self._indicator.set_icon_full(icon, f"WhisperAloud: {state}")
+
+    @property
+    def suppressed(self) -> bool:
+        """Whether the tray icon is hidden in favour of the GNOME Shell extension."""
+        return self._suppressed
+
+    def set_suppressed(self, suppressed: bool) -> None:
+        """Hide (PASSIVE) or show (ACTIVE) the tray icon.
+
+        Used while the GNOME Shell extension shows its own top-bar indicator
+        (see service/shell_extension_watch.py), to avoid two icons.
+        """
+        self._suppressed = bool(suppressed)
+        if not self._available or self._indicator is None:
+            return
+        status = (
+            AyatanaAppIndicator3.IndicatorStatus.PASSIVE
+            if suppressed
+            else AyatanaAppIndicator3.IndicatorStatus.ACTIVE
+        )
+        try:
+            self._indicator.set_status(status)
+        except Exception as e:
+            logger.warning(f"Failed to change tray icon visibility: {e}")
 
     def set_last_text(self, text: str) -> None:
         """Update the 'last transcription' menu item.
