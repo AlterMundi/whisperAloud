@@ -455,6 +455,55 @@ def test_start_command(mock_check, mock_call, capsys):
 
 @patch('whisper_aloud.__main__.call_service_method')
 @patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_start_command_reports_model_not_available(mock_check, mock_call, capsys):
+    """1.6.1: a refused StartRecording() (missing/errored model) prints the
+    reason and the download hint, and exits non-zero."""
+    mock_call.side_effect = [
+        False,
+        {
+            "state": "idle", "model": "base", "model_state": "missing",
+            "model_error": "Model 'base' is not downloaded",
+        },
+    ]
+    with patch('sys.argv', ['whisper-aloud', 'start']):
+        exit_code = main()
+        assert exit_code == 1
+        err = capsys.readouterr().err
+        assert "Model 'base' is not downloaded" in err
+        assert "download-model" in err
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_toggle_command_reports_model_not_available(mock_check, mock_call, capsys):
+    mock_call.side_effect = [
+        "error",
+        {"state": "idle", "model_state": "error", "model_error": "CUDA exploded"},
+    ]
+    with patch('sys.argv', ['whisper-aloud', 'toggle']):
+        exit_code = main()
+        assert exit_code == 1
+        err = capsys.readouterr().err
+        assert "CUDA exploded" in err
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_toggle_command_error_without_model_gate_falls_back(mock_check, mock_call, capsys):
+    """A ToggleRecording "error" unrelated to the model (e.g. a transcription
+    already in flight) still reports *something* non-zero, generically."""
+    mock_call.side_effect = [
+        "error",
+        {"state": "transcribing", "model_state": "ready", "model_error": ""},
+    ]
+    with patch('sys.argv', ['whisper-aloud', 'toggle']):
+        exit_code = main()
+        assert exit_code == 1
+        assert capsys.readouterr().err.strip()
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
 def test_quit_command(mock_check, mock_call, capsys):
     """Quit command calls daemon Quit."""
     with patch('sys.argv', ['whisper-aloud', 'quit']):
