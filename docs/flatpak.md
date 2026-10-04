@@ -210,6 +210,43 @@ opening a second one.
   only confirm GNOME/KDE coverage for Speed of Sound's equivalent
   portal-based approach.
 
+## Running `transcribe` inside the Flatpak sandbox
+
+`whisper-aloud transcribe <host-path>` run via `flatpak run
+--command=whisper-aloud org.fede.whisperaloud transcribe <host-path>` does
+**not** work for a host file: the sandbox has no filesystem permission at
+all (WHISP-96's `finish-args` intentionally grant none for this — see "The
+manifest" below), so a plain path argument resolves to nothing inside the
+sandbox even though it looks valid on the host shell. This is the same
+restriction that motivated the GUI's `Gtk.FileDialog`-based "Transcribe
+file…" action, which goes through the document portal instead of a raw
+path.
+
+Two ways to feed a host file to the sandboxed CLI:
+
+1. **`--file-forwarding`** (recommended for a single file): Flatpak
+   rewrites `@@ ... @@`-wrapped arguments into sandbox-visible document
+   portal paths automatically, with no extra manifest permission needed:
+
+   ```sh
+   flatpak run --file-forwarding --command=whisper-aloud \
+     org.fede.whisperaloud transcribe @@ /home/me/meeting.m4a @@
+   ```
+
+2. **stdin** (`-` as the file argument — see
+   ["Reading audio from stdin"](cli-reference.md#reading-audio-from-stdin)
+   in `docs/cli-reference.md`): pipe the bytes in from the host shell
+   instead of naming a path at all:
+
+   ```sh
+   flatpak run --command=whisper-aloud org.fede.whisperaloud transcribe - \
+     < /home/me/meeting.m4a
+   ```
+
+   This also works when the audio is itself produced by another sandboxed
+   or host process that has no document-portal access of its own, as long
+   as it can write to stdout.
+
 ## The manifest (WHISP-61)
 
 - **App ID `org.fede.whisperaloud`.** A Flatpak app may own D-Bus names
