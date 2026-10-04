@@ -191,6 +191,8 @@ Valid in any state. Returns a dict of GLib variants:
 | `hotkey_backend` | `s` | Active global-hotkey backend: `xdg-portal`, `libkeybinder3`, or `none` |
 | `uptime` | `d` | Seconds since the daemon process started |
 | `downloading` | `b` | True while a `DownloadModel()` job is in flight (WHISP-68) |
+| `mic_gain_control` | `b` | Whether the wpctl hardware-gain raise (`recording_flow.raise_mic_gain`) is usable. False under Flatpak and in test mode (WHISP-93) |
+| `input_gain` | `a{sv}` | Input normalization stage (see [`design/input-gain-loop.md`](design/input-gain-loop.md)): `mode` (`s`: `digital` or `off`), `enabled` (`b`), `hardware_control` (`b`, a reserved key that is not implemented), `target_dbfs` (`d`), `max_gain_db` (`d`), `last_gain_db` and `last_speech_dbfs` (`d`, from the last recording's normalization; NaN before the first one) |
 
 ### GetHistory
 
@@ -845,6 +847,17 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.5.0 — 2026-10-04
+
+Minor (additive): input normalization, the first stage of the audio chain
+(see [`design/input-gain-loop.md`](design/input-gain-loop.md)).
+
+- **`GetStatus`'s `a{sv}` return value gains a new key**: `"input_gain"`
+  (`a{sv}`), which carries the stage's mode and settings plus the last
+  recording's applied gain and measured speech level.
+- **Documented here for the first time**: the `"mic_gain_control"` (`b`)
+  key that WHISP-93 added to `GetStatus` without a version bump.
 
 ### 1.4.0 — 2026-10-02
 

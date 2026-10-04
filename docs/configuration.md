@@ -40,6 +40,37 @@ export WHISPER_ALOUD_MODEL_NAME=small
 export WHISPER_ALOUD_MODEL_DEVICE=cpu
 ```
 
+## Input normalization (`input_gain`)
+
+Before anything else in the live chain (trim, high-pass, gate, AGC,
+denoise, limiter), live audio goes through a digital input normalizer. It
+measures your speech level, from voiced frames only, and applies a smooth,
+amplify-only gain toward a target. A quiet mic then no longer leaves the
+fixed-threshold stages (like the -40 dBFS noise gate) cutting off speech. It
+never changes your mic's device volume. Design and defaults:
+[`design/input-gain-loop.md`](design/input-gain-loop.md).
+
+| key | default | env override |
+|---|---|---|
+| `input_gain.enabled` | `true` | `WHISPER_ALOUD_INPUT_GAIN_ENABLED` |
+| `input_gain.target_dbfs` | `-20.0` | `WHISPER_ALOUD_INPUT_GAIN_TARGET_DBFS` |
+| `input_gain.max_gain_db` | `30.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_GAIN_DB` |
+| `input_gain.max_output_noise_dbfs` | `-50.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS` |
+| `input_gain.peak_ceiling_dbfs` | `-3.0` | — |
+| `input_gain.max_gain_change_db_per_s` | `10.0` | — |
+| `input_gain.hardware_control` | `false` | `WHISPER_ALOUD_INPUT_GAIN_HARDWARE_CONTROL` |
+
+`hardware_control` is reserved. Setting it to `true` only logs a warning in
+this release. `GetStatus()["input_gain"]` reports the active mode and the
+last recording's gain. Each recording also logs one INFO line starting with
+`Input normalization (batch)`. That line shows the speech level before and
+after normalization, the gain applied (min, max and final), and what
+limited the gain.
+
+`recording_flow.raise_mic_gain` (native installs only, via `wpctl`) is
+separate and unchanged. It raises the shared mic volume to
+`target_gain_linear` while recording and restores it afterwards.
+
 ## Live dictation high-pass filter
 
 Live dictation's audio pipeline (`gate -> AGC -> denoise -> limiter`) can

@@ -303,6 +303,25 @@ class RecordingFlowConfig:
     gain_restore_on_crash: bool = True  # Persist gain snapshot for restore after crash
 
 
+@dataclass
+class InputGainConfig:
+    """Input normalization, the first stage ahead of the processing chain.
+
+    See docs/design/input-gain-loop.md. A digital, speech-level-driven gain
+    (WebRTC AGC2-style) that only amplifies, never clips, and never lifts
+    the noise floor above ``max_output_noise_dbfs``. It never touches the
+    device/source volume: ``hardware_control`` is reserved for an opt-in
+    backend that is not implemented yet (setting it only logs a warning).
+    """
+    enabled: bool = True
+    target_dbfs: float = -20.0            # voiced-speech RMS level to aim for
+    max_gain_db: float = 30.0             # bounded boost (AGC2 default)
+    max_output_noise_dbfs: float = -50.0  # cap on the amplified noise floor
+    peak_ceiling_dbfs: float = -3.0       # no normalized sample above this
+    max_gain_change_db_per_s: float = 10.0  # upward slew, streaming path only
+    hardware_control: bool = False        # reserved (deferred backend)
+
+
 # =============================================================================
 # Main Configuration Class
 # =============================================================================
@@ -319,6 +338,7 @@ class WhisperAloudConfig:
     audio_processing: AudioProcessingConfig = field(default_factory=AudioProcessingConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     recording_flow: RecordingFlowConfig = field(default_factory=RecordingFlowConfig)
+    input_gain: InputGainConfig = field(default_factory=InputGainConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for serialization."""
@@ -404,6 +424,15 @@ class WhisperAloudConfig:
                 "post_resume_delay_ms": self.recording_flow.post_resume_delay_ms,
                 "gain_restore_on_crash": self.recording_flow.gain_restore_on_crash,
             },
+            "input_gain": {
+                "enabled": self.input_gain.enabled,
+                "target_dbfs": self.input_gain.target_dbfs,
+                "max_gain_db": self.input_gain.max_gain_db,
+                "max_output_noise_dbfs": self.input_gain.max_output_noise_dbfs,
+                "peak_ceiling_dbfs": self.input_gain.peak_ceiling_dbfs,
+                "max_gain_change_db_per_s": self.input_gain.max_gain_change_db_per_s,
+                "hardware_control": self.input_gain.hardware_control,
+            },
         }
 
     @classmethod
@@ -457,6 +486,11 @@ class WhisperAloudConfig:
             for key, value in data["recording_flow"].items():
                 if hasattr(config.recording_flow, key):
                     setattr(config.recording_flow, key, value)
+
+        if "input_gain" in data:
+            for key, value in data["input_gain"].items():
+                if hasattr(config.input_gain, key):
+                    setattr(config.input_gain, key, value)
 
         return config
 
@@ -635,6 +669,18 @@ class WhisperAloudConfig:
             'WHISPER_ALOUD_AUDIO_HIGHPASS_HZ', self.audio_processing.highpass_hz
         )
 
+        # Input normalization (docs/design/input-gain-loop.md)
+        ig = self.input_gain
+        ig.enabled = parse_bool_env('WHISPER_ALOUD_INPUT_GAIN_ENABLED', ig.enabled)
+        ig.target_dbfs = parse_float_env('WHISPER_ALOUD_INPUT_GAIN_TARGET_DBFS', ig.target_dbfs)
+        ig.max_gain_db = parse_float_env('WHISPER_ALOUD_INPUT_GAIN_MAX_GAIN_DB', ig.max_gain_db)
+        ig.max_output_noise_dbfs = parse_float_env(
+            'WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS', ig.max_output_noise_dbfs
+        )
+        ig.hardware_control = parse_bool_env(
+            'WHISPER_ALOUD_INPUT_GAIN_HARDWARE_CONTROL', ig.hardware_control
+        )
+
     def _sanitize(self) -> None:
         """Sanitize configuration values."""
         # Keep a stable representation for auto-detected language.
@@ -733,12 +779,35 @@ class WhisperAloudConfig:
                 "Must be 0 (disabled) or 0-4000"
             )
 
+        self._validate_input_gain()
+
         # Validate clipboard configuration
         if self.clipboard.timeout_seconds <= 0:
             raise ConfigurationError(f"Invalid clipboard timeout {self.clipboard.timeout_seconds}. Must be > 0")
 
         if self.clipboard.paste_delay_ms < 0:
             raise ConfigurationError(f"Invalid paste delay {self.clipboard.paste_delay_ms}. Must be >= 0")
+
+    def _validate_input_gain(self) -> None:
+        """Bounds for the input normalization stage (input_gain section)."""
+        ig = self.input_gain
+        checks = (
+            (-50.0 <= ig.target_dbfs <= -6.0, "target_dbfs", "-50..-6 dBFS"),
+            (0.0 <= ig.max_gain_db <= 60.0, "max_gain_db", "0..60 dB"),
+            (-90.0 <= ig.max_output_noise_dbfs <= -20.0, "max_output_noise_dbfs", "-90..-20 dBFS"),
+            (-20.0 <= ig.peak_ceiling_dbfs <= 0.0, "peak_ceiling_dbfs", "-20..0 dBFS"),
+            (0.0 < ig.max_gain_change_db_per_s <= 1000.0, "max_gain_change_db_per_s", ">0..1000"),
+        )
+        for ok, name, valid in checks:
+            if not ok:
+                raise ConfigurationError(
+                    f"Invalid input_gain.{name} {getattr(ig, name)}. Must be {valid}"
+                )
+        if ig.target_dbfs >= ig.peak_ceiling_dbfs:
+            raise ConfigurationError(
+                f"Invalid input_gain.target_dbfs {ig.target_dbfs}: must be below "
+                f"input_gain.peak_ceiling_dbfs {ig.peak_ceiling_dbfs}"
+            )
 
     def save(self) -> Path:
         """Save configuration to file."""
@@ -894,5 +963,15 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
     if persistence_changes:
         changes.changed_sections.add("persistence")
         changes.changed_fields["persistence"] = persistence_changes
+
+    # Input normalization: every field is a plain value, compare them all.
+    input_gain_changes = {
+        name
+        for name in old.input_gain.__dataclass_fields__
+        if getattr(old.input_gain, name) != getattr(new.input_gain, name)
+    }
+    if input_gain_changes:
+        changes.changed_sections.add("input_gain")
+        changes.changed_fields["input_gain"] = input_gain_changes
 
     return changes

@@ -13,6 +13,7 @@ from gi.repository import GLib
 from pydbus import SessionBus
 from pydbus.generic import signal
 
+from ..audio.input_gain import NormalizationStats
 from ..audio.recorder import AudioRecorder
 from ..clipboard import (  # noqa: F401 -- ClipboardManager/TestClipboardStub kept importable
     ClipboardManager,       # here only so existing tests can still patch daemon_module.ClipboardManager;
@@ -54,7 +55,7 @@ EXIT_ALREADY_RUNNING = 3
 #
 # 1.4.0 (WHISP-79): additive -- new ExportHistory(s format, a{sv} filters)
 # -> (s content) method.
-API_VERSION = "1.4.0"
+API_VERSION = "1.5.0"
 
 # ExportHistory (WHISP-79): default/maximum number of entries a single
 # export may include. Keeps one unbounded/malicious `limit` from building an
@@ -535,7 +536,17 @@ class WhisperAloudService:
                 level_callback=self._on_level,
                 processing_config=self.config.audio_processing,
                 auto_stop_callback=self._on_recorder_auto_stop,
+                input_gain_config=self.config.input_gain,
             )
+            if self.config.input_gain.hardware_control:
+                # Reserved key (docs/design/input-gain-loop.md): the opt-in
+                # source-volume backend is not implemented yet. Say so loudly
+                # rather than silently ignoring the user's setting.
+                logger.warning(
+                    "input_gain.hardware_control=true is not implemented in this "
+                    "release; using digital input normalization only (the device "
+                    "volume is never changed by it)"
+                )
             self.transcriber = create_engine(self.config)
             # Model loading deferred to _ensure_model_loaded()
             self._model_loaded = False
@@ -940,6 +951,30 @@ class WhisperAloudService:
             "mic_gain_control": GLib.Variant(
                 "b", bool(self._gain.gain_control_available) if self._gain else False
             ),
+            "input_gain": GLib.Variant("a{sv}", self._input_gain_status()),
+        }
+
+    def _input_gain_status(self) -> dict:
+        """GetStatus()["input_gain"]: the input normalization stage's settings
+        plus what the last batch normalization did (NaN before the first
+        recording with a result). See docs/design/input-gain-loop.md."""
+        ig = self.config.input_gain
+        stats = getattr(self.recorder, "last_input_gain_stats", None)
+        if not isinstance(stats, NormalizationStats):
+            stats = None
+        nan = float("nan")
+        return {
+            # Only the digital stage exists today; hardware_control is a
+            # reserved key (warned about at startup) and never changes mode.
+            "mode": GLib.Variant("s", "digital" if ig.enabled else "off"),
+            "enabled": GLib.Variant("b", bool(ig.enabled)),
+            "hardware_control": GLib.Variant("b", bool(ig.hardware_control)),
+            "target_dbfs": GLib.Variant("d", float(ig.target_dbfs)),
+            "max_gain_db": GLib.Variant("d", float(ig.max_gain_db)),
+            "last_gain_db": GLib.Variant("d", float(stats.final_gain_db) if stats else nan),
+            "last_speech_dbfs": GLib.Variant(
+                "d", float(stats.speech_before_dbfs) if stats else nan
+            ),
         }
 
     def GetHistory(self, limit: int) -> list:
@@ -1174,13 +1209,15 @@ class WhisperAloudService:
 
         # Check if audio config changed
         if (new_config.audio != self.config.audio or
-                new_config.audio_processing != self.config.audio_processing):
+                new_config.audio_processing != self.config.audio_processing or
+                new_config.input_gain != self.config.input_gain):
             logger.info("Audio config changed, recreating recorder...")
             self.recorder = AudioRecorder(
                 new_config.audio,
                 level_callback=self._on_level,
                 processing_config=new_config.audio_processing,
                 auto_stop_callback=self._on_recorder_auto_stop,
+                input_gain_config=new_config.input_gain,
             )
 
         # Check if hotkey config changed
