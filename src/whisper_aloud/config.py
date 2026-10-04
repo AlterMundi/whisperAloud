@@ -322,6 +322,19 @@ class InputGainConfig:
     hardware_control: bool = False        # reserved (deferred backend)
 
 
+@dataclass
+class StartupConfig:
+    """Login behaviour (WHISP-87).
+
+    ``autostart_background``: start the daemon alone (no window) at login.
+    The GUI applies it -- Background portal ``RequestBackground`` inside
+    Flatpak, an XDG autostart entry natively -- and stores here the state
+    the portal/file write actually confirmed, not merely what was asked.
+    Env override: WHISPER_ALOUD_STARTUP_AUTOSTART_BACKGROUND.
+    """
+    autostart_background: bool = False
+
+
 # =============================================================================
 # Main Configuration Class
 # =============================================================================
@@ -339,6 +352,7 @@ class WhisperAloudConfig:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     recording_flow: RecordingFlowConfig = field(default_factory=RecordingFlowConfig)
     input_gain: InputGainConfig = field(default_factory=InputGainConfig)
+    startup: StartupConfig = field(default_factory=StartupConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for serialization."""
@@ -433,6 +447,9 @@ class WhisperAloudConfig:
                 "max_gain_change_db_per_s": self.input_gain.max_gain_change_db_per_s,
                 "hardware_control": self.input_gain.hardware_control,
             },
+            "startup": {
+                "autostart_background": self.startup.autostart_background,
+            },
         }
 
     @classmethod
@@ -491,6 +508,11 @@ class WhisperAloudConfig:
             for key, value in data["input_gain"].items():
                 if hasattr(config.input_gain, key):
                     setattr(config.input_gain, key, value)
+
+        if "startup" in data:
+            for key, value in data["startup"].items():
+                if hasattr(config.startup, key):
+                    setattr(config.startup, key, value)
 
         return config
 
@@ -681,6 +703,10 @@ class WhisperAloudConfig:
             'WHISPER_ALOUD_INPUT_GAIN_HARDWARE_CONTROL', ig.hardware_control
         )
 
+        self.startup.autostart_background = parse_bool_env(
+            'WHISPER_ALOUD_STARTUP_AUTOSTART_BACKGROUND', self.startup.autostart_background
+        )
+
     def _sanitize(self) -> None:
         """Sanitize configuration values."""
         # Keep a stable representation for auto-detected language.
@@ -780,6 +806,7 @@ class WhisperAloudConfig:
             )
 
         self._validate_input_gain()
+        self._validate_startup()
 
         # Validate clipboard configuration
         if self.clipboard.timeout_seconds <= 0:
@@ -787,6 +814,14 @@ class WhisperAloudConfig:
 
         if self.clipboard.paste_delay_ms < 0:
             raise ConfigurationError(f"Invalid paste delay {self.clipboard.paste_delay_ms}. Must be >= 0")
+
+    def _validate_startup(self) -> None:
+        """startup section: a real bool, never a truthy string from a hand-edited file."""
+        if not isinstance(self.startup.autostart_background, bool):
+            raise ConfigurationError(
+                f"Invalid startup.autostart_background "
+                f"{self.startup.autostart_background!r}: must be true or false"
+            )
 
     def _validate_input_gain(self) -> None:
         """Bounds for the input normalization stage (input_gain section)."""
@@ -973,5 +1008,9 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
     if input_gain_changes:
         changes.changed_sections.add("input_gain")
         changes.changed_fields["input_gain"] = input_gain_changes
+
+    if old.startup.autostart_background != new.startup.autostart_background:
+        changes.changed_sections.add("startup")
+        changes.changed_fields["startup"] = {"autostart_background"}
 
     return changes
