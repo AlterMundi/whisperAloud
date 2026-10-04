@@ -272,6 +272,79 @@ class TestFlatpakSandboxGating:
                     assert manager.backend == "keybinder"
 
 
+class TestBackendReprobeOnRegistrationFailure:
+    """WHISP-90: the backend chosen once at __init__ is no longer cached
+    forever -- a register() failure re-probes and retries."""
+
+    def test_reprobes_and_retries_when_portal_registration_fails(self, caplog):
+        import logging
+
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_xdp = MagicMock()
+        mock_kb = MagicMock()
+
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=mock_xdp):
+            manager = HotkeyManager()
+        assert manager.backend == "portal"
+
+        with patch.object(manager, "_register_portal", return_value=False) as mock_reg_portal:
+            with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
+                with patch(
+                    "whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb
+                ):
+                    with caplog.at_level(logging.INFO):
+                        result = manager.register("<Super><Alt>r", callback=lambda: None)
+
+        assert result is True
+        assert manager.backend == "keybinder"
+        mock_reg_portal.assert_called_once()
+        mock_kb.bind.assert_called_once()
+        assert any(
+            "backend changed" in r.message and "portal -> keybinder" in r.message
+            for r in caplog.records
+        )
+
+    def test_reprobes_to_none_when_everything_fails(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_kb = MagicMock()
+        mock_kb.bind.side_effect = Exception("bind failed")
+
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
+            with patch(
+                "whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb
+            ):
+                manager = HotkeyManager()
+        assert manager.backend == "keybinder"
+
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
+            with patch(
+                "whisper_aloud.service.hotkey._try_import_keybinder", return_value=None
+            ):
+                result = manager.register("<Super><Alt>r", callback=lambda: None)
+
+        assert result is False
+        assert manager.backend == "none"
+
+    def test_no_reprobe_when_registration_succeeds(self):
+        """A successful registration must not trigger any re-probe/retry."""
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_kb = MagicMock()
+
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
+            with patch(
+                "whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb
+            ) as mock_try_kb:
+                manager = HotkeyManager()
+                mock_try_kb.reset_mock()
+                result = manager.register("<Super><Alt>r", callback=lambda: None)
+
+        assert result is True
+        mock_try_kb.assert_not_called()  # detect_backend() was never re-run
+
+
 class TestNoneBackend:
     """Tests for the fallback 'none' backend."""
 

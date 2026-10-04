@@ -68,7 +68,14 @@ EXIT_ALREADY_RUNNING = 3
 # 1.7.0 (WHISP-87, start in background at login): additive -- GetStatus
 # "hotkey_bound" and "autostart" keys, and the "startup.autostart_background"
 # config key.
-API_VERSION = "1.7.0"
+#
+# 1.7.1 (model gate): no new surface, but a documented behaviour change --
+# StartRecording()/ToggleRecording() now refuse a `missing`/`error` model
+# for EVERY engine (previously only a streaming engine was refused; a batch
+# engine recorded anyway and only failed afterwards, on StopRecording, with
+# Error("model_not_available", ...)). The refusal reuses the same code and
+# is synchronous with the call, and still kicks the background re-check.
+API_VERSION = "1.7.1"
 
 # ExportHistory (WHISP-79): default/maximum number of entries a single
 # export may include. Keeps one unbounded/malicious `limit` from building an
@@ -847,14 +854,24 @@ class WhisperAloudService:
             logger.info("StartRecording: a transcription is still in flight, ignoring")
             return False
 
-        # Model readiness (0.3.0). The main loop must never block on a model
-        # load, so StartRecording only ever *kicks* a background load:
-        # - batch engines may record while the model is not ready -- the
-        #   transcription job waits for the ready event on the executor
-        #   thread (see _ensure_model_loaded); a missing/errored model is
-        #   re-checked now (it may have been downloaded out-of-band), and the
-        #   job fails with a clear Error if it is still unavailable;
-        # - streaming engines are refused until the model is ready: their
+        # Model readiness (0.3.0; gated at start for `missing`/`error` since
+        # 1.7.1 -- see docs/dbus-api.md "Model readiness"). The main loop
+        # must never block on a model load, so StartRecording only ever
+        # *kicks* a background load:
+        # - `missing`/`error` is refused for EVERY engine (batch or
+        #   streaming): recording into a model that is known not to work
+        #   used to silently waste the user's time -- the batch job would
+        #   only fail with Error("model_not_available", ...) after a full
+        #   recording was already thrown away. The refusal itself re-checks
+        #   availability in the background (it may have been downloaded or
+        #   fixed out-of-band), so the very next StartRecording can succeed
+        #   without a daemon restart.
+        # - while `loading`/`downloading` (or `unloaded`, before the
+        #   preload/first-use load has even started), batch engines may
+        #   still record -- the transcription job waits for the ready event
+        #   on the executor thread (see _ensure_model_loaded) and fails with
+        #   the same Error if the load settles to missing/error meanwhile;
+        # - streaming engines are refused until the model is `ready`: their
         #   session (start_session/accept_chunk) needs the loaded recognizer
         #   from the first chunk on, and buffering chunks until then would
         #   add a second hand-off racing the recorder's chunk-hook worker
@@ -867,10 +884,19 @@ class WhisperAloudService:
             is_streaming or state != model_state.UNLOADED
         ):
             self._start_model_load()
+        if state in (model_state.MISSING, model_state.ERROR):
+            message = model_state.unavailable_message(state, detail)
+            logger.info("StartRecording refused: %s", message)
+            self.Error("model_not_available", message)
+            if self.notifications:
+                self.notifications.show_error(message)
+            return False
         if is_streaming and state != model_state.READY:
             message = model_state.unavailable_message(state, detail)
             logger.info("StartRecording refused for streaming engine: %s", message)
             self.Error("model_not_ready", message)
+            if self.notifications:
+                self.notifications.show_error(message)
             return False
 
         try:
@@ -1836,7 +1862,13 @@ class WhisperAloudService:
     def _watch_shell_extension(self):
         """Hide the tray icon while the GNOME Shell extension (which shows its
         own top-bar indicator) owns its bus name. Event-driven bus-name watch;
-        only when there is a tray icon to hide. Never fatal."""
+        only when there is a tray icon to hide. Never fatal.
+
+        WHISP-90: also the window-manager backend's re-probe trigger -- the
+        GNOME extension also owns the window-capture D-Bus service
+        (`clipboard/window_manager.py`'s "gnome-extension" backend), so this
+        one watcher drives both instead of opening a second, duplicate
+        `Gio.bus_watch_name()` on the same bus name."""
         if self.indicator is None:
             return None
         try:
@@ -1847,6 +1879,11 @@ class WhisperAloudService:
                     self.indicator.set_suppressed(
                         not tray_should_show(extension_present=present)
                     )
+                if self.window_manager is not None:
+                    try:
+                        self.window_manager.on_shell_extension_presence_changed(present)
+                    except Exception as e:
+                        logger.debug("WindowManager re-probe on presence change failed: %s", e)
 
             return shell_extension_watch.ShellExtensionWatcher(_on_change)
         except Exception as e:

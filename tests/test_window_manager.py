@@ -1,4 +1,5 @@
 """Tests for WindowManager."""
+import logging
 from unittest.mock import patch, MagicMock
 from whisper_aloud.clipboard.window_manager import WindowManager, WindowInfo
 
@@ -70,6 +71,177 @@ class TestXdotoolBackend:
         wm.backend = "xdotool"
         info = WindowInfo(window_id=99999, title="Gone", backend="xdotool")
         assert wm.activate_window(info) is False
+
+
+class TestShellExtensionPresenceHook:
+    """WHISP-90: the daemon's single ShellExtensionWatcher forwards
+    NameOwnerChanged events here instead of WindowManager opening its own,
+    duplicate Gio.bus_watch_name() for the same bus name."""
+
+    def test_presence_change_reprobes_and_can_upgrade_to_gnome(self, caplog):
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"99\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                wm = WindowManager()
+        assert wm.backend == "xdotool"
+
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            with caplog.at_level(logging.INFO):
+                wm.on_shell_extension_presence_changed(True)
+
+        assert wm.backend == "gnome-extension"
+        assert any(
+            "backend changed" in r.message and "xdotool -> gnome-extension" in r.message
+            for r in caplog.records
+        )
+
+    def test_presence_change_falls_back_when_extension_vanishes(self):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            wm = WindowManager()
+        assert wm.backend == "gnome-extension"
+
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"99\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                wm.on_shell_extension_presence_changed(False)
+
+        assert wm.backend == "xdotool"
+
+    def test_presence_change_without_effect_logs_no_transition(self, caplog):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+            with patch(
+                "whisper_aloud.clipboard.window_manager.subprocess.run",
+                side_effect=FileNotFoundError,
+            ):
+                wm = WindowManager()
+                assert wm.backend == "none"
+
+                with caplog.at_level(logging.INFO):
+                    wm.on_shell_extension_presence_changed(False)
+
+        assert wm.backend == "none"
+        assert not any("backend changed" in r.message for r in caplog.records)
+
+
+class TestBackendReprobeOnFailure:
+    """WHISP-90: the backend detected at __init__ is no longer cached
+    forever -- a real operation failure re-probes it."""
+
+    def test_reprobes_and_falls_back_when_gnome_operation_fails(self, caplog):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            wm = WindowManager()
+        assert wm.backend == "gnome-extension"
+
+        wm._gnome_proxy = MagicMock()
+        wm._gnome_proxy.call_sync.side_effect = RuntimeError("extension gone")
+
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"12345\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                with caplog.at_level(logging.INFO):
+                    result = wm.get_active_window()
+
+        assert result is None
+        assert wm.backend == "xdotool"
+        assert any(
+            "backend changed" in r.message and "gnome-extension -> xdotool" in r.message
+            for r in caplog.records
+        )
+
+    def test_reprobes_to_none_when_xdotool_binary_disappears(self, caplog):
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"99\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                wm = WindowManager()
+        assert wm.backend == "xdotool"
+
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                with caplog.at_level(logging.INFO):
+                    result = wm.get_active_window()
+
+        assert result is None
+        assert wm.backend == "none"
+        assert any("backend changed" in r.message for r in caplog.records)
+
+    def test_activate_window_reprobes_on_gnome_failure(self, caplog):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            wm = WindowManager()
+        wm._gnome_proxy = MagicMock()
+        wm._gnome_proxy.call_sync.side_effect = RuntimeError("extension gone")
+        info = WindowInfo(window_id=1, title="x", backend="gnome-extension")
+
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                with caplog.at_level(logging.INFO):
+                    result = wm.activate_window(info)
+
+        assert result is False
+        assert wm.backend == "none"
+
+    def test_no_reprobe_log_when_backend_unchanged(self, caplog):
+        """A failure that re-probes to the SAME backend logs no transition
+        (only a debug line) -- avoid noisy INFO spam when nothing changed."""
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"99\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                wm = WindowManager()
+        assert wm.backend == "xdotool"
+
+        call_count = {"n": 0}
+
+        def _flaky_run(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise FileNotFoundError
+            return MagicMock(returncode=0, stdout=b"42\n")
+
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run", side_effect=_flaky_run
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                with caplog.at_level(logging.INFO):
+                    wm.get_active_window()
+
+        assert wm.backend == "xdotool"
+        assert not any("backend changed" in r.message for r in caplog.records)
+
+    def test_no_reprobe_on_plain_no_active_window(self, caplog):
+        """A non-zero exit (no active window right now) is not a backend
+        failure -- it must not trigger a re-probe."""
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"99\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                wm = WindowManager()
+
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=1),
+        ) as mock_run:
+            with caplog.at_level(logging.INFO):
+                result = wm.get_active_window()
+
+        assert result is None
+        assert wm.backend == "xdotool"
+        mock_run.assert_called_once()  # no extra _detect_backend() probing
 
 
 class TestNoneBackend:

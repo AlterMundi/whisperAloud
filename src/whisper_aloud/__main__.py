@@ -156,12 +156,43 @@ def _require_daemon(hint: str = "", *, allow_activation: bool = True) -> bool:
 # ─── Command handlers ─────────────────────────────────────────────────────────
 
 
+def _model_gate_reason(status) -> str:
+    """Build a user-facing reason for a `StartRecording`/`ToggleRecording`
+    refusal (1.6.1: `Error("model_not_available", ...)`, see
+    docs/dbus-api.md "Model readiness"). `status` is a `GetStatus()`
+    payload; falls back to a generic message for an older daemon or a
+    refusal unrelated to the model (e.g. a transcription still in flight).
+    """
+    from .service import model_state as ms
+
+    def _val(v):
+        return v.unpack() if hasattr(v, "unpack") else v
+
+    state = ""
+    detail = ""
+    if isinstance(status, dict):
+        state = str(_val(status.get("model_state", "")) or "")
+        detail = str(_val(status.get("model_error", "")) or "")
+    if state in (ms.MISSING, ms.ERROR):
+        return ms.unavailable_message(state, detail)
+    return "recording could not be started (a transcription may already be in flight)"
+
+
+_MODEL_GATE_HINT = (
+    "Download the model from Settings, or run "
+    "`whisper-aloud download-model <name>`."
+)
+
+
 def cmd_start(args) -> int:
     """Start recording via daemon."""
     if not _require_daemon():
         return 1
     try:
-        call_service_method("StartRecording")
+        started = call_service_method("StartRecording")
+        if not started:
+            reason = _model_gate_reason(call_service_method("GetStatus"))
+            return _error(reason, _MODEL_GATE_HINT)
         print("Recording started.")
         return 0
     except WhisperAloudError as e:
@@ -186,6 +217,9 @@ def cmd_toggle(args) -> int:
         return 1
     try:
         result = call_service_method("ToggleRecording")
+        if result == "error":
+            reason = _model_gate_reason(call_service_method("GetStatus"))
+            return _error(reason, _MODEL_GATE_HINT)
         print(f"State: {result}")
         return 0
     except WhisperAloudError as e:
