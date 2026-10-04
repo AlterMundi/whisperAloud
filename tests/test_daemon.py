@@ -659,6 +659,9 @@ class TestDaemonMethods:
     def test_transcribe_error_emits_later_without_closure_failure(self, daemon):
         """Deferred error callback should not depend on except-scope variable lifetime."""
         daemon.transcriber.transcribe_numpy.side_effect = Exception("boom")
+        # Model already ready, so the only deferred callback is the error's
+        # (a first-use load would also queue ModelStateChanged emissions).
+        daemon._model_loaded = True
         deferred_callbacks = []
 
         with patch.object(daemon._daemon_module, "GLib") as mock_glib:
@@ -1247,10 +1250,16 @@ def test_engine_change_triggers_model_reload():
     new = WhisperAloudConfig()
     new.model.engine = "parakeet"
     # Only engine differs (name/device are identical fresh defaults) — isolates the engine-reload path.
-    with patch.object(daemon._daemon_module, "create_engine") as mock_ce:
+    with patch.object(daemon._daemon_module, "create_engine") as mock_ce, patch.object(
+        daemon._daemon_module.model_state, "is_model_available", return_value=True
+    ):
         daemon._apply_config_changes(new)
+        # 0.3.0: the reload runs on a background thread (never on the main
+        # loop); wait for it to finish, then check it loaded the new engine.
+        daemon._model_load_thread.join(timeout=10)
     mock_ce.assert_called_once_with(new)
     mock_ce.return_value.load_model.assert_called_once()
+    assert daemon._model_loaded is True
     assert daemon._pending_reload_config is None
 
 

@@ -22,10 +22,12 @@ from ..clipboard import (  # noqa: F401 -- ClipboardManager/TestClipboardStub ke
     build_clipboard_manager,
 )
 from ..config import WhisperAloudConfig, detect_config_changes
+from ..exceptions import ModelNotAvailableError
 from ..gnome_integration import NotificationManager
 from ..persistence import HistoryManager
 from ..stt import catalog, model_download
 from ..stt.engine import SpeechEngine, create_engine
+from . import model_state
 from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
 from .media_control import GainController, MprisController
@@ -55,7 +57,12 @@ EXIT_ALREADY_RUNNING = 3
 #
 # 1.4.0 (WHISP-79): additive -- new ExportHistory(s format, a{sv} filters)
 # -> (s content) method.
-API_VERSION = "1.5.0"
+#
+# 1.5.0: additive -- GetStatus "input_gain" key (input normalization).
+#
+# 1.6.0 (model preload, 0.3.0): additive -- new ModelStateChanged(s state,
+# s detail) signal and GetStatus "model_state"/"model_error" keys.
+API_VERSION = "1.6.0"
 
 # ExportHistory (WHISP-79): default/maximum number of entries a single
 # export may include. Keeps one unbounded/malicious `limit` from building an
@@ -306,6 +313,10 @@ class WhisperAloudService:
           <arg type="b" name="ok"/>
           <arg type="s" name="error"/>
         </signal>
+        <signal name="ModelStateChanged">
+          <arg type="s" name="state"/>
+          <arg type="s" name="detail"/>
+        </signal>
         <property name="ApiVersion" type="s" access="read"/>
       </interface>
     </node>
@@ -322,6 +333,7 @@ class WhisperAloudService:
     Error = signal()
     DownloadProgress = signal()
     DownloadFinished = signal()
+    ModelStateChanged = signal()
 
     def __init__(
         self,
@@ -364,6 +376,13 @@ class WhisperAloudService:
         # Threading
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="whisper-aloud")
         self._model_lock = threading.Lock()
+
+        # Model readiness (0.3.0): explicit, observable state driven by a
+        # background preload kicked from run() -- see service/model_state.py.
+        # Created before _init_components() since `_model_loaded` (set there)
+        # is derived from it.
+        self._model_state = model_state.ModelStateTracker(on_change=self._on_model_state_change)
+        self._model_load_thread: Optional[threading.Thread] = None
 
         # State
         self._shutdown = False
@@ -526,9 +545,11 @@ class WhisperAloudService:
     def _init_components(self) -> None:
         """Initialize recorder and transcriber.
 
-        The recorder is created immediately (fast).  The transcriber is
-        created but model loading is deferred to first use so that D-Bus
-        name registration is not blocked (avoids systemd activation timeout).
+        The recorder is created immediately (fast). The transcriber is
+        created but its model is not loaded here, so D-Bus name registration
+        is never blocked (avoids the systemd activation timeout, commit
+        2791f9b): run() starts a background preload once the object is
+        registered (see _start_model_load).
         """
         try:
             self.recorder = AudioRecorder(
@@ -548,29 +569,147 @@ class WhisperAloudService:
                     "volume is never changed by it)"
                 )
             self.transcriber = create_engine(self.config)
-            # Model loading deferred to _ensure_model_loaded()
-            self._model_loaded = False
+            # Model loading starts in the background from run() (see
+            # _start_model_load); the tracker starts out `unloaded`.
 
             # Smart recording flow controllers
             self._mpris = MprisController()
             self._gain = GainController()
             self._gain.restore_from_crash_file()
-            logger.info("Components initialized (model loading deferred)")
+            logger.info("Components initialized (model preload starts with the main loop)")
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
             raise
 
-    def _ensure_model_loaded(self) -> None:
-        """Load the transcription model on first use (thread-safe)."""
-        if self._model_loaded:
+    # ─── Model readiness (0.3.0) ─────────────────────────────────────────
+
+    @property
+    def _model_loaded(self) -> bool:
+        """Back-compat view of the model state machine: True iff `ready`."""
+        return self._model_state.is_ready
+
+    @_model_loaded.setter
+    def _model_loaded(self, value: bool) -> None:
+        self._model_state.set_state(model_state.READY if value else model_state.UNLOADED)
+
+    def _on_model_state_change(self, state: str, detail: str) -> None:
+        """ModelStateTracker listener. May fire on any thread (with the
+        tracker's lock held), so it only logs and marshals the signal onto
+        the main loop."""
+        logger.info("Model state: %s%s", state, f" ({detail})" if detail else "")
+        GLib.idle_add(_call_once_idle(self.ModelStateChanged, state, detail))
+
+    def _start_model_load(self, engine=None, config=None) -> None:
+        """Start loading `engine` (default: the current transcriber) for
+        `config` (default: the current config) on a background thread.
+
+        Non-blocking: enters `loading` synchronously and returns at once; the
+        worker settles the state to ready/missing/error. Safe to call from
+        the main loop -- it never touches the model itself.
+        """
+        engine = engine if engine is not None else self.transcriber
+        config = config if config is not None else self.config
+        if engine is None:
             return
-        with self._model_lock:
-            if self._model_loaded:
+        generation = self._model_state.begin_load()
+        logger.info(
+            "Loading transcription model '%s' (%s) in the background",
+            config.model.name,
+            config.model.engine,
+        )
+        thread = threading.Thread(
+            target=self._model_load_worker,
+            args=(generation, engine, config),
+            name="whisper-aloud-model-load",
+            daemon=True,
+        )
+        self._model_load_thread = thread
+        thread.start()
+
+    def _model_load_worker(self, generation: int, engine, config) -> None:
+        """Background-thread body of _start_model_load().
+
+        Checks availability offline first (WHISP-94: never touches the
+        network for a cached model, and never auto-downloads a missing one --
+        the user starts DownloadModel explicitly), then loads under
+        `_model_lock` so two loads never run concurrently. A load superseded
+        meanwhile (a config change switched models, a download started,
+        Quit) never reports `ready`.
+        """
+        try:
+            available = model_state.is_model_available(config)
+        except Exception as e:
+            logger.warning("Model availability check failed (%s); trying to load anyway", e)
+            available = True
+        if not available:
+            message = model_state.missing_message(config)
+            if self._model_state.finish_load(generation, model_state.MISSING, message):
+                logger.warning(message)
+            return
+
+        started = time.monotonic()
+        try:
+            with self._model_lock:
+                if self._model_state.generation != generation:
+                    logger.info("Model load superseded before it started; skipping")
+                    return
+                engine.load_model()
+        except Exception as e:
+            message = str(e) or e.__class__.__name__
+            logger.error("Failed to load transcription model: %s", message)
+            if self._model_state.finish_load(generation, model_state.ERROR, message):
+                GLib.idle_add(_call_once_idle(self.Error, "model_load_failed", message))
+            return
+
+        if self._model_state.finish_load(generation, model_state.READY):
+            logger.info(
+                "Transcription model '%s' loaded in %.1fs",
+                config.model.name,
+                time.monotonic() - started,
+            )
+        else:
+            logger.info("Model load for '%s' was superseded; discarding it", config.model.name)
+            if engine is not self.transcriber:
+                try:
+                    engine.unload_model()
+                except Exception:
+                    logger.debug("unload of superseded engine failed", exc_info=True)
+
+    def _ensure_model_loaded(self) -> None:
+        """Make sure the model is ready before a transcription job uses it.
+
+        Runs on the executor (worker) thread, NEVER on the main loop:
+        - `ready`: returns immediately;
+        - `loading`: blocks on the tracker's condition until the load settles
+          (woken by the transition event, not a poll/sleep);
+        - `unloaded` (no load was ever started, e.g. a service object that
+          was never run()): legacy load-on-first-use under `_model_lock`;
+        - otherwise (or still not ready after waiting): raises
+          ModelNotAvailableError with a user-facing message.
+        """
+        state = self._model_state.state
+        if state == model_state.READY:
+            return
+        if state == model_state.UNLOADED:
+            with self._model_lock:
+                if self._model_state.is_ready:
+                    return
+                generation = self._model_state.begin_load()
+                logger.info("Loading transcription model (first use)...")
+                try:
+                    self.transcriber.load_model()
+                except Exception as e:
+                    self._model_state.finish_load(generation, model_state.ERROR, str(e))
+                    raise
+                self._model_state.finish_load(generation, model_state.READY)
+                logger.info("Transcription model loaded")
                 return
-            logger.info("Loading transcription model (first use)...")
-            self.transcriber.load_model()
-            self._model_loaded = True
-            logger.info("Transcription model loaded")
+        if state == model_state.LOADING:
+            logger.info("Transcription is waiting for the model to finish loading")
+            self._model_state.wait_while_loading()
+        state, detail = self._model_state.snapshot()
+        if state != model_state.READY:
+            raise ModelNotAvailableError(model_state.unavailable_message(state, detail))
 
     def run(self) -> None:
         """Run the D-Bus service.
@@ -598,6 +737,14 @@ class WhisperAloudService:
 
             # Inject bus into MPRIS controller now that we have one
             self._mpris.set_bus(bus)
+
+            # Model preload (0.3.0): the object is registered, so start
+            # loading the configured model on a background thread now rather
+            # than on the first transcription (field log: ~9 s wait after
+            # every daemon start). Non-blocking: `loading` is entered
+            # synchronously (so GetStatus never reports `unloaded` over
+            # D-Bus) and ModelStateChanged is delivered once loop.run() runs.
+            self._start_model_load()
 
             # Use GLib main loop
             loop = GLib.MainLoop()
@@ -693,6 +840,32 @@ class WhisperAloudService:
             logger.info("StartRecording: a transcription is still in flight, ignoring")
             return False
 
+        # Model readiness (0.3.0). The main loop must never block on a model
+        # load, so StartRecording only ever *kicks* a background load:
+        # - batch engines may record while the model is not ready -- the
+        #   transcription job waits for the ready event on the executor
+        #   thread (see _ensure_model_loaded); a missing/errored model is
+        #   re-checked now (it may have been downloaded out-of-band), and the
+        #   job fails with a clear Error if it is still unavailable;
+        # - streaming engines are refused until the model is ready: their
+        #   session (start_session/accept_chunk) needs the loaded recognizer
+        #   from the first chunk on, and buffering chunks until then would
+        #   add a second hand-off racing the recorder's chunk-hook worker
+        #   (the WHISP-56 stop()-before-finalize() ordering). The preload
+        #   normally finishes seconds after startup, the GUI shows the
+        #   state, and the refusal is an explicit Error, never silent.
+        is_streaming = getattr(self.transcriber, "is_streaming", False) is True
+        state, detail = self._model_state.snapshot()
+        if state in (model_state.UNLOADED, model_state.MISSING, model_state.ERROR) and (
+            is_streaming or state != model_state.UNLOADED
+        ):
+            self._start_model_load()
+        if is_streaming and state != model_state.READY:
+            message = model_state.unavailable_message(state, detail)
+            logger.info("StartRecording refused for streaming engine: %s", message)
+            self.Error("model_not_ready", message)
+            return False
+
         try:
             rf = self.config.recording_flow
 
@@ -708,16 +881,17 @@ class WhisperAloudService:
 
             # WHISP-57: a fresh session_id per recording, regardless of
             # engine -- TranscriptionReady always carries it in meta so
-            # clients can correlate (streaming or not). `is_streaming` is
-            # checked with `is True` rather than truthiness: a MagicMock
+            # clients can correlate (streaming or not). `is_streaming`
+            # (computed above) is checked with `is True` rather than
+            # truthiness: a MagicMock
             # test double for a *non*-streaming engine auto-creates a
             # truthy `.is_streaming` attribute, which would otherwise send
             # every mocked-engine test down the streaming path by accident.
             self._current_session_id = uuid.uuid4().hex
-            is_streaming = getattr(self.transcriber, "is_streaming", False) is True
             self._streaming_session = is_streaming
             if is_streaming:
-                self._ensure_model_loaded()
+                # The model is `ready` here (checked above) -- never loaded
+                # synchronously on the main loop.
                 self.transcriber.start_session(self.config.transcription.language)
                 self.recorder.on_processed_chunk = self.transcriber.accept_chunk
                 self._last_partial_seq = None
@@ -930,7 +1104,17 @@ class WhisperAloudService:
         state = "transcribing" if self._transcribing else (
             self.recorder.state.value if self.recorder else "error"
         )
+        model_state_value, model_detail = self._model_state.snapshot()
+        model_error = (
+            model_detail
+            if model_state_value in (model_state.ERROR, model_state.MISSING)
+            else ""
+        )
         return {
+            # 0.3.0 model readiness: see service/model_state.py and the
+            # ModelStateChanged signal.
+            "model_state": GLib.Variant("s", model_state_value),
+            "model_error": GLib.Variant("s", model_error),
             "state": GLib.Variant("s", state),
             "version": GLib.Variant("s", __version__),
             "model": GLib.Variant("s", self.config.model.name),
@@ -1193,10 +1377,13 @@ class WhisperAloudService:
                 )
                 self._pending_reload_config = new_config
             else:
-                logger.info("Model config changed, reloading...")
+                logger.info("Model config changed, reloading in the background...")
                 self.transcriber = create_engine(new_config)
-                self.transcriber.load_model()
-                self._model_loaded = True
+                # 0.3.0: never load synchronously here (this runs on the
+                # main loop) -- go through the same loading -> ready state
+                # machine as the startup preload; a job submitted meanwhile
+                # waits for the ready event.
+                self._start_model_load(self.transcriber, new_config)
                 # Audit fix (WHISP-74): this immediate reload supersedes
                 # whatever was sitting in self._pending_reload_config from an
                 # earlier busy SetConfig()/ReloadConfig() that the daemon
@@ -1251,12 +1438,16 @@ class WhisperAloudService:
         self._pending_reload_config = None
         logger.info("Applying deferred model reload now that the daemon is idle")
         try:
-            self.transcriber = create_engine(pending)
-            self.transcriber.load_model()
-            self._model_loaded = True
+            engine = create_engine(pending)
         except Exception as e:
             logger.error(f"Deferred model reload failed: {e}")
+            self._model_state.set_state(model_state.ERROR, str(e))
             self.Error("model_reload_failed", str(e))
+            return
+        self.transcriber = engine
+        # Background load through the state machine (this runs on the main
+        # loop); load failures surface as `error` + Error("model_load_failed").
+        self._start_model_load(engine, pending)
 
     def Quit(self) -> bool:
         """Quit the service."""
@@ -1268,6 +1459,10 @@ class WhisperAloudService:
         # TranscriptionReady/Error, touching the clipboard, or writing
         # history after the daemon has already announced shutdown.
         self._job_id += 1
+        # Wake a transcription job blocked waiting for the model to finish
+        # loading, so _cleanup()'s executor.shutdown(wait=True) cannot hang
+        # on it; its (stale) error emission is then dropped.
+        self._model_state.close()
 
         # WHISP-68 audit HIGH #3: a download still running at shutdown must
         # be told to cancel too, so _cleanup()'s bounded join() below has a
@@ -1325,6 +1520,16 @@ class WhisperAloudService:
             self._downloading = True
             self._download_cancel_event = threading.Event()
             cancel_event = self._download_cancel_event
+
+        # 0.3.0: downloading the configured model while it is not usable is
+        # the `downloading` model state (progress via DownloadProgress); a
+        # ready model, or a download of some other model, leaves it alone.
+        if self._is_configured_model(entry) and self._model_state.state in (
+            model_state.UNLOADED,
+            model_state.MISSING,
+            model_state.ERROR,
+        ):
+            self._model_state.set_state(model_state.DOWNLOADING, f"{entry.engine}/{entry.name}")
 
         self._last_download_progress_emit = 0.0
         self._download_thread = threading.Thread(
@@ -1406,7 +1611,33 @@ class WhisperAloudService:
             with self._download_lock:
                 self._downloading = False
                 self._download_cancel_event = None
-            GLib.idle_add(lambda: self.DownloadFinished(entry.engine, entry.name, ok, error))
+            GLib.idle_add(_call_once_idle(self._on_download_done, entry, ok, error))
+
+    def _on_download_done(self, entry, ok: bool, error: str) -> None:
+        """Main-loop tail of _run_download(): emit DownloadFinished, then, if
+        this was the configured model and it is not usable yet, re-run the
+        (offline) availability check + background load -- `ready` on success,
+        back to `missing` after a failed/cancelled download."""
+        self.DownloadFinished(entry.engine, entry.name, ok, error)
+        if self._is_configured_model(entry) and self._model_state.state in (
+            model_state.DOWNLOADING,
+            model_state.MISSING,
+            model_state.ERROR,
+        ):
+            self._start_model_load()
+
+    def _is_configured_model(self, entry) -> bool:
+        """Whether catalog `entry` is the currently configured model (aliases
+        resolved via the catalog)."""
+        try:
+            configured = catalog.get(self.config.model.engine, self.config.model.name)
+        except Exception:
+            return False
+        return (
+            configured is not None
+            and configured.engine == entry.engine
+            and configured.name == entry.name
+        )
 
     def _emit_download_progress(
         self, engine: str, name: str, bytes_done: int, bytes_total: int
@@ -1642,6 +1873,12 @@ class WhisperAloudService:
         engine = engine if engine is not None else self.transcriber
         try:
             result = self._transcribe_audio(audio_data, engine)
+        except ModelNotAvailableError as e:
+            # 0.3.0: the model is missing/failed (or the daemon is quitting
+            # while it loaded) -- a distinct, explicit error code so clients
+            # can offer the download instead of a generic failure.
+            self._emit_transcription_error(e, token, job_id, code="model_not_available")
+            return
         except Exception as e:
             self._emit_transcription_error(e, token, job_id)
             return
@@ -1688,7 +1925,11 @@ class WhisperAloudService:
         return token is not None and token != self._job_id
 
     def _emit_transcription_error(
-        self, exc: Exception, token: Optional[int] = None, job_id: str = ""
+        self,
+        exc: Exception,
+        token: Optional[int] = None,
+        job_id: str = "",
+        code: str = "transcription_failed",
     ) -> None:
         """Shared failure path for both the batch and streaming transcription
         routes. All D-Bus signal emissions are marshalled to the GLib main
@@ -1725,7 +1966,7 @@ class WhisperAloudService:
             self.StatusChanged("idle")
             if self.indicator:
                 self.indicator.set_state("idle")
-            self.Error("transcription_failed", error_message)
+            self.Error(code, error_message)
             if self.notifications:
                 self.notifications.show_error(error_message)
             # WHISP-74: a model reload deferred while this job was in flight
@@ -1971,6 +2212,10 @@ class WhisperAloudService:
                     "proceeding with shutdown anyway (it is a daemon thread)",
                     10.0,
                 )
+
+        # Wake any job still waiting for the model (SIGTERM path; Quit()
+        # already did this) before joining the executor.
+        self._model_state.close()
 
         # Shutdown executor
         self.executor.shutdown(wait=True)

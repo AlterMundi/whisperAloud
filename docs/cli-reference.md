@@ -21,6 +21,13 @@ whisper-aloud reload
 whisper-aloud quit
 ```
 
+`status` also shows the model readiness state next to the model, e.g.
+`Model:    base (cpu) [ready]` (`loading`, `ready`, `missing`,
+`downloading`, `error`), plus a `Model error:` line explaining a `missing`
+or `error` state. The daemon loads the model in the background right after
+it starts; a recording made while it is still `loading` is transcribed as
+soon as it is ready.
+
 ## File transcription (legacy single-shot mode)
 
 ```bash

@@ -492,6 +492,13 @@ class WhisperAloudClient:
         """Subscribe to DownloadFinished signal (engine, name, ok, error)."""
         self._subscribe_signal("DownloadFinished", callback)
 
+    def on_model_state_changed(self, callback: Callable) -> None:
+        """Subscribe to ModelStateChanged signal (state, detail) -- API 1.6.0.
+
+        Subscribe before reading GetStatus()["model_state"] so a transition
+        racing that call is never missed."""
+        self._subscribe_signal("ModelStateChanged", callback)
+
     def _subscribe_signal(self, signal_name: str, callback: Callable) -> None:
         """Internal: subscribe to a D-Bus signal by name.
 

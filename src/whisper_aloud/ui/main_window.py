@@ -21,11 +21,14 @@ from .error_handler import (
 from .history_panel import HistoryPanel
 from .level_meter import LevelMeterPanel
 from .main_window_logic import (
+    describe_model_state,
     is_daemon_interaction_ready,
     resolve_daemon_status_state,
     resolve_language_change,
+    resolve_model_state,
     should_enter_transcribing,
     should_restore_transcribing_after_cancel,
+    transcribing_status_text,
 )
 from .partial_view_logic import PartialViewState
 from .settings_dialog import SettingsDialog
@@ -53,6 +56,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Application state
         self._state: AppState = AppState.IDLE
         self._model_loading: bool = False
+        # Daemon model readiness (API 1.6.0 ModelStateChanged / GetStatus
+        # "model_state"); "" until reported (or for an older daemon).
+        self._daemon_model_state: str = ""
         self._timer_active: bool = False
         self._timer_seconds: int = 0
         self._daemon_available: bool = False
@@ -277,6 +283,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Status bar
         self.status_bar = StatusBar()
+        # "Model missing — Download": the download itself (with license
+        # consent and progress) lives in Settings' model row.
+        self.status_bar.model_download_button.connect("clicked", self._on_settings_clicked)
         main_box.append(self.status_bar)
 
         logger.debug("UI built successfully")
@@ -443,6 +452,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.client.on_level_update(self._on_daemon_level_update)
         self.client.on_error(self._on_daemon_error)
         self.client.on_partial_transcript(self._on_daemon_partial_transcript)
+        # Subscribe before reading GetStatus so no transition is missed.
+        self.client.on_model_state_changed(self._on_daemon_model_state_changed)
+        self._refresh_model_state_from_status()
 
         # Watch for daemon restart (auto-reconnect)
         self.client.watch_name(
@@ -500,7 +512,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         if self.client and self.client.is_connected:
             try:
-                daemon_state = resolve_daemon_status_state(self.client.get_status())
+                status = self.client.get_status()
+                daemon_state = resolve_daemon_status_state(status)
+                self._apply_model_state(*resolve_model_state(status))
             except Exception as e:
                 logger.debug("Failed to refresh daemon status on reconnect: %s", e)
 
@@ -746,7 +760,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.set_state(AppState.RECORDING)
         elif state == "transcribing":
             self.set_state(AppState.TRANSCRIBING)
-            self.status_bar.set_status("Transcribing... (press Ctrl+X to cancel)")
+            self.status_bar.set_status(transcribing_status_text(self._daemon_model_state))
         return False
 
     def _on_daemon_transcription_ready(self, text: str, meta: dict) -> None:
@@ -862,6 +876,30 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle LevelUpdate signal from daemon."""
         GLib.idle_add(self.level_meter.update_level, level, level, 0.0)
 
+    def _on_daemon_model_state_changed(self, state: str, detail: str) -> None:
+        """Handle ModelStateChanged signal from daemon (may be any thread)."""
+        GLib.idle_add(self._apply_model_state, state, detail)
+
+    def _refresh_model_state_from_status(self) -> None:
+        """Seed the model readiness display from GetStatus (best-effort)."""
+        try:
+            self._apply_model_state(*resolve_model_state(self.client.get_status()))
+        except Exception as e:
+            logger.debug("Failed to read model state from daemon status: %s", e)
+
+    def _apply_model_state(self, state: str, detail: str = "") -> bool:
+        """Show the daemon's model readiness in the status bar (main thread).
+
+        The record button is deliberately left alone: a batch transcription
+        waits for the model, and while it does the transcribing status makes
+        that wait visible."""
+        self._daemon_model_state = state
+        view = describe_model_state(state, detail)
+        self.status_bar.set_model_state(view.text, view.show_download)
+        if self._state == AppState.TRANSCRIBING:
+            self.status_bar.set_status(transcribing_status_text(state))
+        return False
+
     def _on_daemon_error(self, code: str, message: str) -> None:
         """Handle Error signal from daemon."""
         GLib.idle_add(self._handle_daemon_error, code, message)
@@ -926,7 +964,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.cancel_button.set_visible(True)
                 self.cancel_button.set_sensitive(True)
                 self.cancel_button.set_label("Cancel Transcription")
-                self.status_bar.set_status("Transcribing... (press Ctrl+X to cancel)")
+                self.status_bar.set_status(transcribing_status_text(self._daemon_model_state))
 
             elif new_state == AppState.CANCELLING:
                 logger.debug("Setting UI for CANCELLING state")

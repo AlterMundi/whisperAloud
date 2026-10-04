@@ -89,6 +89,7 @@ CLIENT_SIGNAL_SUBSCRIPTIONS = {
     "Error",
     "DownloadProgress",
     "DownloadFinished",
+    "ModelStateChanged",
 }
 
 # ─── Regex self-check: keeps the explicit lists above honest ───────────────

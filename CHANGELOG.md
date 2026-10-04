@@ -14,8 +14,22 @@ All notable user-facing changes to this project are documented here.
   Flatpak, where the old wpctl gain raise can't run. Configure it with the
   new `input_gain` config section. `GetStatus()` reports it under
   `"input_gain"` (D-Bus API 1.5.0).
+- The speech model now loads in the background as soon as the daemon starts,
+  instead of on the first transcription (which made the first dictation
+  after every start wait ~9 s). Model readiness is visible: the GUI status
+  bar shows "Loading model…", "Model ready", "Model missing — Download" or
+  the load error, `whisper-aloud status` shows it next to the model, and
+  D-Bus clients get `GetStatus()["model_state"]`/`["model_error"]` and the
+  new `ModelStateChanged` signal (D-Bus API 1.6.0). A recording made while
+  the model is still loading is transcribed as soon as it is ready; a model
+  that is not downloaded is never fetched automatically and fails with a
+  clear "Model not available" error instead.
 
 ### Changed
+- Streaming engines (Nemotron) refuse to start recording until the model is
+  loaded (`Error("model_not_ready")`) instead of loading it synchronously
+  and freezing the daemon, and a model change in Settings now loads in the
+  background instead of blocking the daemon.
 - Nemotron 3.5 ASR Streaming's OpenMDW-1.1 license (pending since 0.3.0) was
   reviewed and accepted by the maintainer on 2026-10-03 (not via a formal
   legal review): the engine is now a normal, visible choice in Settings and

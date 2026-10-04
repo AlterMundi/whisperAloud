@@ -53,12 +53,20 @@ class _FakeClient:
     """Stands in for service.client.WhisperAloudClient: records subscribed
     callbacks and lets the test fire signals exactly as the daemon would."""
 
-    def __init__(self):
+    def __init__(self, model_state: str = "ready"):
         self.is_connected = True
         self._partial_cb = None
         self._ready_cb = None
+        self._model_state_cb = None
+        self._model_state = model_state
 
     # --- subscription surface used by MainWindow._on_daemon_connected ---
+    def on_model_state_changed(self, callback):
+        self._model_state_cb = callback
+
+    def get_status(self):
+        return {"state": "idle", "model_state": self._model_state, "model_error": ""}
+
     def on_status_changed(self, callback):
         pass
 
@@ -91,8 +99,13 @@ class _FakeClient:
         self._ready_cb(text, meta)
         _pump_main_loop()
 
+    def emit_model_state_changed(self, state, detail=""):
+        assert self._model_state_cb is not None, "GUI never subscribed on_model_state_changed"
+        self._model_state_cb(state, detail)
+        _pump_main_loop()
 
-def _make_window():
+
+def _make_window(model_state: str = "ready"):
     import gi
 
     gi.require_version("Gtk", "4.0")
@@ -114,7 +127,7 @@ def _make_window():
     app.register()  # emits GApplication::startup, required before adding windows
     window = MainWindow(application=app)
 
-    fake_client = _FakeClient()
+    fake_client = _FakeClient(model_state=model_state)
     # Wire up exactly as a real daemon connection would (signal subscriptions,
     # config load, state transitions) — not a shortcut around MainWindow's logic.
     window._on_daemon_connected(fake_client)
@@ -214,3 +227,50 @@ def test_markup_injection_in_final_text_is_rendered_as_literal_text():
         "<b>bold?</b> & <i>italic?</i>", {"session_id": "sess-1"}
     )
     assert _buffer_text(window) == "<b>bold?</b> & <i>italic?</i>"
+
+
+# ─── 0.3.0 model readiness (daemon API 1.6.0) ───────────────────────────────
+
+
+def test_model_state_shown_and_follows_model_state_changed():
+    """The status bar shows the daemon's model state from GetStatus at connect
+    time, then follows ModelStateChanged; the record button stays usable
+    while loading (batch transcription waits for the model)."""
+    window, fake_client = _make_window(model_state="loading")
+    bar = window.status_bar
+
+    assert bar.model_state_label.get_visible()
+    assert bar.model_state_label.get_text() == "Loading model…"
+    assert not bar.model_download_button.get_visible()
+    assert window.record_button.get_sensitive()
+
+    fake_client.emit_model_state_changed("missing", "Model 'base' is not downloaded")
+    assert bar.model_state_label.get_text() == "Model missing — Download"
+    assert bar.model_download_button.get_visible()
+
+    fake_client.emit_model_state_changed("ready")
+    assert bar.model_state_label.get_text() == "Model ready"
+    assert not bar.model_download_button.get_visible()
+
+
+def test_transcribing_while_model_loading_shows_the_wait():
+    from whisper_aloud.ui.utils import AppState
+
+    window, fake_client = _make_window(model_state="loading")
+    # Record status messages instead of reading the (transient, shared) label:
+    # MainWindow's own background daemon-connect attempt may also post one
+    # while the main loop is pumped below.
+    shown = []
+    real_set_status = window.status_bar.set_status
+
+    def _spy(text, *args, **kwargs):
+        shown.append(text)
+        return real_set_status(text, *args, **kwargs)
+
+    window.status_bar.set_status = _spy
+
+    window.set_state(AppState.TRANSCRIBING)
+    assert "waiting for the model" in shown[-1].lower()
+
+    fake_client.emit_model_state_changed("ready")
+    assert "Transcribing... (press Ctrl+X to cancel)" in shown

@@ -319,6 +319,8 @@ class TestCancelDuringStreamingFinalize:
 
         _arm_for_recording(daemon, engine)
         daemon.recorder.on_processed_chunk = None
+        # Streaming StartRecording requires a ready model (0.3.0).
+        daemon._model_loaded = True
 
         assert daemon.StartRecording() is True
         assert daemon._streaming_session is True
@@ -616,7 +618,9 @@ class TestDeferredModelReload:
         assert old_engine.entered.wait(timeout=10)
 
         new_engine = _BatchEngineDouble(text="new engine result")
-        with patch.object(daemon._daemon_module, "create_engine", return_value=new_engine) as mock_ce:
+        with patch.object(
+            daemon._daemon_module, "create_engine", return_value=new_engine
+        ) as mock_ce:
             assert daemon.SetConfig({"model.name": "small"}) is True
             # Not swapped yet -- the in-flight job is still using old_engine.
             assert daemon.transcriber is old_engine
@@ -626,6 +630,8 @@ class TestDeferredModelReload:
             gate.set()
             daemon.executor.shutdown(wait=True)
             daemon._main_thread.drain()
+            # 0.3.0: the deferred reload loads on a background thread.
+            daemon._model_load_thread.join(timeout=10)
 
             mock_ce.assert_called_once()
 
@@ -650,7 +656,9 @@ class TestDeferredModelReload:
         assert old_engine.entered.wait(timeout=10)
 
         new_engine = _BatchEngineDouble(text="new engine result")
-        with patch.object(daemon._daemon_module, "create_engine", return_value=new_engine) as mock_ce:
+        with patch.object(
+            daemon._daemon_module, "create_engine", return_value=new_engine
+        ) as mock_ce:
             assert daemon.SetConfig({"model.name": "small"}) is True
             assert daemon.transcriber is old_engine
             mock_ce.assert_not_called()
@@ -658,6 +666,7 @@ class TestDeferredModelReload:
             gate.set()
             daemon.executor.shutdown(wait=True)
             daemon._main_thread.drain()
+            daemon._model_load_thread.join(timeout=10)
 
         daemon.Error.assert_called_once_with("transcription_failed", "boom")
         daemon.TranscriptionReady.assert_not_called()

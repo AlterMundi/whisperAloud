@@ -224,12 +224,18 @@ def cmd_status(args) -> int:
         hotkey = _val(status.get("hotkey_backend", "none"))
         hotkey_trigger = _val(status.get("hotkey_trigger", ""))
         uptime = _val(status.get("uptime", 0))
+        # API 1.6.0 model readiness; absent from older daemons.
+        model_state = _val(status.get("model_state", ""))
+        model_error = _val(status.get("model_error", ""))
 
         hotkey_display = f"{hotkey} ({hotkey_trigger})" if hotkey_trigger else hotkey
+        model_state_display = f" [{model_state}]" if model_state else ""
 
         print(f"WhisperAloud v{version}")
         print(f"  State:    {state}")
-        print(f"  Model:    {model} ({device})")
+        print(f"  Model:    {model} ({device}){model_state_display}")
+        if model_error:
+            print(f"  Model error: {model_error}")
         print(f"  Hotkey:   {hotkey_display}")
         print(f"  Uptime:   {_format_uptime(uptime)}")
         return 0

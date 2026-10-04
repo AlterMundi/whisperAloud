@@ -147,6 +147,15 @@ def make_daemon(
     # out to xdotool/ydotool/xclip — exactly the kind of process-boundary call the brief
     # says must stay mocked.
     stack.enter_context(patch("whisper_aloud.clipboard.PasteSimulator"))
+    # 0.3.0 model preload: background (re)loads first check, offline, whether
+    # the configured model is available locally. Never let a unit test
+    # consult the real model caches for that -- report "available" unless a
+    # test patches it differently. Patched on the module object the freshly
+    # imported daemon module references (patch.dict(sys.modules) above can
+    # leave a different whisper_aloud.service.model_state in sys.modules).
+    stack.enter_context(
+        patch.object(daemon_module.model_state, "is_model_available", return_value=True)
+    )
 
     mock_glib.Variant = lambda t, v: v
     mock_glib.idle_add = lambda fn, *args: fn(*args)
