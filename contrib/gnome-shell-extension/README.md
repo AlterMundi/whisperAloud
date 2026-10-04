@@ -70,8 +70,18 @@ and exports two interfaces on it:
 
 | Object | Interface | Used by |
 |---|---|---|
-| `/org/fede/whisperaloud/Window` | `org.fede.whisperaloud.Window`: `GetFocusedWindow() → a{sv}`, `ActivateWindow(u) → b` | The daemon's `WindowManager` "gnome-extension" backend (`paste_to_captured_window`) |
+| `/org/fede/whisperaloud/Window` | `org.fede.whisperaloud.Window`: `GetFocusedWindow() → a{sv}`, `ActivateWindow(u) → b`, `FocusChanged(s window_id)` signal | The daemon's `WindowManager` "gnome-extension" backend (`paste_to_captured_window`) |
 | `/org/fede/whisperaloud/ShellExtension` | `org.fede.whisperaloud.ShellExtension`: `GetInfo() → a{sv}` (`uuid`, `version`, `shell_version`) | Settings → Top bar indicator (status and version) |
+
+`FocusChanged` fires on every real `global.display` `notify::focus-window`
+change (no polling) and carries the newly-focused window's id as a string
+(empty when nothing is focused). The daemon's auto-paste flow subscribes to
+it after calling `ActivateWindow` to CONFIRM the captured window actually
+regained focus before simulating a paste (WHISP-88) -- `ActivateWindow`'s
+own return value only ever meant "the call was issued", never "focus
+landed"; if no matching `FocusChanged` arrives (extension too old, or focus
+genuinely went elsewhere), the daemon skips the paste rather than risk
+typing into the wrong window, and the text stays on the clipboard.
 
 While that name has an owner, the daemon hides its own AppIndicator tray
 icon, so you do not get two WhisperAloud icons. The tray icon comes back as

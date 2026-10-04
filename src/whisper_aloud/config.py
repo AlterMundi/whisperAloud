@@ -203,6 +203,20 @@ class ClipboardConfig:
     """Configuration for clipboard integration."""
     auto_copy: bool = True
     auto_paste: bool = True
+    # WHISP-88: for the captured-window auto-paste path, this is now only
+    # an OPTIONAL settle delay applied *after* WindowManager.confirm_focus()
+    # has already confirmed (via a real event/observed condition -- never a
+    # guess) that the captured window regained focus. It is no longer the
+    # thing standing between "window activated" and "keys sent" -- that gap
+    # is closed by confirm_focus() itself; this delay just gives a
+    # just-restored window's own redraw/animation a little extra margin.
+    # It is also still reused, separately, by paste_simulator.simulate_paste()
+    # as a generic pre-keystroke delay before EVERY synthesized paste
+    # (captured-window or not) -- a known coupling of two different
+    # purposes under one knob, flagged in
+    # docs/audits/2026-10-04-runtime-assumptions.md as a separate,
+    # not-yet-fixed MEDIUM finding; left as-is here to keep this change
+    # scoped to focus confirmation.
     paste_delay_ms: int = 100
     paste_shortcut: str = "ctrl+shift+v"   # "ctrl+v" or "ctrl+shift+v"
     timeout_seconds: float = 5.0

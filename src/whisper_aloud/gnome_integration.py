@@ -94,6 +94,25 @@ class NotificationManager:
 
         notification.show()
 
+    def show_paste_skipped_focus_changed(self) -> None:
+        """Notify that auto-paste was skipped because focus on the
+        captured window could not be confirmed (WHISP-88).
+
+        The text is still on the clipboard -- only the automatic Ctrl+V
+        was skipped, to avoid typing the transcription into whatever
+        window happens to be focused instead of the one the user was
+        dictating into."""
+        if not HAS_NOTIFY or not self._is_enabled("transcription_completed"):
+            return
+
+        notification = Notify.Notification.new(
+            self.app_name,
+            "Text copied; focus changed, paste skipped",
+            "edit-copy-symbolic"
+        )
+        notification.set_urgency(Notify.Urgency.NORMAL)
+        notification.show()
+
     def show_error(self, error_message: str) -> None:
         """Show error notification."""
         if not HAS_NOTIFY or not self._is_enabled("error"):
