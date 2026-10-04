@@ -123,6 +123,57 @@ class TestPortalBackendDetection:
                 assert isinstance(result, bool)
 
 
+class TestGetBoundTrigger:
+    """HotkeyManager.get_bound_trigger exposes what the portal actually
+    bound (e.g. GNOME's chosen accelerator), not the configured preference."""
+
+    def test_returns_none_when_backend_is_not_portal(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_kb = MagicMock()
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=None):
+            with patch("whisper_aloud.service.hotkey._try_import_keybinder", return_value=mock_kb):
+                manager = HotkeyManager()
+                assert manager.backend == "keybinder"
+                assert manager.get_bound_trigger() is None
+
+    def test_returns_none_when_not_bound_yet(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_xdp = MagicMock()
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=mock_xdp):
+            manager = HotkeyManager()
+            assert manager.backend == "portal"
+            # _portal_hotkeys is only set by _register_portal(); never
+            # called here, so there's nothing to ask yet.
+            assert manager.get_bound_trigger() is None
+
+    def test_returns_portal_trigger_description_once_bound(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_xdp = MagicMock()
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=mock_xdp):
+            manager = HotkeyManager()
+            mock_portal_instance = MagicMock()
+            mock_portal_instance.get_trigger_description.return_value = "Press <Control>space"
+            manager._portal_hotkeys = mock_portal_instance
+
+            assert manager.get_bound_trigger("toggle") == "Press <Control>space"
+            mock_portal_instance.get_trigger_description.assert_called_once_with("toggle")
+
+    def test_never_raises_if_portal_object_misbehaves(self):
+        from whisper_aloud.service.hotkey import HotkeyManager
+
+        mock_xdp = MagicMock()
+        with patch("whisper_aloud.service.hotkey._try_import_portal", return_value=mock_xdp):
+            manager = HotkeyManager()
+            mock_portal_instance = MagicMock()
+            mock_portal_instance.get_trigger_description.side_effect = Exception("boom")
+            manager._portal_hotkeys = mock_portal_instance
+
+            assert manager.get_bound_trigger() is None
+
+
 class TestKeybinderBackendDetection:
     """Tests for libkeybinder3 backend detection using mocks."""
 

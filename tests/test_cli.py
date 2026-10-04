@@ -377,6 +377,29 @@ def test_status_formatted_output(mock_check, mock_call, capsys):
 
 @patch('whisper_aloud.__main__.call_service_method')
 @patch('whisper_aloud.__main__.check_service_running', return_value=True)
+def test_status_shows_bound_trigger_when_present(mock_check, mock_call, capsys):
+    """Status should show the portal's actual bound trigger alongside the
+    backend name, e.g. for a GNOME-chosen accelerator that differs from
+    our configured preference."""
+    mock_call.return_value = {
+        "state": "idle",
+        "version": "0.2.0",
+        "model": "base",
+        "device": "cpu",
+        "hotkey_backend": "portal",
+        "hotkey_trigger": "Press <Control>space",
+        "uptime": 3720.5,
+    }
+    with patch('sys.argv', ['whisper-aloud', 'status']):
+        exit_code = main()
+        assert exit_code == 0
+        output = capsys.readouterr().out
+        assert "portal" in output
+        assert "Press <Control>space" in output
+
+
+@patch('whisper_aloud.__main__.call_service_method')
+@patch('whisper_aloud.__main__.check_service_running', return_value=True)
 def test_start_command(mock_check, mock_call, capsys):
     """Start command calls daemon and prints confirmation."""
     with patch('sys.argv', ['whisper-aloud', 'start']):

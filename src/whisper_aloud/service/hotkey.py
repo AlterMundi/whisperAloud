@@ -189,6 +189,24 @@ class HotkeyManager:
         """Whether any automatic hotkey backend is available."""
         return self._backend in ("portal", "keybinder")
 
+    def get_bound_trigger(self, shortcut_id: str = "toggle") -> Optional[str]:
+        """Human-readable trigger the portal actually bound (e.g.
+        'Press <Control>space'), or None if unknown/not using the portal
+        backend/not bound yet.
+
+        Only meaningful for the "portal" backend -- the user may have
+        picked a different accelerator than our configured preference in
+        GNOME's "Add Keyboard Shortcuts" dialog, and GetStatus should
+        reflect the real one rather than the configured preference.
+        """
+        if self._backend != "portal" or self._portal_hotkeys is None:
+            return None
+        try:
+            return self._portal_hotkeys.get_trigger_description(shortcut_id)
+        except Exception as e:
+            logger.debug("get_bound_trigger failed: %s", e)
+            return None
+
     # -- Private backend methods --
 
     def _register_portal(self, accel: str, callback: Callable[[], None]) -> bool:

@@ -222,12 +222,15 @@ def cmd_status(args) -> int:
         model = _val(status.get("model", "?"))
         device = _val(status.get("device", "?"))
         hotkey = _val(status.get("hotkey_backend", "none"))
+        hotkey_trigger = _val(status.get("hotkey_trigger", ""))
         uptime = _val(status.get("uptime", 0))
+
+        hotkey_display = f"{hotkey} ({hotkey_trigger})" if hotkey_trigger else hotkey
 
         print(f"WhisperAloud v{version}")
         print(f"  State:    {state}")
         print(f"  Model:    {model} ({device})")
-        print(f"  Hotkey:   {hotkey}")
+        print(f"  Hotkey:   {hotkey_display}")
         print(f"  Uptime:   {_format_uptime(uptime)}")
         return 0
     except WhisperAloudError as e:

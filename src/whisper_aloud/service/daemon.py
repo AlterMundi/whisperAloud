@@ -866,6 +866,12 @@ class WhisperAloudService:
             "model": GLib.Variant("s", self.config.model.name),
             "device": GLib.Variant("s", self.config.model.device),
             "hotkey_backend": GLib.Variant("s", self.hotkey_manager.backend if self.hotkey_manager else "none"),
+            "hotkey_trigger": GLib.Variant(
+                "s",
+                (self.hotkey_manager.get_bound_trigger() or "")
+                if self.hotkey_manager
+                else "",
+            ),
             "uptime": GLib.Variant("d", time.monotonic() - self._start_time),
             "downloading": GLib.Variant("b", self._downloading),
         }
