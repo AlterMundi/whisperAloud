@@ -6,8 +6,9 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gio, Gtk
+from gi.repository import Gio, GLib, Gtk
 
+from .file_transcription_logic import pick_first_supported_path
 from .main_window import MainWindow
 from .styles import install_app_css
 
@@ -21,7 +22,12 @@ class WhisperAloudApp(Gtk.Application):
         """Initialize the application."""
         super().__init__(
             application_id='org.fede.whisperaloud.Gui',
-            flags=Gio.ApplicationFlags.FLAGS_NONE
+            # HANDLES_OPEN (WHISP-96): "Open With WhisperAloud" on an audio/
+            # video file, or `whisper-aloud-gui <file>` from a shell, invokes
+            # do_open() below with that file instead of (or in addition to)
+            # do_activate() -- see data/org.fede.whisperaloud.desktop's
+            # Exec=...%F and MimeType=.
+            flags=Gio.ApplicationFlags.HANDLES_OPEN
         )
         self.window: Optional[MainWindow] = None
         logger.info("WhisperAloud application initialized")
@@ -57,6 +63,29 @@ class WhisperAloudApp(Gtk.Application):
 
         # Present window to user
         self.window.present()
+
+    def do_open(self, files, n_files: int, hint: str) -> None:
+        """Called (instead of/alongside do_activate) when GApplication is
+        asked to open one or more files -- "Open With WhisperAloud" on an
+        audio/video file, or `whisper-aloud-gui <file>` (WHISP-96).
+
+        Only the first supported audio/video file among `files` is used;
+        see pick_first_supported_path()'s docstring for why a single file
+        is this ticket's deliberate scope.
+        """
+        logger.info(f"Application asked to open {n_files} file(s)")
+
+        if not self.window:
+            logger.info("Creating main window (opened via file)")
+            self.window = MainWindow(application=self)
+        self.window.present()
+
+        paths = [f.get_path() for f in files]
+        path = pick_first_supported_path(paths)
+        if path is None:
+            logger.warning(f"No supported audio/video file among opened paths: {paths!r}")
+            return
+        GLib.idle_add(self.window.open_file_for_transcription, path)
 
     def do_shutdown(self) -> None:
         """

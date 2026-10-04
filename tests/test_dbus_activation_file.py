@@ -27,7 +27,12 @@ BUS_NAME = "org.fede.whisperaloud"
 
 
 def _parse_service_file(path: Path) -> configparser.ConfigParser:
-    parser = configparser.ConfigParser()
+    # interpolation=None (WHISP-96): a desktop entry's Exec= legitimately
+    # contains literal "%"-field-codes (%f/%F/%u/%U/%%) that are not this
+    # ini-style parser's own interpolation syntax -- the default
+    # BasicInterpolation would raise InterpolationSyntaxError on "%F" the
+    # moment one shows up (as it now does, for the file-open Exec=).
+    parser = configparser.ConfigParser(interpolation=None)
     # D-Bus/systemd unit files are case-sensitive key=value under [Section]
     # headers, same shape as .ini; configparser's default optionxform()
     # lowercases keys, which would silently merge e.g. "Name" oddities, so
@@ -123,6 +128,30 @@ class TestDesktopEntryIsWindowFirst:
             if section.startswith("Desktop Action ")
         ]
         assert sorted(declared) == sorted(action_groups)
+
+
+class TestDesktopEntryOpensFiles:
+    """WHISP-96: "Open with WhisperAloud" on an audio/video file must launch
+    the GUI with that file, both natively and (via flatpak-builder's
+    automatic %f/%F -> document-portal rewriting) under Flatpak."""
+
+    _EXPECTED_MIME_TYPES = {
+        "audio/mpeg", "audio/x-m4a", "audio/mp4", "audio/wav", "audio/x-wav",
+        "audio/ogg", "audio/flac", "audio/webm",
+        "video/mp4", "video/webm", "video/x-matroska",
+    }
+
+    def test_declares_audio_and_video_mime_types(self):
+        parser = _parse_service_file(DESKTOP_FILE)
+        declared = {m for m in parser.get("Desktop Entry", "MimeType").split(";") if m}
+        assert self._EXPECTED_MIME_TYPES <= declared
+
+    def test_main_exec_passes_file_argument_placeholder(self):
+        """%F (multiple local files) -- not %U -- since the GUI opens local/
+        document-portal paths, never remote URIs."""
+        parser = _parse_service_file(DESKTOP_FILE)
+        exec_line = parser.get("Desktop Entry", "Exec")
+        assert "%F" in exec_line.split()
 
 
 @pytest.mark.skipif(

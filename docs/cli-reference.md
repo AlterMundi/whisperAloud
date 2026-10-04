@@ -91,6 +91,22 @@ without touching daemon/GUI VAD settings, and `--normalize` applies a
 dynamic loudness pass (reusing the daemon's own AGC) before transcription,
 useful for quiet or unevenly leveled recordings.
 
+### Reading audio from stdin
+
+`file` may be `-` instead of a path, to read the audio from stdin (buffered
+to a private temp file, removed afterwards):
+
+```bash
+arecord -f cd -d 10 -t raw | sox -t raw -r 44100 -e signed -b 16 -c 1 - -t wav - \
+  | whisper-aloud transcribe -
+```
+
+This is also the form to use when running the Flatpak build from a script:
+see ["Running `transcribe` inside the Flatpak
+sandbox"](flatpak.md#running-transcribe-inside-the-flatpak-sandbox) in
+`docs/flatpak.md` for why a plain host path doesn't work there and the two
+ways around it (`--file-forwarding`, or piping via stdin as above).
+
 ## Config show / validation
 
 ```bash

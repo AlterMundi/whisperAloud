@@ -82,6 +82,18 @@ class _FakeClient:
     def on_partial_transcript(self, callback):
         self._partial_cb = callback
 
+    def on_file_transcription_progress(self, callback):
+        """WHISP-96: MainWindow._on_daemon_connected() always subscribes to
+        this; not exercised by these partial-transcript tests, so it's a
+        no-op stub."""
+        pass
+
+    def on_file_transcription_ready(self, callback):
+        pass
+
+    def on_file_transcription_error(self, callback):
+        pass
+
     def watch_name(self, on_connected=None, on_disconnected=None):
         pass
 

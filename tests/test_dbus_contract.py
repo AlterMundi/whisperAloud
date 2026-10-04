@@ -76,6 +76,7 @@ CLIENT_METHOD_CALLS = {
     "Quit": 0,
     "DownloadModel": 3,
     "CancelDownload": 0,
+    "TranscribeFile": 2,
 }
 
 CLIENT_SIGNAL_SUBSCRIPTIONS = {
@@ -90,6 +91,9 @@ CLIENT_SIGNAL_SUBSCRIPTIONS = {
     "DownloadProgress",
     "DownloadFinished",
     "ModelStateChanged",
+    "FileTranscriptionProgress",
+    "FileTranscriptionReady",
+    "FileTranscriptionError",
     "HotkeyStateChanged",
 }
 
