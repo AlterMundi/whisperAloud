@@ -2,8 +2,7 @@
 
 Exercises the real Gio signal-subscribe/unsubscribe and D-Bus-call paths in
 `WindowManager.confirm_focus()`'s gnome-extension backend against a fake
-`org.fede.whisperaloud.Window` service (standing in for the GNOME shell
-extension's exported interface, see
+GNOME extension service (standing in for
 contrib/gnome-shell-extension/whisperaloud@fede/extension.js) on a
 throwaway dbus-run-session bus -- never the real session bus.
 
@@ -18,20 +17,24 @@ private address for the duration of its own body.
 
 The fake extension runs in a SEPARATE PROCESS (same pattern as
 tests/test_portal_paste_integration.py's fake RemoteDesktop portal), not
-in-process: `WindowManager._check_gnome_extension`/`confirm_focus`'s race
--guard both use a blocking `Gio.DBusProxy.call_sync()` on the test's main
-thread, which pushes its own private GMainContext while waiting -- an
-in-process fake service registered on that same thread's default context
-would never get its method-dispatch source iterated, and the call would
-simply time out. A separate process has its own independent main loop, so
-it keeps answering regardless of what the test thread is doing.
+in-process: confirm_focus's own async D-Bus calls are dispatched on the
+test's main thread's default GMainContext, which an in-process fake
+service registered on that SAME context would also need iterated to
+answer -- simplest and most realistic to just run it as an independent
+process with its own main loop, exactly like the real extension.
 
-Covers the three outcomes `confirm_focus()` must support:
-  * FocusChanged(captured_id) -> callback(True), paste may proceed.
-  * FocusChanged(other_id)    -> callback(False) immediately (a real,
-    observed "focus went elsewhere" event -- never waits out the timeout).
-  * no signal at all          -> callback(False) once the bounded timeout
-    elapses (degrade, not a hang).
+Regression covered here (field bug, found in review): the maintainer's
+real extension at the time was v1 -- it exports GetFocusedWindow but NOT
+the FocusChanged signal added in this ticket. Blindly waiting for a signal
+that will never arrive made EVERY auto-paste silently skip. confirm_focus
+must detect this via the extension's own GetInfo version (cached per
+name-owner-change) and:
+  * version >= 4 (supports FocusChanged): wait for the signal as before.
+  * version < 4 (known unsupported): confirm via bounded GetFocusedWindow
+    re-queries instead of a signal that will never come.
+  * GetInfo itself unavailable (unknown): fail open -- the pre-WHISP-88
+    behavior (proceed to paste, no confirmation) with a WARNING, rather
+    than skipping every paste against an extension we could not even ask.
 """
 import os
 import subprocess
@@ -57,14 +60,25 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 EXT_BUS_NAME = "org.gnome.Shell.Extensions.whisperaloud"
+WINDOW_PATH = "/org/fede/whisperaloud/Window"
+EXT_INFO_PATH = "/org/fede/whisperaloud/ShellExtension"
 CONTROL_IFACE = "org.whisperaloud.test.FakeWindowExtensionControl"
 
+# {VERSION_BLOCK} is substituted per-test: either a real ShellExtension
+# interface/handler reporting a chosen "version" (>=4 supports
+# FocusChanged, <4 predates it), or nothing at all (simulating an
+# extension old enough that GetInfo/the whole interface is unavailable --
+# the "unknown capability" case).
 _FAKE_EXTENSION_SERVICE_SRC = textwrap.dedent(
     """
     # Minimal fake org.gnome.Shell.Extensions.whisperaloud service for
     # WHISP-88 integration testing: implements org.fede.whisperaloud.Window
-    # (GetFocusedWindow/ActivateWindow/FocusChanged) plus a test-only
-    # control interface used to trigger a FocusChanged emission on demand.
+    # (GetFocusedWindow/ActivateWindow/FocusChanged), optionally
+    # org.fede.whisperaloud.ShellExtension (GetInfo, with a configurable
+    # version), plus a test-only control interface to trigger a
+    # FocusChanged emission and to move the "currently focused" window id
+    # GetFocusedWindow reports.
+    import os
     import gi
     gi.require_version("Gio", "2.0")
     from gi.repository import Gio, GLib
@@ -72,7 +86,18 @@ _FAKE_EXTENSION_SERVICE_SRC = textwrap.dedent(
     BUS_NAME = "org.gnome.Shell.Extensions.whisperaloud"
     WINDOW_PATH = "/org/fede/whisperaloud/Window"
     WINDOW_IFACE = "org.fede.whisperaloud.Window"
+    EXT_INFO_PATH = "/org/fede/whisperaloud/ShellExtension"
+    EXT_INFO_IFACE = "org.fede.whisperaloud.ShellExtension"
 
+    version_env = os.environ.get("FAKE_EXT_VERSION", "")
+    HAS_INFO = version_env != ""
+    VERSION = int(version_env) if HAS_INFO else 0
+    focused_window_id = [""]
+
+    # The ShellExtension interface is always DECLARED, but only REGISTERED
+    # (below) when HAS_INFO -- so an "unknown capability" run (no
+    # FAKE_EXT_VERSION) answers GetInfo with a real D-Bus UnknownInterface
+    # error instead of needing a second, string-spliced introspection XML.
     INTROSPECTION = \"\"\"
     <node>
       <interface name="org.fede.whisperaloud.Window">
@@ -87,8 +112,16 @@ _FAKE_EXTENSION_SERVICE_SRC = textwrap.dedent(
           <arg type="s" name="window_id"/>
         </signal>
       </interface>
+      <interface name="org.fede.whisperaloud.ShellExtension">
+        <method name="GetInfo">
+          <arg direction="out" type="a{sv}" name="info"/>
+        </method>
+      </interface>
       <interface name="org.whisperaloud.test.FakeWindowExtensionControl">
         <method name="EmitFocusChanged">
+          <arg type="s" name="window_id" direction="in"/>
+        </method>
+        <method name="SetFocusedWindow">
           <arg type="s" name="window_id" direction="in"/>
         </method>
       </interface>
@@ -98,9 +131,17 @@ _FAKE_EXTENSION_SERVICE_SRC = textwrap.dedent(
     def handle_method_call(conn, sender, path, iface, method, params, invocation):
         if iface == "org.fede.whisperaloud.Window":
             if method == "GetFocusedWindow":
-                invocation.return_value(GLib.Variant("(a{sv})", ({},)))
+                window = {}
+                if focused_window_id[0]:
+                    window = {"id": GLib.Variant("u", int(focused_window_id[0]))}
+                invocation.return_value(GLib.Variant("(a{sv})", (window,)))
             elif method == "ActivateWindow":
                 invocation.return_value(GLib.Variant("(b)", (True,)))
+            return
+        if iface == "org.fede.whisperaloud.ShellExtension":
+            if method == "GetInfo":
+                invocation.return_value(GLib.Variant(
+                    "(a{sv})", ({"version": GLib.Variant("u", VERSION)},)))
             return
         if iface == "org.whisperaloud.test.FakeWindowExtensionControl":
             if method == "EmitFocusChanged":
@@ -110,6 +151,10 @@ _FAKE_EXTENSION_SERVICE_SRC = textwrap.dedent(
                     GLib.Variant("(s)", (window_id,)),
                 )
                 invocation.return_value(None)
+            elif method == "SetFocusedWindow":
+                (window_id,) = params.unpack()
+                focused_window_id[0] = window_id
+                invocation.return_value(None)
             return
         invocation.return_value(None)
 
@@ -117,7 +162,12 @@ _FAKE_EXTENSION_SERVICE_SRC = textwrap.dedent(
 
     def on_bus_acquired(conn, name):
         for iface in node_info.interfaces:
-            conn.register_object(WINDOW_PATH, iface, handle_method_call, None, None)
+            if iface.name == EXT_INFO_IFACE:
+                if not HAS_INFO:
+                    continue
+                conn.register_object(EXT_INFO_PATH, iface, handle_method_call, None, None)
+            else:
+                conn.register_object(WINDOW_PATH, iface, handle_method_call, None, None)
 
     owner_id = Gio.bus_own_name(
         Gio.BusType.SESSION, BUS_NAME, Gio.BusNameOwnerFlags.NONE,
@@ -130,25 +180,35 @@ _FAKE_EXTENSION_SERVICE_SRC = textwrap.dedent(
 )
 
 
-def _emit_focus_changed(bus, window_id: str) -> None:
-    bus.call_sync(
-        EXT_BUS_NAME, "/org/fede/whisperaloud/Window", CONTROL_IFACE,
-        "EmitFocusChanged", GLib.Variant("(s)", (window_id,)), None,
+def _control_call(bus, method, arg_variant=None):
+    return bus.call_sync(
+        EXT_BUS_NAME, WINDOW_PATH, CONTROL_IFACE, method, arg_variant, None,
         Gio.DBusCallFlags.NONE, 2000, None,
     )
 
 
 @pytest.fixture
-def fake_extension(tmp_path):
+def start_fake_extension(tmp_path):
+    """Returns a factory ``start(version=None)`` that spawns the fake
+    extension (``version=None`` omits the ShellExtension/GetInfo interface
+    entirely, simulating an extension too old to even answer that) and
+    yields ``(emit_focus_changed, set_focused_window)`` helpers. Cleans up
+    the subprocess on teardown."""
     bus_addr = private_bus_address()
-    script = tmp_path / "fake_window_extension_service.py"
-    script.write_text(_FAKE_EXTENSION_SERVICE_SRC)
+    procs = []
 
-    env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=bus_addr)
-    proc = subprocess.Popen([sys.executable, str(script)], env=env)
-    try:
-        # Bounded wait for the fake service to actually own its bus name,
-        # polling the real NameHasOwner condition rather than a blind sleep.
+    def start(version=None):
+        script = tmp_path / f"fake_window_extension_service_{len(procs)}.py"
+        script.write_text(_FAKE_EXTENSION_SERVICE_SRC)
+
+        env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=bus_addr)
+        if version is not None:
+            env["FAKE_EXT_VERSION"] = str(version)
+        else:
+            env.pop("FAKE_EXT_VERSION", None)
+        proc = subprocess.Popen([sys.executable, str(script)], env=env)
+        procs.append(proc)
+
         control_bus = Gio.DBusConnection.new_for_address_sync(
             bus_addr,
             Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
@@ -169,9 +229,19 @@ def fake_extension(tmp_path):
             time.sleep(0.05)
         assert owned, "fake extension service never claimed its bus name"
 
-        yield control_bus, lambda window_id: _emit_focus_changed(control_bus, window_id)
-    finally:
+        def emit_focus_changed(window_id: str) -> None:
+            _control_call(control_bus, "EmitFocusChanged", GLib.Variant("(s)", (window_id,)))
+
+        def set_focused_window(window_id: str) -> None:
+            _control_call(control_bus, "SetFocusedWindow", GLib.Variant("(s)", (window_id,)))
+
+        return emit_focus_changed, set_focused_window
+
+    yield start
+
+    for proc in procs:
         proc.terminate()
+    for proc in procs:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -179,18 +249,13 @@ def fake_extension(tmp_path):
             proc.wait(timeout=5)
 
 
-@pytest.fixture
-def window_manager(fake_extension):
-    """A real WindowManager connected to the private bus, with the
-    gnome-extension backend already detected (the fake service above
-    answers GetFocusedWindow)."""
-    bus_addr = private_bus_address()
+def _make_window_manager(bus_addr):
     with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": bus_addr}):
         from whisper_aloud.clipboard.window_manager import WindowManager
 
         wm = WindowManager()
         assert wm.backend == "gnome-extension"
-        yield wm
+        return wm
 
 
 def _confirm(wm, window_id, timeout_ms=3000):
@@ -214,23 +279,26 @@ def _spin(predicate, timeout=5.0):
     return predicate()
 
 
-class TestConfirmFocusMatches:
-    def test_focus_changed_to_captured_window_confirms_true(self, window_manager, fake_extension):
-        _control_bus, emit = fake_extension
-        result = _confirm(window_manager, 42)
+class TestConfirmFocusViaSignalWhenSupported:
+    """version >= 4: the extension supports FocusChanged, so confirm_focus
+    waits for it exactly as before."""
+
+    def test_focus_changed_to_captured_window_confirms_true(self, start_fake_extension):
+        emit, _set_focus = start_fake_extension(version=4)
+        bus_addr = private_bus_address()
+        wm = _make_window_manager(bus_addr)
+        result = _confirm(wm, 42)
 
         emit("42")
 
         assert _spin(lambda: "ok" in result)
         assert result["ok"] is True
 
-
-class TestConfirmFocusMismatchDegradesImmediately:
-    def test_focus_changed_to_a_different_window_reports_false_fast(
-        self, window_manager, fake_extension
-    ):
-        _control_bus, emit = fake_extension
-        result = _confirm(window_manager, 42, timeout_ms=5000)
+    def test_focus_changed_to_a_different_window_reports_false_fast(self, start_fake_extension):
+        emit, _set_focus = start_fake_extension(version=4)
+        bus_addr = private_bus_address()
+        wm = _make_window_manager(bus_addr)
+        result = _confirm(wm, 42, timeout_ms=5000)
 
         emit("99")  # a DIFFERENT window got focus -- a real, observed event
 
@@ -239,18 +307,71 @@ class TestConfirmFocusMismatchDegradesImmediately:
         assert _spin(lambda: "ok" in result, timeout=1.5)
         assert result["ok"] is False
 
-
-class TestConfirmFocusNoSignalDegrades:
-    def test_no_focus_changed_signal_times_out_and_degrades(
-        self, window_manager, fake_extension, caplog
-    ):
+    def test_no_focus_changed_signal_times_out_and_degrades(self, start_fake_extension, caplog):
         import logging
 
-        _control_bus, _emit = fake_extension
-        with caplog.at_level(logging.WARNING):
-            result = _confirm(window_manager, 42, timeout_ms=300)
+        _emit, _set_focus = start_fake_extension(version=4)
+        bus_addr = private_bus_address()
+        wm = _make_window_manager(bus_addr)
 
+        with caplog.at_level(logging.WARNING):
+            result = _confirm(wm, 42, timeout_ms=300)
             assert _spin(lambda: "ok" in result, timeout=3.0)
 
         assert result["ok"] is False
+        assert any("WHISP-88" in r.message for r in caplog.records)
+
+
+class TestConfirmFocusViaRequeryWhenUnsupported:
+    """Field regression: version < 4 (e.g. the maintainer's real v1
+    install) never emits FocusChanged. confirm_focus must detect this via
+    GetInfo and confirm via GetFocusedWindow re-queries instead of waiting
+    on a signal that will never arrive."""
+
+    def test_matching_focused_window_confirms_true_without_any_signal(self, start_fake_extension):
+        _emit, set_focus = start_fake_extension(version=1)
+        bus_addr = private_bus_address()
+        wm = _make_window_manager(bus_addr)
+
+        set_focus("42")
+        result = _confirm(wm, 42, timeout_ms=5000)
+
+        assert _spin(lambda: "ok" in result, timeout=3.0)
+        assert result["ok"] is True
+
+    def test_persistent_mismatch_degrades_with_warning(self, start_fake_extension, caplog):
+        import logging
+
+        _emit, set_focus = start_fake_extension(version=1)
+        bus_addr = private_bus_address()
+        wm = _make_window_manager(bus_addr)
+
+        set_focus("99")  # never matches the captured window
+        with caplog.at_level(logging.WARNING):
+            result = _confirm(wm, 42, timeout_ms=5000)
+            assert _spin(lambda: "ok" in result, timeout=3.0)
+
+        assert result["ok"] is False
+        assert any("WHISP-88" in r.message for r in caplog.records)
+
+
+class TestConfirmFocusFallsBackWhenCapabilityUnknown:
+    """GetInfo itself unavailable (extension too old to even export
+    ShellExtension): must NOT skip every paste -- fail open to the
+    pre-WHISP-88 behavior (proceed, no confirmation) with a WARNING."""
+
+    def test_unknown_capability_falls_back_to_proceeding_with_warning(
+        self, start_fake_extension, caplog
+    ):
+        import logging
+
+        start_fake_extension(version=None)
+        bus_addr = private_bus_address()
+        wm = _make_window_manager(bus_addr)
+
+        with caplog.at_level(logging.WARNING):
+            result = _confirm(wm, 42, timeout_ms=5000)
+            assert _spin(lambda: "ok" in result, timeout=3.0)
+
+        assert result["ok"] is True
         assert any("WHISP-88" in r.message for r in caplog.records)
