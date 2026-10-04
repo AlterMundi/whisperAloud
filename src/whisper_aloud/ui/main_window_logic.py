@@ -1,7 +1,68 @@
 """Pure logic helpers for MainWindow behavior."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Sequence
+
+TRANSCRIBING_STATUS_TEXT = "Transcribing... (press Ctrl+X to cancel)"
+_MAX_MODEL_ERROR_CHARS = 80
+
+
+@dataclass(frozen=True)
+class ModelStateView:
+    """How the status bar presents the daemon's model readiness (API 1.6.0)."""
+
+    text: str
+    show_download: bool
+    is_ready: bool
+
+
+def _unpack(value: Any) -> Any:
+    if hasattr(value, "unpack"):
+        try:
+            return value.unpack()
+        except Exception:
+            return value
+    return value
+
+
+def resolve_model_state(status_payload: Mapping[str, Any] | None) -> tuple[str, str]:
+    """Return (model_state, model_error) from a GetStatus payload; ("", "")
+    for an older daemon that does not report model readiness."""
+    if not isinstance(status_payload, Mapping):
+        return "", ""
+    state = str(_unpack(status_payload.get("model_state", "")) or "")
+    error = str(_unpack(status_payload.get("model_error", "")) or "")
+    return state, error
+
+
+def describe_model_state(state: str, detail: str = "") -> ModelStateView:
+    """Status-bar text for a model state. The record button is never disabled
+    by this: a batch transcription simply waits for the model, and the
+    daemon reports an explicit Error if it cannot."""
+    if state == "loading":
+        return ModelStateView("Loading model…", False, False)
+    if state == "ready":
+        return ModelStateView("Model ready", False, True)
+    if state == "missing":
+        return ModelStateView("Model missing — Download", True, False)
+    if state == "downloading":
+        return ModelStateView("Downloading model…", False, False)
+    if state == "error":
+        reason = detail or "failed to load"
+        if len(reason) > _MAX_MODEL_ERROR_CHARS:
+            reason = reason[: _MAX_MODEL_ERROR_CHARS - 1] + "…"
+        return ModelStateView(f"Model error: {reason}", False, False)
+    if state == "unloaded":
+        return ModelStateView("Model not loaded", False, False)
+    return ModelStateView("", False, True)
+
+
+def transcribing_status_text(model_state: str) -> str:
+    """Transient status while transcribing; makes a wait for the model visible."""
+    if model_state == "loading":
+        return "Transcribing… waiting for the model to load (press Ctrl+X to cancel)"
+    return TRANSCRIBING_STATUS_TEXT
 
 
 def is_daemon_interaction_ready(

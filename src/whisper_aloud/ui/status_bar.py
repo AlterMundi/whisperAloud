@@ -33,6 +33,21 @@ class StatusBar(Gtk.Box):
         self.model_label.add_css_class("wa-status-text")
         self.append(self.model_label)
 
+        # Model readiness (daemon API 1.6.0): persistent, unlike the
+        # transient status message below. Hidden until the daemon reports it.
+        self.model_state_label = Gtk.Label(label="")
+        self.model_state_label.add_css_class("wa-status-text")
+        self.model_state_label.set_visible(False)
+        self.append(self.model_state_label)
+
+        self.model_download_button = Gtk.Button(label="Download…")
+        self.model_download_button.add_css_class("flat")
+        self.model_download_button.set_tooltip_text(
+            "Open Settings to download the configured model"
+        )
+        self.model_download_button.set_visible(False)
+        self.append(self.model_download_button)
+
         # Separator
         self.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
@@ -91,6 +106,13 @@ class StatusBar(Gtk.Box):
         self.model_label.set_text(f"Model: {name} ({device})")
         if language:
             self.language_label.set_text(f"Lang: {language}")
+
+    def set_model_state(self, text: str, show_download: bool = False) -> None:
+        """Show the model readiness text (empty hides it) and, for a missing
+        model, the Download button."""
+        self.model_state_label.set_text(text)
+        self.model_state_label.set_visible(bool(text))
+        self.model_download_button.set_visible(show_download)
 
     def set_status(self, text: str, timeout_ms: int = 4000) -> None:
         """Display a transient status message that auto-clears.
