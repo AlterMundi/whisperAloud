@@ -4,6 +4,17 @@ All notable user-facing changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- Input normalization is now the first stage of live audio processing. A
+  digital, speech-level-driven gain lifts quiet microphones to a known
+  level (-20 dBFS speech by default) before trimming, the noise gate and the
+  rest of the existing chain run. It only amplifies, never clips, caps how
+  far it raises background noise, and never changes the device volume.
+  This fixes incomplete transcripts from quiet mics, especially under
+  Flatpak, where the old wpctl gain raise can't run. Configure it with the
+  new `input_gain` config section. `GetStatus()` reports it under
+  `"input_gain"` (D-Bus API 1.5.0).
+
 ### Changed
 - Nemotron 3.5 ASR Streaming's OpenMDW-1.1 license (pending since 0.3.0) was
   reviewed and accepted by the maintainer on 2026-10-03 (not via a formal
