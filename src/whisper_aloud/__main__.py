@@ -1,6 +1,7 @@
 """CLI interface for WhisperAloud transcription and daemon control."""
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -8,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import WhisperAloudConfig, user_config_dir
+from .config import WhisperAloudConfig, active_env_overrides, user_config_dir
 from .daemon_hints import cli_daemon_unavailable_hint
 from .exceptions import ConfigurationError, WhisperAloudError
 from .sandbox import is_flatpak_sandbox
@@ -600,8 +601,32 @@ def _config_validate(args) -> int:
     return 0
 
 
+# Order and headings for the grouped human-readable `config show` output.
+# Keys must match WhisperAloudConfig.to_dict()'s section names.
+_CONFIG_SECTION_TITLES = [
+    ("model", "Model"),
+    ("transcription", "Transcription"),
+    ("audio", "Audio"),
+    ("clipboard", "Clipboard"),
+    ("notifications", "Notifications"),
+    ("persistence", "Persistence"),
+    ("audio_processing", "Audio Processing"),
+    ("hotkey", "Hotkey"),
+    ("recording_flow", "Recording Flow"),
+    ("input_gain", "Input Gain"),
+    ("startup", "Startup"),
+]
+
+
 def _config_show(args) -> int:
-    """Show current configuration values.
+    """Show the full effective configuration (WHISP-97).
+
+    Prints every section of WhisperAloudConfig.to_dict() -- not a curated
+    subset -- as grouped, readable text by default, or as JSON with
+    ``--json``. Values currently overridden by a WHISPER_ALOUD_* env var are
+    marked "(env)" in the text output / listed under "env_overrides" in the
+    JSON output, since active_env_overrides() makes that check cheap
+    (just an os.environ membership test, not a config reload).
 
     If the config file exists but is malformed, this falls back to
     defaults (like load()'s lenient default) but, unlike before WHISP-75,
@@ -624,33 +649,32 @@ def _config_show(args) -> int:
         return _error(f"configuration error: {e}")
 
     try:
+        data = config.to_dict()
+        overrides = active_env_overrides()
+
+        if getattr(args, "json", False):
+            print(json.dumps(
+                {
+                    "config": data,
+                    "config_file": str(config_path) if config_path.exists() else None,
+                    "env_overrides": dict(sorted(overrides.items())),
+                },
+                indent=2,
+            ))
+            return 0
+
         print("WhisperAloud Configuration")
-        print()
-        print("[Model]")
-        print(f"  name:         {config.model.name}")
-        print(f"  device:       {config.model.device}")
-        print(f"  compute_type: {config.model.compute_type}")
-        print()
-        print("[Transcription]")
-        print(f"  language:     {config.transcription.language}")
-        print(f"  beam_size:    {config.transcription.beam_size}")
-        print(f"  vad_filter:   {config.transcription.vad_filter}")
-        print(f"  task:         {config.transcription.task}")
-        print()
-        print("[Audio]")
-        print(f"  sample_rate:  {config.audio.sample_rate}")
-        print(f"  channels:     {config.audio.channels}")
-        print(f"  vad_enabled:  {config.audio.vad_enabled}")
-        if hasattr(config.audio, 'device_name') and config.audio.device_name:
-            print(f"  device_name:  {config.audio.device_name}")
-        print()
-        print("[Clipboard]")
-        print(f"  auto_copy:    {config.clipboard.auto_copy}")
-        print(f"  auto_paste:   {config.clipboard.auto_paste}")
-        if config.persistence:
+        for section_key, title in _CONFIG_SECTION_TITLES:
+            section = data.get(section_key)
+            if not section:
+                continue
             print()
-            print("[Persistence]")
-            print(f"  save_audio:   {config.persistence.save_audio}")
+            print(f"[{title}]")
+            width = max((len(key) for key in section), default=0)
+            for field_key, value in section.items():
+                path = f"{section_key}.{field_key}"
+                marker = "  (env)" if path in overrides else ""
+                print(f"  {field_key.ljust(width)}: {value}{marker}")
         print()
         if config_path.exists():
             print(f"Config file: {config_path}")
@@ -1050,7 +1074,11 @@ examples:
         description="View or validate the WhisperAloud configuration.",
     )
     p_config_sub = p_config.add_subparsers(dest="config_action", metavar="<action>")
-    p_config_sub.add_parser("show", help="show current configuration")
+    p_config_show = p_config_sub.add_parser("show", help="show current configuration")
+    p_config_show.add_argument(
+        "--json", action="store_true",
+        help="print the full effective configuration as JSON",
+    )
     p_config_sub.add_parser("validate", help="validate configuration file")
 
     # ── History ───────────────────────────────────────────────────────────

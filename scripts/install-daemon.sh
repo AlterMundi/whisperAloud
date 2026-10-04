@@ -14,19 +14,50 @@ systemctl --user daemon-reload
 echo "[whisper-aloud] Enabling and starting ${UNIT}..."
 systemctl --user enable --now "${UNIT}"
 
-echo "[whisper-aloud] Waiting for D-Bus registration..."
-sleep 2
+BUS_NAME="org.fede.whisperaloud"
+# Upper bound on how long we wait for the name to appear on the bus -- a UX
+# limit only (so this script doesn't hang forever if something is wrong),
+# never the correctness gate: the wait below is event-driven (watches the
+# actual NameOwnerChanged condition), not a fixed sleep-then-probe-once.
+WAIT_TIMEOUT_S=15
 
-echo "[whisper-aloud] Probing D-Bus..."
-if gdbus call --session \
-     --dest org.fede.whisperaloud \
-     --object-path /org/fede/whisperaloud \
-     --method org.freedesktop.DBus.Peer.Ping \
-     >/dev/null 2>&1; then
-  echo "[whisper-aloud] ✓ Daemon is running and responding on D-Bus"
+echo "[whisper-aloud] Waiting for ${BUS_NAME} to appear on the session bus..."
+if command -v gdbus >/dev/null 2>&1 && gdbus help wait >/dev/null 2>&1; then
+  # `gdbus wait` blocks on the real name-owner condition (NameOwnerChanged),
+  # returning as soon as the name appears instead of guessing a fixed delay.
+  if gdbus wait --session --timeout "${WAIT_TIMEOUT_S}" "${BUS_NAME}"; then
+    echo "[whisper-aloud] ✓ Daemon is running and registered on D-Bus"
+  else
+    echo "[whisper-aloud] ⚠ ${BUS_NAME} did not appear within ${WAIT_TIMEOUT_S}s — daemon may still be starting. Check:"
+    echo "    journalctl --user -u ${UNIT} -n 30"
+  fi
 else
-  echo "[whisper-aloud] ⚠ D-Bus probe failed — daemon may still be starting. Check:"
-  echo "    journalctl --user -u ${UNIT} -n 30"
+  # Fallback for a glib/gdbus build without "wait" (older systems): poll the
+  # actual name-owner condition ourselves instead of a single fixed-delay
+  # probe, so a slow-starting daemon is still detected correctly. The loop
+  # bound is still only a UX limit, not what decides correctness.
+  echo "[whisper-aloud] (gdbus wait unavailable, polling name ownership instead)"
+  max_ticks=$((WAIT_TIMEOUT_S * 2))  # polling in 0.5s ticks
+  tick=0
+  owned=false
+  while [ "${tick}" -lt "${max_ticks}" ]; do
+    if gdbus call --session \
+         --dest org.freedesktop.DBus \
+         --object-path /org/freedesktop/DBus \
+         --method org.freedesktop.DBus.NameHasOwner "${BUS_NAME}" \
+         2>/dev/null | grep -q "true"; then
+      owned=true
+      break
+    fi
+    sleep 0.5
+    tick=$((tick + 1))
+  done
+  if [ "${owned}" = true ]; then
+    echo "[whisper-aloud] ✓ Daemon is running and registered on D-Bus"
+  else
+    echo "[whisper-aloud] ⚠ ${BUS_NAME} did not appear within ${WAIT_TIMEOUT_S}s — daemon may still be starting. Check:"
+    echo "    journalctl --user -u ${UNIT} -n 30"
+  fi
 fi
 
 # Optional: install XDG autostart for non-systemd sessions

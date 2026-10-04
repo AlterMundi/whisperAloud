@@ -336,6 +336,90 @@ class StartupConfig:
 
 
 # =============================================================================
+# Environment Override Map (WHISP-97)
+# =============================================================================
+
+# Dotted "section.field" path -> the WHISPER_ALOUD_* env var that overrides
+# it, kept in lockstep with _apply_env_overrides() below. Used by `whisper-
+# aloud config show` to mark which effective values came from the
+# environment rather than the config file/defaults, without having to
+# re-derive that from the override logic itself.
+ENV_OVERRIDE_VARS: Dict[str, str] = {
+    "model.engine": "WHISPER_ALOUD_MODEL_ENGINE",
+    "model.name": "WHISPER_ALOUD_MODEL_NAME",
+    "model.device": "WHISPER_ALOUD_MODEL_DEVICE",
+    "model.compute_type": "WHISPER_ALOUD_MODEL_COMPUTE_TYPE",
+    "model.download_root": "WHISPER_ALOUD_MODEL_DOWNLOAD_ROOT",
+    "model.allow_network_download": "WHISPER_ALOUD_MODEL_ALLOW_NETWORK_DOWNLOAD",
+    "transcription.language": "WHISPER_ALOUD_LANGUAGE",
+    "transcription.beam_size": "WHISPER_ALOUD_BEAM_SIZE",
+    "transcription.vad_filter": "WHISPER_ALOUD_VAD_FILTER",
+    "transcription.task": "WHISPER_ALOUD_TASK",
+    "transcription.vad_threshold": "WHISPER_ALOUD_VAD_SPEECH_THRESHOLD",
+    "transcription.vad_min_speech_ms": "WHISPER_ALOUD_VAD_MIN_SPEECH_MS",
+    "transcription.normalize_loudness": "WHISPER_ALOUD_TRANSCRIPTION_NORMALIZE",
+    "transcription.highpass_hz": "WHISPER_ALOUD_HIGHPASS_HZ",
+    "audio.sample_rate": "WHISPER_ALOUD_SAMPLE_RATE",
+    "audio.channels": "WHISPER_ALOUD_CHANNELS",
+    "audio.device_id": "WHISPER_ALOUD_DEVICE_ID",
+    "audio.chunk_duration": "WHISPER_ALOUD_CHUNK_DURATION",
+    "audio.vad_enabled": "WHISPER_ALOUD_VAD_ENABLED",
+    "audio.vad_threshold": "WHISPER_ALOUD_VAD_THRESHOLD",
+    "audio.silence_duration": "WHISPER_ALOUD_SILENCE_DURATION",
+    "audio.normalize_audio": "WHISPER_ALOUD_NORMALIZE_AUDIO",
+    "audio.max_recording_duration": "WHISPER_ALOUD_MAX_RECORDING_DURATION",
+    "clipboard.auto_copy": "WHISPER_ALOUD_CLIPBOARD_AUTO_COPY",
+    "clipboard.auto_paste": "WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE",
+    "clipboard.paste_delay_ms": "WHISPER_ALOUD_CLIPBOARD_PASTE_DELAY_MS",
+    "clipboard.paste_shortcut": "WHISPER_ALOUD_CLIPBOARD_PASTE_SHORTCUT",
+    "clipboard.timeout_seconds": "WHISPER_ALOUD_CLIPBOARD_TIMEOUT_SECONDS",
+    "clipboard.fallback_to_file": "WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE",
+    "clipboard.fallback_path": "WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH",
+    "clipboard.paste_to_captured_window": "WHISPER_ALOUD_CLIPBOARD_PASTE_TO_CAPTURED_WINDOW",
+    "notifications.enabled": "WHISPER_ALOUD_NOTIFICATIONS_ENABLED",
+    "notifications.recording_started": "WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STARTED",
+    "notifications.recording_stopped": "WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STOPPED",
+    "notifications.transcription_completed": "WHISPER_ALOUD_NOTIFICATIONS_TRANSCRIPTION_COMPLETED",
+    "notifications.error": "WHISPER_ALOUD_NOTIFICATIONS_ERROR",
+    "persistence.db_path": "WHISPER_ALOUD_DB_PATH",
+    "persistence.save_audio": "WHISPER_ALOUD_SAVE_AUDIO",
+    "persistence.audio_archive_path": "WHISPER_ALOUD_AUDIO_ARCHIVE",
+    "persistence.audio_format": "WHISPER_ALOUD_AUDIO_FORMAT",
+    "persistence.deduplicate_audio": "WHISPER_ALOUD_DEDUPLICATE_AUDIO",
+    "persistence.auto_cleanup_enabled": "WHISPER_ALOUD_AUTO_CLEANUP",
+    "persistence.auto_cleanup_days": "WHISPER_ALOUD_CLEANUP_DAYS",
+    "persistence.max_entries": "WHISPER_ALOUD_MAX_ENTRIES",
+    "persistence.edit_history_enabled": "WHISPER_ALOUD_EDIT_HISTORY",
+    "recording_flow.pause_media": "WHISPER_ALOUD_PAUSE_MEDIA",
+    "recording_flow.raise_mic_gain": "WHISPER_ALOUD_RAISE_MIC_GAIN",
+    "recording_flow.target_gain_linear": "WHISPER_ALOUD_TARGET_GAIN_LINEAR",
+    "recording_flow.pre_pause_delay_ms": "WHISPER_ALOUD_PRE_PAUSE_DELAY_MS",
+    "recording_flow.post_resume_delay_ms": "WHISPER_ALOUD_POST_RESUME_DELAY_MS",
+    "recording_flow.gain_restore_on_crash": "WHISPER_ALOUD_GAIN_RESTORE_ON_CRASH",
+    "audio_processing.highpass_hz": "WHISPER_ALOUD_AUDIO_HIGHPASS_HZ",
+    "input_gain.enabled": "WHISPER_ALOUD_INPUT_GAIN_ENABLED",
+    "input_gain.target_dbfs": "WHISPER_ALOUD_INPUT_GAIN_TARGET_DBFS",
+    "input_gain.max_gain_db": "WHISPER_ALOUD_INPUT_GAIN_MAX_GAIN_DB",
+    "input_gain.max_output_noise_dbfs": "WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS",
+    "input_gain.hardware_control": "WHISPER_ALOUD_INPUT_GAIN_HARDWARE_CONTROL",
+    "startup.autostart_background": "WHISPER_ALOUD_STARTUP_AUTOSTART_BACKGROUND",
+}
+
+
+def active_env_overrides() -> Dict[str, str]:
+    """Return {"section.field": env_var} for env vars currently set.
+
+    Cheap by construction: just checks ``os.environ`` membership against
+    ``ENV_OVERRIDE_VARS``, it does not re-run override parsing/validation.
+    """
+    return {
+        path: var
+        for path, var in ENV_OVERRIDE_VARS.items()
+        if os.environ.get(var) is not None
+    }
+
+
+# =============================================================================
 # Main Configuration Class
 # =============================================================================
 
