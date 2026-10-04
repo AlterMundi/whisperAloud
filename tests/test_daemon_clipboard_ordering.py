@@ -233,10 +233,11 @@ class TestPasteRunsOnMainLoopNotAThread:
             assert len(idle_add_calls) >= 1
 
     def test_captured_window_paste_uses_timeout_add_settle_delay(self, daemon):
-        """When a captured window must be refocused first, the paste is
-        scheduled via GLib.timeout_add(paste_delay_ms, ...) as a settle
-        delay for the focus restore -- never a time.sleep in a thread, and
-        never a substitute for the on_complete success signal itself."""
+        """When a captured window must be refocused first, focus must be
+        CONFIRMED (WHISP-88) before the paste is scheduled via
+        GLib.timeout_add(paste_delay_ms, ...) as an optional settle delay --
+        never a time.sleep in a thread, and never a substitute for either
+        the on_complete success signal or the focus confirmation itself."""
         daemon.config.clipboard.auto_copy = True
         daemon.config.clipboard.auto_paste = True
         daemon.config.clipboard.paste_to_captured_window = True
@@ -258,7 +259,19 @@ class TestPasteRunsOnMainLoopNotAThread:
             captured["on_complete"](True)
 
             daemon.window_manager.activate_window.assert_called_once_with(captured_window)
+            daemon.window_manager.confirm_focus.assert_called_once()
+            confirm_args = daemon.window_manager.confirm_focus.call_args[0]
+            assert confirm_args[0] is captured_window
+            confirm_callback = confirm_args[1]
             mock_sleep.assert_not_called()
+            # The paste must not be scheduled until confirm_focus's own
+            # callback reports success -- not merely because confirm_focus
+            # was called.
+            daemon._mock_glib.timeout_add.assert_not_called()
+            sim.simulate_paste.assert_not_called()
+
+            confirm_callback(True)
+
             daemon._mock_glib.timeout_add.assert_called_once()
             delay_arg = daemon._mock_glib.timeout_add.call_args[0][0]
             assert delay_arg == 123
@@ -270,6 +283,99 @@ class TestPasteRunsOnMainLoopNotAThread:
             fire()
 
             sim.simulate_paste.assert_called_once()
+
+    def test_captured_window_zero_settle_delay_uses_idle_add(self, daemon):
+        """paste_delay_ms == 0 after a confirmed focus must still schedule
+        the paste on the main loop (idle_add), not fire it inline."""
+        daemon.config.clipboard.auto_copy = True
+        daemon.config.clipboard.auto_paste = True
+        daemon.config.clipboard.paste_to_captured_window = True
+        daemon.config.clipboard.paste_delay_ms = 0
+        daemon._test_mode = False
+        daemon.window_manager = MagicMock()
+        captured_window = MagicMock()
+        daemon._captured_by_job["job-1"] = captured_window
+        captured = _install_controllable_clipboard(daemon)
+
+        with patch("whisper_aloud.clipboard.build_paste_simulator") as build_sim:
+            sim = MagicMock()
+            build_sim.return_value = sim
+
+            daemon._emit_transcription_success(
+                _result(), np.zeros(16000, dtype=np.float32), "job-1", "sess-1", 0, token=None
+            )
+            captured["on_complete"](True)
+
+            confirm_callback = daemon.window_manager.confirm_focus.call_args[0][1]
+            daemon._mock_glib.timeout_add.reset_mock()
+            confirm_callback(True)
+
+            daemon._mock_glib.timeout_add.assert_not_called()
+            sim.simulate_paste.assert_called_once()
+
+
+class TestFocusNotConfirmedSkipsPaste:
+    """WHISP-88: when confirm_focus reports False -- mismatch or no signal
+    -- the daemon must NOT paste, and must notify the user that the text
+    is still on the clipboard but the paste was skipped."""
+
+    def test_confirm_focus_false_skips_paste_and_notifies(self, daemon, caplog):
+        import logging
+
+        daemon.config.clipboard.auto_copy = True
+        daemon.config.clipboard.auto_paste = True
+        daemon.config.clipboard.paste_to_captured_window = True
+        daemon._test_mode = False
+        daemon.window_manager = MagicMock()
+        daemon.notifications = MagicMock()
+        captured_window = MagicMock()
+        daemon._captured_by_job["job-1"] = captured_window
+        captured = _install_controllable_clipboard(daemon)
+
+        with patch("whisper_aloud.clipboard.build_paste_simulator") as build_sim:
+            sim = MagicMock()
+            build_sim.return_value = sim
+
+            daemon._emit_transcription_success(
+                _result(), np.zeros(16000, dtype=np.float32), "job-1", "sess-1", 0, token=None
+            )
+            captured["on_complete"](True)
+
+            confirm_callback = daemon.window_manager.confirm_focus.call_args[0][1]
+            with caplog.at_level(logging.WARNING):
+                confirm_callback(False)
+
+            sim.simulate_paste.assert_not_called()
+            daemon._mock_glib.timeout_add.assert_not_called()
+            daemon.notifications.show_paste_skipped_focus_changed.assert_called_once()
+            assert any("WHISP-88" in r.message for r in caplog.records)
+
+    def test_confirm_focus_raising_skips_paste_and_notifies(self, daemon):
+        """A window_manager that errors out confirming focus degrades the
+        same way as an explicit False -- never falls back to pasting."""
+        daemon.config.clipboard.auto_copy = True
+        daemon.config.clipboard.auto_paste = True
+        daemon.config.clipboard.paste_to_captured_window = True
+        daemon._test_mode = False
+        daemon.window_manager = MagicMock()
+        daemon.window_manager.confirm_focus.side_effect = RuntimeError("boom")
+        daemon.notifications = MagicMock()
+        captured_window = MagicMock()
+        daemon._captured_by_job["job-1"] = captured_window
+        captured = _install_controllable_clipboard(daemon)
+
+        with patch("whisper_aloud.clipboard.build_paste_simulator") as build_sim:
+            sim = MagicMock()
+            build_sim.return_value = sim
+
+            daemon._emit_transcription_success(
+                _result(), np.zeros(16000, dtype=np.float32), "job-1", "sess-1", 0, token=None
+            )
+            captured["on_complete"](True)
+
+            sim.simulate_paste.assert_not_called()
+            daemon._mock_glib.timeout_add.assert_not_called()
+            daemon.notifications.show_paste_skipped_focus_changed.assert_called_once()
 
 
 class TestCapturedWindowStillPoppedUnconditionally(object):

@@ -2464,26 +2464,60 @@ class WhisperAloudService:
                                 # from a worker thread.
                                 simulator.simulate_paste()
 
-                            if _captured and self.config.clipboard.paste_to_captured_window:
+                            if (_captured and self.config.clipboard.paste_to_captured_window
+                                    and self.window_manager):
                                 try:
                                     self.window_manager.activate_window(_captured)
                                 except Exception as e:
                                     logger.warning(
                                         f"Failed to activate captured window: {e}"
                                     )
-                                # paste_delay_ms is kept only as a
-                                # user-configurable settle delay for the
-                                # just-restored window's focus -- never a
-                                # stand-in for waiting on clipboard
-                                # readiness, which `success` above already
-                                # guarantees.
-                                GLib.timeout_add(
-                                    self.config.clipboard.paste_delay_ms,
-                                    _call_once_idle(_trigger_paste),
-                                )
+
+                                def _after_focus_confirmed(focused: bool) -> None:
+                                    # WHISP-88: activate_window() above only
+                                    # reports whether the issuing call
+                                    # succeeded, never whether the window
+                                    # actually ended up focused -- never
+                                    # paste without a real confirmation, to
+                                    # avoid typing the transcription into
+                                    # whatever window happens to be focused
+                                    # instead of the captured one.
+                                    if not focused:
+                                        logger.warning(
+                                            "WHISP-88: could not confirm the "
+                                            "captured window regained focus; "
+                                            "skipping auto-paste (text "
+                                            "remains on the clipboard)"
+                                        )
+                                        if self.notifications:
+                                            self.notifications.show_paste_skipped_focus_changed()
+                                        return
+                                    # paste_delay_ms is kept only as an
+                                    # OPTIONAL settle delay after focus has
+                                    # already been confirmed -- never a
+                                    # stand-in for the confirmation itself.
+                                    settle_ms = self.config.clipboard.paste_delay_ms
+                                    if settle_ms > 0:
+                                        GLib.timeout_add(
+                                            settle_ms, _call_once_idle(_trigger_paste)
+                                        )
+                                    else:
+                                        GLib.idle_add(_call_once_idle(_trigger_paste))
+                                    logger.info("Auto-paste triggered")
+
+                                try:
+                                    self.window_manager.confirm_focus(
+                                        _captured, _after_focus_confirmed
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to confirm captured window focus: {e}"
+                                    )
+                                    if self.notifications:
+                                        self.notifications.show_paste_skipped_focus_changed()
                             else:
                                 GLib.idle_add(_call_once_idle(_trigger_paste))
-                            logger.info("Auto-paste triggered")
+                                logger.info("Auto-paste triggered")
                         except Exception as e:
                             logger.warning(f"Failed to trigger auto-paste: {e}")
 
