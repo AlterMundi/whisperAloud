@@ -3,7 +3,7 @@
 import logging
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +13,19 @@ try:
     _HAS_GIO = True
 except ImportError:
     _HAS_GIO = False
+
+# org.fede.whisperaloud.Window lives under the extension's own bus name, see
+# contrib/gnome-shell-extension/whisperaloud@fede/extension.js.
+_EXT_BUS_NAME = "org.gnome.Shell.Extensions.whisperaloud"
+_WINDOW_PATH = "/org/fede/whisperaloud/Window"
+_WINDOW_IFACE = "org.fede.whisperaloud.Window"
+
+# xdotool backend (WHISP-88): there is no focus-change signal to subscribe
+# to, so confirmation falls back to a small BOUNDED number of
+# getactivewindow re-queries, logged as a WARNING-level degradation -- never
+# a fixed wait used as the success criterion itself. See `confirm_focus`.
+_XDOTOOL_CONFIRM_MAX_ATTEMPTS = 3
+_XDOTOOL_CONFIRM_INTERVAL_MS = 50
 
 
 @dataclass
@@ -102,7 +115,8 @@ class WindowManager:
                 self._gnome_proxy = proxy
                 return True
             return False
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_check_gnome_extension probe failed: {e!r}")
             return False
 
     def _check_xdotool(self) -> bool:
@@ -131,6 +145,176 @@ class WindowManager:
         elif info.backend == "xdotool":
             return self._activate_xdotool(info)
         return False
+
+    # -- Focus confirmation (WHISP-88) -------------------------------------
+    #
+    # `activate_window()` above only reports whether the issuing D-Bus
+    # call/subprocess succeeded -- never whether the window actually ended
+    # up focused. Callers that are about to simulate a paste MUST confirm
+    # focus first via `confirm_focus()`, and must not paste at all if
+    # confirmation reports False (the window manager found, or could not
+    # rule out, that focus landed somewhere else).
+
+    def confirm_focus(
+        self,
+        expected: WindowInfo,
+        callback: Callable[[bool], None],
+        timeout_ms: int = 1500,
+    ) -> None:
+        """Asynchronously confirm that ``expected`` actually gained focus.
+
+        Calls ``callback(True)`` once focus on ``expected.window_id`` is
+        confirmed by a real event/observed condition, or ``callback(False)``
+        if it cannot be confirmed -- callers must treat ``False`` as "do not
+        paste, the focused window may not be the captured one".
+
+        gnome-extension backend: subscribes to the extension's
+        ``FocusChanged(s window_id)`` D-Bus signal (emitted from
+        ``global.display``'s own ``notify::focus-window``) and resolves as
+        soon as an emission names ``expected.window_id`` (True) or a
+        *different* id (False, immediately -- a real "focus went elsewhere"
+        observation, not a guess). ``timeout_ms`` only bounds how long we
+        wait for *any* signal before giving up -- it is never itself the
+        success criterion.
+
+        xdotool backend: there is no focus-change signal, so this falls
+        back to a small, bounded number of ``getactivewindow`` re-queries
+        (see ``_XDOTOOL_CONFIRM_MAX_ATTEMPTS``), logged as a WARNING-level
+        degradation.
+
+        Any other backend (``"none"``): nothing to confirm; reports False.
+        """
+        if expected.backend == "gnome-extension":
+            self._confirm_focus_gnome(expected, callback, timeout_ms)
+        elif expected.backend == "xdotool":
+            self._confirm_focus_xdotool(expected, callback)
+        else:
+            callback(False)
+
+    def _confirm_focus_gnome(
+        self, expected: WindowInfo, callback: Callable[[bool], None], timeout_ms: int
+    ) -> None:
+        if not _HAS_GIO:
+            callback(False)
+            return
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except Exception as e:
+            logger.warning(f"confirm_focus: could not connect to session bus: {e}")
+            callback(False)
+            return
+
+        state = {"done": False, "sub_id": None, "timer_id": None}
+
+        def _finish(result: bool) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            if state["sub_id"] is not None:
+                try:
+                    bus.signal_unsubscribe(state["sub_id"])
+                except Exception:
+                    pass
+            if state["timer_id"] is not None:
+                try:
+                    GLib.source_remove(state["timer_id"])
+                except Exception:
+                    pass
+            callback(result)
+
+        def _on_signal(_conn, _sender, _path, _iface, _signal, params) -> None:
+            try:
+                (window_id_str,) = params.unpack()
+                focused_id = int(window_id_str)
+            except Exception:
+                return
+            # A signal naming a DIFFERENT window is itself a real, observed
+            # "focus went elsewhere" event -- resolve False immediately
+            # rather than waiting out the rest of the timeout.
+            _finish(focused_id == expected.window_id)
+
+        try:
+            state["sub_id"] = bus.signal_subscribe(
+                _EXT_BUS_NAME, _WINDOW_IFACE, "FocusChanged", _WINDOW_PATH, None,
+                Gio.DBusSignalFlags.NONE, _on_signal,
+            )
+        except Exception as e:
+            logger.warning(f"confirm_focus: could not subscribe to FocusChanged: {e}")
+            callback(False)
+            return
+
+        def _on_timeout():
+            logger.warning(
+                f"WHISP-88: no FocusChanged signal confirmed window "
+                f"{expected.window_id} focused within {timeout_ms}ms; "
+                "degrading to clipboard-only"
+            )
+            _finish(False)
+            return False  # GLib.SOURCE_REMOVE: fire once
+
+        state["timer_id"] = GLib.timeout_add(timeout_ms, _on_timeout)
+
+        # Race guard: ActivateWindow (issued just before this call) may
+        # already have landed focus -- and emitted FocusChanged -- before
+        # this subscription existed. Check the current state once, now that
+        # we are already subscribed (so a signal racing this check is never
+        # lost): if it already matches, resolve immediately instead of
+        # waiting on a signal that already happened.
+        if self._ensure_gnome_proxy():
+            try:
+                res = self._gnome_proxy.call_sync(
+                    "GetFocusedWindow", None, Gio.DBusCallFlags.NONE, 2000, None,
+                )
+                d = res.get_child_value(0)
+                wid_v = d.lookup_value("id", None)
+                if wid_v is not None and int(wid_v.unpack()) == expected.window_id:
+                    _finish(True)
+            except Exception:
+                pass
+
+    def _confirm_focus_xdotool(
+        self, expected: WindowInfo, callback: Callable[[bool], None]
+    ) -> None:
+        state = {"attempts": 0}
+
+        def _check() -> bool:
+            state["attempts"] += 1
+            try:
+                result = subprocess.run(
+                    ["xdotool", "getactivewindow"], capture_output=True, timeout=2,
+                )
+            except Exception as e:
+                logger.warning(f"xdotool getactivewindow failed during confirm: {e}")
+                self._reprobe("xdotool getactivewindow failed during confirm")
+                callback(False)
+                return False
+
+            if result.returncode == 0:
+                try:
+                    focused_id = int(result.stdout.decode().strip())
+                except ValueError:
+                    focused_id = None
+                if focused_id == expected.window_id:
+                    callback(True)
+                    return False
+
+            if state["attempts"] >= _XDOTOOL_CONFIRM_MAX_ATTEMPTS:
+                logger.warning(
+                    f"WHISP-88: xdotool backend has no focus-change signal; "
+                    f"window {expected.window_id} not confirmed focused after "
+                    f"{state['attempts']} bounded re-queries -- degrading to "
+                    "clipboard-only"
+                )
+                callback(False)
+                return False
+            return True  # GLib.SOURCE_CONTINUE: keep polling, bounded above
+
+        if not _HAS_GIO:
+            # No GLib main loop available to schedule re-queries on -- do a
+            # single immediate check rather than a blind fixed sleep.
+            _check()
+            return
+        GLib.timeout_add(_XDOTOOL_CONFIRM_INTERVAL_MS, _check)
 
     # -- GNOME Extension backend (Gio.DBusProxy typed calls) --------------
 

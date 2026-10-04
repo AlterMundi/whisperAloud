@@ -244,6 +244,88 @@ class TestBackendReprobeOnFailure:
         mock_run.assert_called_once()  # no extra _detect_backend() probing
 
 
+class TestConfirmFocusXdotool:
+    """WHISP-88: the xdotool backend has no focus-change signal, so
+    confirm_focus falls back to a small, BOUNDED number of getactivewindow
+    re-queries -- never a fixed wait used as the success criterion."""
+
+    def _make_wm(self, mock_run):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+            wm = WindowManager()
+        assert wm.backend == "xdotool"
+        return wm
+
+    @patch("whisper_aloud.clipboard.window_manager.GLib")
+    @patch("whisper_aloud.clipboard.window_manager.subprocess.run")
+    def test_confirms_true_on_first_matching_requery(self, mock_run, mock_glib):
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"99\n")
+        wm = self._make_wm(mock_run)
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"12345\n")
+        info = WindowInfo(window_id=12345, title="x", backend="xdotool")
+
+        # Drive GLib.timeout_add's scheduled callback ourselves, standing
+        # in for the real GLib main loop.
+        scheduled = {}
+        mock_glib.timeout_add.side_effect = lambda ms, fn: scheduled.setdefault("fn", fn)
+
+        result = {}
+        wm.confirm_focus(info, lambda ok: result.update(ok=ok))
+
+        assert "fn" in scheduled
+        keep_polling = scheduled["fn"]()
+        assert keep_polling is False  # matched -- stop polling
+        assert result == {"ok": True}
+
+    @patch("whisper_aloud.clipboard.window_manager.GLib")
+    @patch("whisper_aloud.clipboard.window_manager.subprocess.run")
+    def test_degrades_after_bounded_retries_with_warning(self, mock_run, mock_glib, caplog):
+        import logging
+
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"99\n")
+        wm = self._make_wm(mock_run)
+        # Every re-query reports a DIFFERENT window focused -- never matches.
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"1\n")
+        info = WindowInfo(window_id=12345, title="x", backend="xdotool")
+
+        scheduled = {}
+        mock_glib.timeout_add.side_effect = lambda ms, fn: scheduled.setdefault("fn", fn)
+
+        result = {}
+        with caplog.at_level(logging.WARNING):
+            wm.confirm_focus(info, lambda ok: result.update(ok=ok))
+            fn = scheduled["fn"]
+            # Bounded: keeps polling for a small number of attempts, then
+            # gives up -- never an unbounded retry loop.
+            outcomes = [fn() for _ in range(5)]
+
+        assert result == {"ok": False}
+        # Stops polling (returns False) once the bound is reached, well
+        # before the 5 manual calls above are exhausted.
+        assert False in outcomes
+        assert any("WHISP-88" in r.message for r in caplog.records)
+
+    @patch("whisper_aloud.clipboard.window_manager.GLib")
+    @patch("whisper_aloud.clipboard.window_manager.subprocess.run")
+    def test_degrades_immediately_on_backend_failure_and_reprobes(self, mock_run, mock_glib):
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"99\n")
+        wm = self._make_wm(mock_run)
+        info = WindowInfo(window_id=12345, title="x", backend="xdotool")
+
+        scheduled = {}
+        mock_glib.timeout_add.side_effect = lambda ms, fn: scheduled.setdefault("fn", fn)
+
+        result = {}
+        wm.confirm_focus(info, lambda ok: result.update(ok=ok))
+
+        mock_run.side_effect = FileNotFoundError
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+            keep_polling = scheduled["fn"]()
+
+        assert keep_polling is False
+        assert result == {"ok": False}
+        assert wm.backend == "none"
+
+
 class TestNoneBackend:
     def test_get_active_window_returns_none(self):
         with patch.object(WindowManager, "_detect_backend", return_value="none"):
