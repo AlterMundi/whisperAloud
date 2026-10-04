@@ -173,6 +173,29 @@ def _parse_export_date(value: str, *, end_of_day: bool = False):
     return parsed
 
 
+def _call_once_idle(fn, *args):
+    """Wrap `fn` for use as a single-shot GLib.idle_add/timeout_add callback.
+
+    Field bug: `GLib.idle_add(self.ToggleRecording)` (and the analogous
+    `Quit` wrapper) passed a bound D-Bus method straight to idle_add. GLib
+    treats *any* truthy callback return as GLib.SOURCE_CONTINUE and
+    re-invokes the source forever -- it has no idea ToggleRecording's
+    return value ("recording"/"transcribing"/"error") is a D-Bus result,
+    not a "keep going" signal. One real-world hotkey press produced dozens
+    of ToggleRecording calls/sec until the app was killed.
+
+    This wrapper calls `fn(*args)`, discards whatever it returns, and
+    always reports GLib.SOURCE_REMOVE (False) so the idle/timeout source
+    fires exactly once -- regardless of what `fn` returns.
+    """
+
+    def _wrapped():
+        fn(*args)
+        return False  # GLib.SOURCE_REMOVE -- never repeat.
+
+    return _wrapped
+
+
 class WhisperAloudService:
     """
     <node>
@@ -395,8 +418,11 @@ class WhisperAloudService:
 
         # Thread-safe wrappers for callbacks that may fire from any thread.
         # GLib.idle_add ensures D-Bus signal emissions happen on the main loop.
-        self._safe_toggle = lambda: GLib.idle_add(self.ToggleRecording)
-        self._safe_quit = lambda: GLib.idle_add(self.Quit)
+        # _call_once_idle() guarantees the idle source is removed after one
+        # call regardless of ToggleRecording's/Quit's (truthy) return value
+        # -- see its docstring for the field bug this fixes.
+        self._safe_toggle = lambda: GLib.idle_add(_call_once_idle(self.ToggleRecording))
+        self._safe_quit = lambda: GLib.idle_add(_call_once_idle(self.Quit))
 
         # Initialize system tray indicator only when a GUI session is available.
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
