@@ -1,4 +1,4 @@
-"""Tests for MprisController and GainController (WHISP-15)."""
+"""Tests for MprisController and GainController (WHISP-15, WHISP-89)."""
 
 import json
 import os
@@ -20,14 +20,19 @@ from whisper_aloud.service.media_control import GainController, GainSnapshot, Mp
 
 
 def _make_player(status="Playing", can_pause=True):
-    """Build a mock MPRIS player proxy."""
-    props = {"PlaybackStatus": status, "CanPause": can_pause}
+    """Build a mock MPRIS player proxy.
+
+    Properties are plain attributes (`iface.PlaybackStatus`), matching real
+    pydbus interface-proxy semantics (see media_control.MprisController.
+    _safe_prop's docstring) -- NOT a dict-like `.get()`, which a real
+    pydbus ProxyObject does not support (confirmed against a real fake
+    MPRIS player on a private bus; WHISP-89).
+    """
+    iface = MagicMock()
+    iface.PlaybackStatus = status
+    iface.CanPause = can_pause
     player = MagicMock()
-    player.__getitem__ = lambda self, key: MagicMock(**{
-        "get.side_effect": lambda k, d=None: props.get(k, d),
-        "Pause": MagicMock(),
-        "Play": MagicMock(),
-    })
+    player.__getitem__ = lambda self, key, _iface=iface: _iface
     return player
 
 
@@ -45,7 +50,87 @@ def _make_bus(players: dict):
     bus.get.side_effect = lambda name, path=None: (
         dbus_proxy if name == ".DBus" else players.get(name, MagicMock())
     )
+    # subscribe()/watch_name() default to inert MagicMocks (never fire)
+    # unless a test wires them up via _FakeConfirmationBus below.
     return bus
+
+
+class _FakeConfirmationBus:
+    """A fake pydbus bus that supports exactly the surface MprisController
+    uses (`.get`, `.subscribe`, `.watch_name`) with controllable
+    PropertiesChanged/name-vanished delivery, so tests can exercise the
+    event-driven pause/resume confirmation flow deterministically --
+    without a real D-Bus connection or GLib main loop (see
+    tests/test_hotkey_portal_flow.py's `_FakePortalHarness` for the
+    analogous pattern used for the portal backend).
+
+    `players`: {bus_name: {"status": str, "can_pause": bool}}
+    """
+
+    def __init__(self, players: dict):
+        self.players = players
+        self._prop_subs: list = []  # (sender_name, callback)
+        self._watchers: list = []   # (name, name_vanished_callback)
+
+    def get(self, name, path=None):
+        if name == ".DBus":
+            proxy = MagicMock()
+            proxy.ListNames.return_value = list(self.players.keys())
+            return proxy
+        state = self.players[name]
+        iface = MagicMock()
+        iface.PlaybackStatus = state["status"]
+        iface.CanPause = state.get("can_pause", True)
+
+        def _pause():
+            state["status"] = "Paused"
+
+        def _play():
+            state["status"] = "Playing"
+
+        iface.Pause.side_effect = _pause
+        iface.Play.side_effect = _play
+
+        player = MagicMock()
+        player.__getitem__ = lambda self, key, _iface=iface: _iface
+        return player
+
+    def subscribe(self, sender=None, iface=None, signal=None, object=None,
+                  arg0=None, flags=0, signal_fired=None):
+        sub = MagicMock()
+        entry = (sender, signal_fired)
+        self._prop_subs.append(entry)
+
+        def _unsubscribe():
+            if entry in self._prop_subs:
+                self._prop_subs.remove(entry)
+        sub.unsubscribe.side_effect = _unsubscribe
+        return sub
+
+    def watch_name(self, name, flags=0, name_appeared=None, name_vanished=None):
+        watcher = MagicMock()
+        entry = (name, name_vanished)
+        self._watchers.append(entry)
+
+        def _unwatch():
+            if entry in self._watchers:
+                self._watchers.remove(entry)
+        watcher.unwatch.side_effect = _unwatch
+        return watcher
+
+    def fire_properties_changed(self, name, status):
+        """Simulate the real player emitting PropertiesChanged for PlaybackStatus."""
+        self.players[name]["status"] = status
+        for sender, cb in list(self._prop_subs):
+            if sender == name and cb is not None:
+                cb(name, media_control._PLAYER_PATH, media_control._PROPS_IFACE,
+                   "PropertiesChanged",
+                   (media_control._PLAYER_IFACE, {"PlaybackStatus": status}, []))
+
+    def fire_name_vanished(self, name):
+        for n, cb in list(self._watchers):
+            if n == name and cb is not None:
+                cb()
 
 
 class TestMprisController:
@@ -98,19 +183,8 @@ class TestMprisController:
         # Manually populate _paused_by_us to simulate a prior pause
         ctrl._paused_by_us = {"org.mpris.MediaPlayer2.foo", "org.mpris.MediaPlayer2.bar"}
 
-        foo_props = {"PlaybackStatus": "Paused", "CanPause": True}
-        bar_props = {"PlaybackStatus": "Playing", "CanPause": True}  # user resumed
-
-        foo_player = MagicMock()
-        foo_player.__getitem__ = lambda s, k: MagicMock(
-            get=lambda key, d=None: foo_props.get(key, d),
-            Play=MagicMock(),
-        )
-        bar_player = MagicMock()
-        bar_player.__getitem__ = lambda s, k: MagicMock(
-            get=lambda key, d=None: bar_props.get(key, d),
-            Play=MagicMock(),
-        )
+        foo_player = _make_player(status="Paused", can_pause=True)
+        bar_player = _make_player(status="Playing", can_pause=True)  # user resumed
 
         bus = MagicMock()
         bus.get.side_effect = lambda name, path=None: (
@@ -196,6 +270,274 @@ class TestMprisControllerTestMode:
         bus = MagicMock(name="real-bus")
         ctrl.set_bus(bus)
         assert ctrl._bus is bus
+
+
+class TestMprisConfirmation:
+    """WHISP-89: pause/resume wait for an actual PlaybackStatus confirmation
+    (or name-vanished, or a bounded logged degradation) instead of a fixed
+    sleep. All of these exercise the event-driven wait via `_FakeConfirmationBus`,
+    without any real GLib main loop running."""
+
+    def test_pause_on_done_fires_only_after_properties_changed_confirms(self, monkeypatch):
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        done = []
+        ctrl.pause_all_playing(on_done=lambda: done.append(True))
+
+        # Pause() was issued synchronously, but on_done must not have fired
+        # yet -- confirmation hasn't arrived.
+        assert bus.players["org.mpris.MediaPlayer2.foo"]["status"] == "Paused"
+        assert done == []
+
+        bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Paused")
+
+        assert done == [True]
+
+    def test_pause_confirms_via_stopped_status_too(self, monkeypatch):
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        done = []
+        ctrl.pause_all_playing(on_done=lambda: done.append(True))
+        bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Stopped")
+
+        assert done == [True]
+
+    def test_pause_confirms_via_name_vanished(self, monkeypatch):
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        done = []
+        ctrl.pause_all_playing(on_done=lambda: done.append(True))
+        assert done == []
+
+        bus.fire_name_vanished("org.mpris.MediaPlayer2.foo")
+
+        assert done == [True]
+
+    def test_pause_waits_for_every_targeted_player(self, monkeypatch):
+        """on_done must not fire until ALL paused players have confirmed."""
+        bus = _FakeConfirmationBus({
+            "org.mpris.MediaPlayer2.foo": {"status": "Playing"},
+            "org.mpris.MediaPlayer2.bar": {"status": "Playing"},
+        })
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        done = []
+        ctrl.pause_all_playing(on_done=lambda: done.append(True))
+
+        bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Paused")
+        assert done == [], "must wait for bar too"
+
+        bus.fire_properties_changed("org.mpris.MediaPlayer2.bar", "Paused")
+        assert done == [True]
+
+    def test_pause_degrades_with_warning_when_never_confirmed(self, caplog):
+        """A non-compliant player that never emits PropertiesChanged/vanishes
+        must not stall forever -- the bounded safety timeout (captured via
+        GLib.timeout_add, fired manually here) proceeds anyway, logging a
+        WARNING (never silently)."""
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        done = []
+        with patch.object(media_control.GLib, "timeout_add") as mock_timeout_add:
+            ctrl.pause_all_playing(on_done=lambda: done.append(True))
+            assert done == []
+            # Never fire fire_properties_changed/fire_name_vanished: simulate
+            # a player that just never confirms. Fire the captured safety
+            # timeout callback ourselves instead of sleeping real time.
+            ms, safety_cb = mock_timeout_add.call_args[0]
+            assert ms == media_control._CONFIRM_SAFETY_TIMEOUT_MS
+            with caplog.at_level("WARNING"):
+                safety_cb()
+
+        assert done == [True]
+        assert any("degraded" in r.message or "never confirmed" in r.message
+                   for r in caplog.records)
+
+    def test_pause_settle_delay_uses_timeout_add_after_confirmation(self):
+        """pre_pause_delay_ms (settle_delay_ms) must be an extra margin
+        applied via GLib.timeout_add AFTER confirmation, never time.sleep --
+        and media_control no longer imports `time` at all. The always-armed
+        confirmation safety-bound timer (a separate, earlier GLib.timeout_add
+        call) must not be confused with this settle-delay one."""
+        assert not hasattr(media_control, "time")
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        scheduled = []  # every GLib.timeout_add(ms, cb) call, in order
+
+        def _capture_timeout_add(ms, cb):
+            scheduled.append((ms, cb))
+            return len(scheduled)
+
+        done = []
+        with patch.object(media_control.GLib, "timeout_add", side_effect=_capture_timeout_add), \
+             patch.object(media_control.GLib, "source_remove", lambda sid: None):
+            ctrl.pause_all_playing(on_done=lambda: done.append(True), settle_delay_ms=250)
+            bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Paused")
+
+            assert done == [], "on_done must wait for the settle delay too"
+            settle_calls = [c for c in scheduled if c[0] == 250]
+            assert len(settle_calls) == 1, f"expected exactly one 250ms timer, got {scheduled}"
+            _, settle_cb = settle_calls[0]
+            settle_cb()
+
+        assert done == [True]
+
+    def test_pause_zero_settle_delay_calls_on_done_inline_not_via_timer(self):
+        """settle_delay_ms=0 (the default) must call on_done inline, right
+        from the confirmation callback -- never an extra GLib.idle_add/
+        timeout_add round trip beyond the one always-armed confirmation
+        safety bound. Staying synchronous here (when nothing needs an
+        *extra* margin) is what keeps every caller that never has a real
+        media player to wait for -- the overwhelming majority of
+        StartRecording() calls -- working exactly as before this
+        confirmation wait existed."""
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        timeout_calls = []
+        with patch.object(
+            media_control.GLib, "timeout_add",
+            side_effect=lambda ms, cb: (timeout_calls.append((ms, cb)), len(timeout_calls))[1],
+        ), patch.object(media_control.GLib, "source_remove", lambda sid: None):
+            done = []
+            ctrl.pause_all_playing(on_done=lambda: done.append(True))
+            bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Paused")
+
+            assert len(timeout_calls) == 1, "only the safety bound, never a settle timer"
+            assert timeout_calls[0][0] == media_control._CONFIRM_SAFETY_TIMEOUT_MS
+            assert done == [True], "on_done must have fired inline, no timer needed for it"
+
+    def test_pause_with_nothing_playing_calls_on_done_without_waiting(self, monkeypatch):
+        bus = _FakeConfirmationBus({})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        done = []
+        ctrl.pause_all_playing(on_done=lambda: done.append(True))
+        assert done == [True]
+
+    def test_resume_on_done_fires_after_confirmation(self, monkeypatch):
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Paused"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+        ctrl._paused_by_us = {"org.mpris.MediaPlayer2.foo"}
+
+        done = []
+        ctrl.resume_ours(on_done=lambda: done.append(True))
+        assert bus.players["org.mpris.MediaPlayer2.foo"]["status"] == "Playing"
+        assert done == []
+
+        bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Playing")
+        assert done == [True]
+
+    def test_resume_does_not_touch_manually_resumed_player(self, monkeypatch):
+        """If the user resumed a player manually before our delay elapsed,
+        resume_ours must not call Play() on it -- and since nothing was
+        actually resumed, on_done fires right away (nothing to confirm)."""
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+        ctrl._paused_by_us = {"org.mpris.MediaPlayer2.foo"}
+
+        done = []
+        ctrl.resume_ours(on_done=lambda: done.append(True))
+
+        assert done == [True]
+        assert bus.players["org.mpris.MediaPlayer2.foo"]["status"] == "Playing"
+
+    def test_resume_delay_ms_uses_timeout_add_before_rechecking_status(self):
+        """post_resume_delay_ms must delay the re-check+Play via
+        GLib.timeout_add, never time.sleep."""
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Paused"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+        ctrl._paused_by_us = {"org.mpris.MediaPlayer2.foo"}
+
+        with patch.object(media_control.GLib, "timeout_add") as mock_timeout_add:
+            ctrl.resume_ours(delay_ms=300)
+            # Play() must not have been called yet -- still waiting out the delay.
+            assert bus.players["org.mpris.MediaPlayer2.foo"]["status"] == "Paused"
+            mock_timeout_add.assert_called_once()
+            ms, delayed_cb = mock_timeout_add.call_args[0]
+            assert ms == 300
+            delayed_cb()
+
+        assert bus.players["org.mpris.MediaPlayer2.foo"]["status"] == "Playing"
+
+    def test_pause_confirmation_logs_how_it_arrived(self, monkeypatch, caplog):
+        """Observability: INFO log names which players were paused and how
+        each one's pause was confirmed."""
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        with caplog.at_level("INFO"):
+            ctrl.pause_all_playing(on_done=lambda: None)
+            bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Paused")
+
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "org.mpris.MediaPlayer2.foo" in joined
+        assert "PropertiesChanged signal" in joined
+
+    def test_resume_confirmation_logs_how_it_arrived(self, monkeypatch, caplog):
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Paused"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+        ctrl._paused_by_us = {"org.mpris.MediaPlayer2.foo"}
+
+        with caplog.at_level("INFO"):
+            ctrl.resume_ours(on_done=lambda: None)
+            bus.fire_name_vanished("org.mpris.MediaPlayer2.foo")
+
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "org.mpris.MediaPlayer2.foo" in joined
+        assert "name vanished" in joined
+
+    def test_clear_supersedes_pending_pause_confirmation(self, monkeypatch):
+        """clear() (e.g. CancelRecording) must stop a pending pause-
+        confirmation wait from ever calling the original on_done -- a late
+        PropertiesChanged arriving afterwards must be a no-op."""
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Playing"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+
+        done = []
+        ctrl.pause_all_playing(on_done=lambda: done.append(True))
+        ctrl.clear()
+
+        bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Paused")
+
+        assert done == []
+
+    def test_new_pause_call_supersedes_a_stale_resume_wait(self, monkeypatch):
+        """A second pause_all_playing() call must invalidate an in-flight
+        resume_ours() confirmation wait from an earlier call (defensive;
+        daemon.py never actually calls them concurrently)."""
+        bus = _FakeConfirmationBus({"org.mpris.MediaPlayer2.foo": {"status": "Paused"}})
+        ctrl = MprisController()
+        ctrl.set_bus(bus)
+        ctrl._paused_by_us = {"org.mpris.MediaPlayer2.foo"}
+
+        resume_done = []
+        ctrl.resume_ours(on_done=lambda: resume_done.append(True))
+
+        pause_done = []
+        ctrl.pause_all_playing(on_done=lambda: pause_done.append(True))
+
+        bus.fire_properties_changed("org.mpris.MediaPlayer2.foo", "Playing")
+        assert resume_done == [], "superseded resume must never call its on_done"
 
 
 # =============================================================================

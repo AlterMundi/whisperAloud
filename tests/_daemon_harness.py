@@ -174,6 +174,21 @@ def make_daemon(
 
     mock_gain_cls.return_value.restore_from_crash_file.return_value = None
     mock_mpris_cls.return_value.set_bus.return_value = None
+    # WHISP-89: pause_all_playing()/resume_ours() are now continuation-based
+    # (on_done is only called once media pause/resume is confirmed, or
+    # there was nothing to wait for). MprisController itself is mocked out
+    # here, so nothing would ever call on_done -- StartRecording/
+    # StopRecording would hang mid-flight from every test's point of view.
+    # Simulate the real "no bus configured" behavior (the harness never
+    # gives MprisController a real bus either): call on_done immediately,
+    # inline, exactly like the real implementation does when there is
+    # nothing to actually wait for.
+    mock_mpris_cls.return_value.pause_all_playing.side_effect = (
+        lambda on_done=None, settle_delay_ms=0: on_done() if on_done else None
+    )
+    mock_mpris_cls.return_value.resume_ours.side_effect = (
+        lambda delay_ms=0, on_done=None: on_done() if on_done else None
+    )
 
     try:
         service = daemon_module.WhisperAloudService(config=config or WhisperAloudConfig())

@@ -1,15 +1,48 @@
-"""Smart recording flow: MPRIS media pause/resume and hardware mic gain control."""
+"""Smart recording flow: MPRIS media pause/resume and hardware mic gain control.
 
-import atexit
+WHISP-89: pausing a media player over MPRIS only issues an async D-Bus
+``Pause()`` call -- it says nothing about when the player's audio stream
+actually goes silent. The old code assumed a fixed ``pre_pause_delay_ms``
+(default 0, i.e. no wait at all) was long enough, which could let a tail of
+media audio bleed into the start of a recording. Pause/resume now wait for
+the real confirmation event instead: a ``PropertiesChanged`` signal on
+``org.freedesktop.DBus.Properties`` reporting ``PlaybackStatus`` as
+"Paused"/"Stopped" (or "Playing" again, for resume), or the player's bus
+name vanishing outright. A bounded, logged-at-WARNING safety timeout
+(``_CONFIRM_SAFETY_TIMEOUT_MS``) exists only for a non-compliant player that
+never emits either -- it is never the primary mechanism, and recording
+always proceeds (degraded) once it fires rather than stalling forever.
+
+Design note -- continuation vs. trim: the ticket brief allowed either (a)
+delaying the start of capture until pause is confirmed, or (b) starting
+capture immediately and trimming/muting the leading audio once confirmation
+arrives. This module implements (a), via ``pause_all_playing(on_done=...)``;
+``service/daemon.py``'s ``StartRecording`` calls ``self.recorder.start()``
+from that callback instead of synchronously. (b) was rejected: it needs a
+cross-thread mute flag shared with ``AudioRecorder``'s callback-driven
+capture thread, race-prone against the stateful ``AudioPipeline`` (NoiseGate/
+AGC envelope tracking would see a run of unprocessed zeros), and harder to
+reason about/test than "don't start yet". (a)'s cost is a short, bounded
+delay before capture begins (microseconds-to-tens-of-milliseconds for a
+compliant player signalling over a local D-Bus connection; capped at
+``_CONFIRM_SAFETY_TIMEOUT_MS`` otherwise) -- strictly better than today's
+default-0 fixed wait, never blocks the GLib main loop, and keeps
+``StartRecording``'s rarely-exercised failure-cleanup logic in one place
+(inside the deferred callback) instead of duplicated across a sync/async
+split.
+"""
+
 import json
+import atexit
 import logging
 import os
 import re
 import shutil
 import subprocess
-import time
 from dataclasses import dataclass, field
-from typing import Optional, Set
+from typing import Callable, Dict, Optional, Set
+
+from gi.repository import GLib
 
 from ..sandbox import is_flatpak_sandbox
 
@@ -17,6 +50,16 @@ logger = logging.getLogger(__name__)
 
 # Recovery file lives in /run/user/<uid>/ (tmpfs, cleared on reboot)
 _RECOVERY_FILE = f"/run/user/{os.getuid()}/whisperaloud-gain.json"
+
+# Bounded safety watchdog for pause/resume confirmation. NEVER the primary
+# mechanism (PropertiesChanged / name-vanished are) -- exists only so a
+# player that never emits either can't stall recording forever. Firing it
+# is always a logged degradation, never silent.
+_CONFIRM_SAFETY_TIMEOUT_MS = 1500
+
+_PLAYER_PATH = "/org/mpris/MediaPlayer2"
+_PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"
+_PROPS_IFACE = "org.freedesktop.DBus.Properties"
 
 
 # =============================================================================
@@ -34,6 +77,26 @@ class MprisController:
 
     _bus: object = field(default=None, repr=False)
     _paused_by_us: Set[str] = field(default_factory=set, repr=False)
+    # Bumped on every pause_all_playing()/resume_ours() call so a stale
+    # in-flight confirmation wait (e.g. resume_ours() called again before an
+    # earlier one's signals arrived) can recognize itself as superseded and
+    # skip calling its on_done -- it still tears down its own subscriptions
+    # once its players settle or its own safety timeout fires, just without
+    # telling anyone.
+    _epoch: int = field(default=0, repr=False)
+    # Teardown for whatever confirmation wait is currently active (if any),
+    # so a superseding call can unsubscribe it right away instead of
+    # leaving it to clean itself up once its own safety timeout fires.
+    _active_teardown: Optional[Callable[[], None]] = field(default=None, repr=False)
+
+    def _supersede_active_wait(self) -> None:
+        self._epoch += 1
+        if self._active_teardown is not None:
+            try:
+                self._active_teardown()
+            except Exception:
+                pass
+            self._active_teardown = None
 
     def set_bus(self, bus: object) -> None:
         """Inject the pydbus SessionBus instance (avoids opening a second connection).
@@ -49,69 +112,299 @@ class MprisController:
             return
         self._bus = bus
 
-    def pause_all_playing(self) -> None:
-        """Pause all MPRIS players that are currently Playing and support CanPause."""
+    def pause_all_playing(
+        self,
+        on_done: Optional[Callable[[], None]] = None,
+        settle_delay_ms: int = 0,
+    ) -> None:
+        """Pause all MPRIS players that are currently Playing and support CanPause.
+
+        `on_done` (if given) is called exactly once, always from the GLib
+        main loop (never a background thread, never a nested loop), once
+        every paused player has confirmed PlaybackStatus Paused/Stopped (via
+        a PropertiesChanged signal), vanished from the bus, or the bounded
+        `_CONFIRM_SAFETY_TIMEOUT_MS` safety timeout elapsed for it (logged at
+        WARNING -- a degradation, not a success). `settle_delay_ms`
+        (`recording_flow.pre_pause_delay_ms`) is an optional *additional*
+        settle margin honored via `GLib.timeout_add` after confirmation,
+        never a blocking `time.sleep` -- default 0 means "call on_done as
+        soon as confirmed". If there was nothing to pause (no bus, no
+        playing+CanPause players, or the D-Bus call itself failed), on_done
+        is called inline instead -- there is nothing to wait for, so this
+        call stays fully synchronous (as it was before this confirmation
+        wait existed) rather than taking a pointless extra main-loop round
+        trip through `GLib.idle_add`.
+        """
+        self._supersede_active_wait()
+        epoch = self._epoch
+        self._paused_by_us.clear()
+
         if self._bus is None:
             logger.debug("MprisController: no D-Bus bus, skipping media pause")
+            self._call_done(on_done)
             return
-
-        self._paused_by_us.clear()
 
         try:
             names = self._bus.get(".DBus").ListNames()
         except Exception as e:
             logger.debug(f"MprisController: failed to list D-Bus names: {e}")
+            self._call_done(on_done)
             return
 
+        targets = []
         for name in names:
             if not name.startswith("org.mpris.MediaPlayer2."):
                 continue
             try:
-                player = self._bus.get(name, "/org/mpris/MediaPlayer2")
-                props = player["org.mpris.MediaPlayer2.Player"]
-                status = props.get("PlaybackStatus", "")
-                can_pause = props.get("CanPause", False)
+                player = self._bus.get(name, _PLAYER_PATH)
+                iface = player[_PLAYER_IFACE]
+                status = self._safe_prop(iface, "PlaybackStatus", "")
+                can_pause = self._safe_prop(iface, "CanPause", False)
 
                 if status == "Playing" and can_pause:
-                    player["org.mpris.MediaPlayer2.Player"].Pause()
+                    iface.Pause()
                     self._paused_by_us.add(name)
+                    targets.append(name)
                     logger.debug(f"MprisController: paused {name}")
             except Exception as e:
                 logger.debug(f"MprisController: skipping {name}: {e}")
 
-        if self._paused_by_us:
-            logger.info(f"MprisController: paused {len(self._paused_by_us)} player(s)")
+        if targets:
+            logger.info(f"MprisController: paused {len(targets)} player(s): {sorted(targets)}")
 
-    def resume_ours(self, delay_ms: int = 0) -> None:
-        """Resume players we paused, only if they are still Paused."""
-        if not self._paused_by_us or self._bus is None:
+        if not targets:
+            self._call_done(on_done)
             return
 
+        def _on_settled(arrivals: Dict[str, str]) -> None:
+            if epoch != self._epoch:
+                return
+            for name, how in arrivals.items():
+                logger.info(f"MprisController: pause of {name} confirmed via {how}")
+            self._call_done(on_done, settle_delay_ms)
+
+        self._await_confirmation(epoch, targets, wanted_statuses=("Paused", "Stopped"),
+                                  on_all_settled=_on_settled)
+
+    def resume_ours(
+        self,
+        delay_ms: int = 0,
+        on_done: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Resume players we paused, only if they are still Paused.
+
+        `delay_ms` (`recording_flow.post_resume_delay_ms`) is an optional
+        settle margin honored via `GLib.timeout_add` *before* re-checking
+        each player's status and issuing `Play()` -- default 0, i.e.
+        re-check immediately. This preserves the original self-correcting
+        behavior (a player the user already resumed manually during the
+        delay is left alone), just without a blocking `time.sleep`. Nothing
+        in the daemon needs to block on a resume completing, so
+        confirmation that a resumed player actually reports Playing again
+        is observed the same way pause is (PropertiesChanged / name-
+        vanished / bounded WARNING degrade) purely for INFO-level
+        observability; `on_done` is optional and mainly for tests.
+        """
+        self._supersede_active_wait()
+        epoch = self._epoch
+
+        if not self._paused_by_us or self._bus is None:
+            self._paused_by_us.clear()
+            self._call_done(on_done)
+            return
+
+        def _do_resume() -> None:
+            if epoch != self._epoch:
+                return
+            resumed = []
+            for name in list(self._paused_by_us):
+                try:
+                    player = self._bus.get(name, _PLAYER_PATH)
+                    iface = player[_PLAYER_IFACE]
+                    status = self._safe_prop(iface, "PlaybackStatus", "")
+                    if status == "Paused":
+                        iface.Play()
+                        resumed.append(name)
+                        logger.debug(f"MprisController: resumed {name}")
+                    else:
+                        logger.debug(f"MprisController: {name} is {status}, not resuming")
+                except Exception as e:
+                    logger.debug(f"MprisController: failed to resume {name}: {e}")
+
+            self._paused_by_us.clear()
+            if not resumed:
+                self._call_done(on_done)
+                return
+            logger.info(f"MprisController: resumed {len(resumed)} player(s): {sorted(resumed)}")
+
+            def _on_settled(arrivals: Dict[str, str]) -> None:
+                if epoch != self._epoch:
+                    return
+                for name, how in arrivals.items():
+                    logger.info(f"MprisController: resume of {name} confirmed via {how}")
+                self._call_done(on_done)
+
+            self._await_confirmation(epoch, resumed, wanted_statuses=("Playing",),
+                                      on_all_settled=_on_settled)
+
         if delay_ms > 0:
-            time.sleep(delay_ms / 1000.0)
-
-        resumed = 0
-        for name in list(self._paused_by_us):
-            try:
-                player = self._bus.get(name, "/org/mpris/MediaPlayer2")
-                props = player["org.mpris.MediaPlayer2.Player"]
-                status = props.get("PlaybackStatus", "")
-                if status == "Paused":
-                    player["org.mpris.MediaPlayer2.Player"].Play()
-                    resumed += 1
-                    logger.debug(f"MprisController: resumed {name}")
-                else:
-                    logger.debug(f"MprisController: {name} is {status}, not resuming")
-            except Exception as e:
-                logger.debug(f"MprisController: failed to resume {name}: {e}")
-
-        self._paused_by_us.clear()
-        if resumed:
-            logger.info(f"MprisController: resumed {resumed} player(s)")
+            GLib.timeout_add(delay_ms, lambda: (_do_resume(), GLib.SOURCE_REMOVE)[1])
+        else:
+            _do_resume()
 
     def clear(self) -> None:
         """Discard tracked players without resuming (e.g. on cancel)."""
+        self._supersede_active_wait()
         self._paused_by_us.clear()
+
+    # ── Internal: event-driven pause/resume confirmation ────────────────────
+
+    @staticmethod
+    def _safe_prop(iface: object, prop_name: str, default):
+        """Read an MPRIS property off a pydbus interface proxy.
+
+        A pydbus interface object exposes properties as plain attributes
+        (descriptors generated from introspection), not a dict -- there is
+        no `.get(name, default)`. Missing/unreadable properties (a
+        malformed or half-torn-down player) degrade to `default` rather
+        than raising.
+        """
+        try:
+            return getattr(iface, prop_name)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _call_done(on_done: Optional[Callable[[], None]], settle_delay_ms: int = 0) -> None:
+        """Invoke `on_done`, honoring an optional extra settle delay via
+        `GLib.timeout_add` (`settle_delay_ms > 0`) -- never a blocking
+        `time.sleep`. With no settle delay, `on_done` is called inline: when
+        there was genuinely nothing to wait for (no bus, nothing playing/
+        paused), that keeps `pause_all_playing`/`resume_ours` synchronous,
+        same as before this wait existed -- deferring via `GLib.idle_add`
+        here bought nothing but an unnecessary main-loop round trip (and
+        broke every test/caller that reasonably assumes "no media players"
+        completes inline). When a real confirmation wait *did* happen,
+        `on_done` is still only ever reached from a GLib signal/timeout
+        callback (see `_await_confirmation`), so it is already running on
+        the main loop by the time it gets here -- never from a background
+        thread, regardless of which branch this takes.
+        """
+        if on_done is None:
+            return
+        if settle_delay_ms > 0:
+            GLib.timeout_add(settle_delay_ms, lambda: (on_done(), GLib.SOURCE_REMOVE)[1])
+        else:
+            on_done()
+
+    def _await_confirmation(
+        self,
+        epoch: int,
+        names: list,
+        wanted_statuses: tuple,
+        on_all_settled: Callable[[Dict[str, str]], None],
+    ) -> None:
+        """Wait for each of `names` to report a status in `wanted_statuses`
+        (via PropertiesChanged), vanish from the bus, or time out, then call
+        `on_all_settled({name: how_confirmed})` exactly once.
+
+        `on_all_settled` is only ever invoked if `epoch` still matches
+        `self._epoch` at the moment every name has settled -- a newer
+        pause_all_playing()/resume_ours()/clear() call supersedes this wait
+        silently (the newer call owns the outcome), but subscriptions are
+        still torn down either way, bounded by the safety timeout if they
+        haven't already fired naturally.
+        """
+        pending = set(names)
+        arrivals: Dict[str, str] = {}
+        subs: list = []
+        safety_id = [None]
+
+        def _unsubscribe_all() -> None:
+            for s in subs:
+                try:
+                    s.unsubscribe()
+                except Exception:
+                    pass
+            subs.clear()
+
+        def _settle(name: str, how: str) -> None:
+            if name not in pending:
+                return
+            pending.discard(name)
+            arrivals[name] = how
+            if pending:
+                return
+            if safety_id[0] is not None:
+                try:
+                    GLib.source_remove(safety_id[0])
+                except Exception:
+                    pass
+                safety_id[0] = None
+            _unsubscribe_all()
+            if self._active_teardown is _unsubscribe_all:
+                self._active_teardown = None
+            if epoch == self._epoch:
+                on_all_settled(arrivals)
+
+        def _make_props_cb(name: str):
+            def _cb(_sender, _obj, _iface, _signal, params):
+                try:
+                    changed_iface, changed_props, _invalidated = params
+                except Exception:
+                    return
+                if changed_iface != _PLAYER_IFACE:
+                    return
+                status = changed_props.get("PlaybackStatus")
+                if status in wanted_statuses:
+                    _settle(name, "PropertiesChanged signal")
+            return _cb
+
+        def _make_vanished_cb(name: str):
+            def _cb():
+                _settle(name, "name vanished")
+            return _cb
+
+        for name in names:
+            try:
+                subs.append(self._bus.subscribe(
+                    sender=name, iface=_PROPS_IFACE, signal="PropertiesChanged",
+                    object=_PLAYER_PATH, signal_fired=_make_props_cb(name),
+                ))
+            except Exception as e:
+                logger.debug(f"MprisController: could not subscribe to {name}: {e}")
+            try:
+                subs.append(self._bus.watch_name(name, name_vanished=_make_vanished_cb(name)))
+            except Exception as e:
+                logger.debug(f"MprisController: could not watch {name}: {e}")
+
+        if not pending:
+            _unsubscribe_all()
+            if epoch == self._epoch:
+                on_all_settled(arrivals)
+            return
+
+        def _on_safety_timeout():
+            _unsubscribe_all()
+            if self._active_teardown is _unsubscribe_all:
+                self._active_teardown = None
+            safety_id[0] = None
+            if pending:
+                still_pending = sorted(pending)
+                logger.warning(
+                    "MprisController: %d player(s) never confirmed status within "
+                    "%dms (%s) -- proceeding anyway (degraded)",
+                    len(still_pending), _CONFIRM_SAFETY_TIMEOUT_MS, still_pending,
+                )
+                for name in still_pending:
+                    arrivals[name] = "degraded (safety timeout)"
+                pending.clear()
+                if epoch == self._epoch:
+                    on_all_settled(arrivals)
+            return GLib.SOURCE_REMOVE
+
+        safety_id[0] = GLib.timeout_add(_CONFIRM_SAFETY_TIMEOUT_MS, _on_safety_timeout)
+        self._active_teardown = _unsubscribe_all
 
 
 # =============================================================================
