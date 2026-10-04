@@ -41,6 +41,17 @@ from .settings_logic import (
 from .startup_section import StartupSection
 
 
+def _build_shell_extension_section():
+    """The optional "Top bar indicator" section; never breaks the dialog."""
+    try:
+        from .shell_extension_section import ShellExtensionSection
+
+        return ShellExtensionSection()
+    except Exception as e:
+        logger.warning(f"Top bar indicator section unavailable: {e}")
+        return None
+
+
 def _fmt_size(size_mb: Optional[int]) -> str:
     """Human-facing size string for a catalog entry, or "—" when unknown."""
     return f"{size_mb} MB" if size_mb is not None else "—"
@@ -1488,6 +1499,13 @@ class SettingsDialog(Gtk.Window):
         target_gain_box.append(target_gain_label)
         target_gain_box.append(self.target_gain_entry)
         page.append(target_gain_box)
+
+        # --- Top bar indicator (GNOME Shell extension) ---
+        # Self-contained, not part of the saved config: its actions apply
+        # immediately (see ui/shell_extension_section.py).
+        self._shell_extension_section = _build_shell_extension_section()
+        if self._shell_extension_section is not None:
+            page.append(self._shell_extension_section.widget)
 
         self._style_setting_rows_in_page(page)
         self.stack.add_titled(scrolled, "advanced", "Advanced")
