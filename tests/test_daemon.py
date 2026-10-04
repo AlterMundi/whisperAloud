@@ -743,6 +743,57 @@ class TestDaemonMethods:
         assert result is True
         daemon.recorder.start.assert_called_once()
 
+    # ─── Field bug: idle_add callback must never return a truthy value ────
+
+    def test_safe_toggle_idle_callback_returns_falsy(self, daemon):
+        """_safe_toggle() must schedule an idle callback that returns a
+        falsy value (GLib.SOURCE_REMOVE) even though ToggleRecording()
+        itself returns a truthy string ("recording"/"transcribing"/
+        "error") -- see _call_once_idle's docstring. A real (unmocked)
+        GLib.idle_add treats any truthy callback return as
+        GLib.SOURCE_CONTINUE and re-invokes the source forever, which is
+        exactly the field bug (endless start/stop flip-flop after one
+        hotkey press)."""
+        daemon.recorder.is_recording = False
+        captured = {}
+
+        def _capture_idle(fn, *args):
+            captured["fn"] = fn
+            captured["args"] = args
+            return 1  # fake GLib source id
+
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
+            mock_glib.idle_add = _capture_idle
+            daemon._safe_toggle()
+
+        assert "fn" in captured, "GLib.idle_add was not called"
+        # Sanity: ToggleRecording itself still returns a truthy value...
+        daemon.recorder.is_recording = False
+        toggle_result = daemon.ToggleRecording()
+        assert toggle_result  # truthy, e.g. "recording"
+        # ...but the callback handed to idle_add must not propagate that.
+        callback_return = captured["fn"](*captured["args"])
+        assert not callback_return
+
+    def test_safe_quit_idle_callback_returns_falsy(self, daemon):
+        """_safe_quit() must schedule an idle callback returning a falsy
+        value even though Quit() itself returns True."""
+        daemon._loop = MagicMock()
+        captured = {}
+
+        def _capture_idle(fn, *args):
+            captured["fn"] = fn
+            captured["args"] = args
+            return 1
+
+        with patch.object(daemon._daemon_module, "GLib") as mock_glib:
+            mock_glib.idle_add = _capture_idle
+            daemon._safe_quit()
+
+        assert "fn" in captured, "GLib.idle_add was not called"
+        callback_return = captured["fn"](*captured["args"])
+        assert not callback_return
+
     def test_get_status_includes_hotkey_backend(self, daemon):
         """GetStatus should include hotkey_backend key."""
         daemon.recorder.state = MagicMock()
@@ -1457,3 +1508,56 @@ class TestWhisperAloudTestMode:
         with patch("subprocess.run", side_effect=_boom), \
              patch("subprocess.Popen", side_effect=_boom):
             assert service.clipboard_manager.copy("the quick brown fox") is True
+
+
+class TestCallOnceIdleRealMainloop:
+    """Field bug regression (idle_add re-invocation loop): exercise
+    _call_once_idle() through the REAL (unmocked) GLib default main
+    context -- not the per-test fake that just calls the function
+    synchronously and ignores its return -- since the bug only manifests
+    through actual GLib idle-source bookkeeping."""
+
+    def test_truthy_returning_callback_runs_exactly_once(self):
+        """A function that returns a truthy value (like the real
+        ToggleRecording()'s "recording"/"transcribing"/"error") must still
+        only be invoked once when wrapped in _call_once_idle() and
+        scheduled on the real default GLib main context, across several
+        iterations. No sleeps: GLib.MainContext.iteration(False) drains
+        whatever is pending without blocking."""
+        daemon = _make_daemon()
+        call_once_idle = daemon._daemon_module._call_once_idle
+
+        calls = []
+
+        def fake_toggle_recording():
+            calls.append(1)
+            return "recording"  # truthy, exactly like ToggleRecording()
+
+        from gi.repository import GLib as RealGLib
+
+        ctx = RealGLib.MainContext.default()
+        RealGLib.idle_add(call_once_idle(fake_toggle_recording))
+        for _ in range(5):
+            ctx.iteration(False)
+
+        assert len(calls) == 1
+
+    def test_unwrapped_truthy_callback_would_loop_forever(self):
+        """Control case proving the harness itself detects the bug: without
+        _call_once_idle(), handing GLib.idle_add a function that returns a
+        truthy value makes GLib re-invoke it on every iteration (this is
+        the exact mechanism behind the field incident)."""
+        calls = []
+
+        def fake_toggle_recording():
+            calls.append(1)
+            return "recording"
+
+        from gi.repository import GLib as RealGLib
+
+        ctx = RealGLib.MainContext.default()
+        RealGLib.idle_add(fake_toggle_recording)
+        for _ in range(5):
+            ctx.iteration(False)
+
+        assert len(calls) == 5
