@@ -25,7 +25,7 @@ def test_status_readiness_keys_without_any_window(daemon):
         assert status["hotkey_backend"] == "none"
         assert status["hotkey_trigger"] == ""
         assert status["autostart"] is False
-        assert client.get_api_version() == "1.7.0"
+        assert client.get_api_version() == "1.7.1"
     finally:
         client.disconnect()
 
