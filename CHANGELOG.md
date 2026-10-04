@@ -53,6 +53,14 @@ All notable user-facing changes to this project are documented here.
   the window that was focused when recording started can work there too.
 
 ### Changed
+- Recording is now refused up front when the configured model is missing or
+  failed to load (D-Bus API 1.7.1), for every engine, not only streaming
+  ones: starting a recording that could never be transcribed used to waste
+  the user's time. The GUI shows the reason and the Download action, the
+  tray/hotkey path shows a desktop notification, and the CLI's `start`/
+  `toggle` print the reason and exit non-zero. It still re-checks in the
+  background, so a model downloaded or fixed outside the app becomes usable
+  on the very next attempt, no restart required.
 - Streaming engines (Nemotron) refuse to start recording until the model is
   loaded (`Error("model_not_ready")`) instead of loading it synchronously
   and freezing the daemon, and a model change in Settings now loads in the

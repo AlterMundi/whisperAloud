@@ -90,14 +90,22 @@ SetConfig/ReloadConfig switching model (when idle) ──► loading ──► .
   the daemon starts loading the configured model on a background thread.
   The check never touches the network for a cached model (WHISP-94
   `local_files_only` resolution) and never auto-downloads a missing one.
-- **Recording while not ready**: batch engines may record anyway; on stop,
-  the transcription job waits for the `ready` event and then runs. If the
-  model is (still) `missing`/`error`, the job fails with
-  `Error("model_not_available", …)` — never silently. `StartRecording()` on a
-  `missing`/`error` model re-runs the availability check in the background
-  (the model may have been downloaded out-of-band).
+- **`missing`/`error` refuses the start outright (1.7.1), for every engine**:
+  `StartRecording()`/`ToggleRecording()` → `false` +
+  `Error("model_not_available", …)` immediately, instead of letting a batch
+  engine record into a job that is guaranteed to fail afterwards. The
+  refusal still re-runs the availability check in the background (the model
+  may have been downloaded or fixed out-of-band), so the very next
+  `StartRecording()` can succeed without a daemon restart.
+- **Recording while `loading`/`downloading`/`unloaded`**: batch engines may
+  record anyway; on stop, the transcription job waits for the `ready` event
+  and then runs. If the load settles to `missing`/`error` while the job
+  waits, it fails with the same `Error("model_not_available", …)` — never
+  silently.
 - **Streaming engines** are refused until `ready`
-  (`StartRecording()` → `false` + `Error("model_not_ready", …)`): a streaming
+  (`StartRecording()` → `false` + `Error("model_not_ready", …)` while
+  `loading`/`downloading`/`unloaded`, or `Error("model_not_available", …)`
+  while `missing`/`error`, same as batch engines above): a streaming
   session needs the loaded recognizer from the first chunk on. The main loop
   never blocks on a model load.
 - A model-switching config change (`SetConfig`/`ReloadConfig`) goes through
@@ -132,6 +140,13 @@ synchronously before capture starts.
 - Returns `false` and emits `Error("recording_failed", <message>)` if
   starting the audio stream raises (e.g. no capture device). Any mic-gain
   change already applied is rolled back.
+- Returns `false` and emits `Error("model_not_available", <message>)` (1.7.1)
+  if the configured model's readiness is `missing` or `error` (see "Model
+  readiness"). Applies to every engine, batch or streaming; also kicks a
+  background re-check of availability.
+- Returns `false` and emits `Error("model_not_ready", <message>)` if the
+  transcriber is a **streaming** engine and the model is not yet `ready`
+  (`loading`/`downloading`/`unloaded`; see "Model readiness").
 - Returns `false` and emits **no** signal while **transcribing** (WHISP-57):
   the previous recording's transcription (batch or a streaming engine's
   `finalize()`) is still running in the background, and starting a new
@@ -918,6 +933,25 @@ This changelog tracks the `org.fede.whisperaloud.Control` interface
 contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
+
+### 1.7.1 — 2026-10-04
+
+Patch (no new surface), model gate: `StartRecording()`/`ToggleRecording()`
+now refuse a `missing`/`error` model for **every** engine, not only
+streaming ones.
+
+- Behaviour: previously only a streaming engine was refused at start time
+  (`model_not_ready`); a batch engine recorded anyway and only learned the
+  model was missing/errored after `StopRecording()`, via
+  `Error("model_not_available", …)` on the finished job. Now `missing`/
+  `error` refuses the start itself, synchronously, with the same
+  `model_not_available` code -- for batch and streaming alike. The refusal
+  still kicks the existing background re-check, so a model downloaded or
+  fixed out-of-band becomes usable on the very next `StartRecording()`
+  without a daemon restart.
+- `model_not_ready` is now reserved for a streaming engine refused while the
+  model is `loading`/`downloading`/`unloaded` (i.e. not yet `missing`/
+  `error`, just not `ready` yet).
 
 ### 1.7.0 — 2026-10-04
 
