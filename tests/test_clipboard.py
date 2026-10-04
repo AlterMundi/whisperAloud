@@ -88,11 +88,16 @@ class TestClipboardCopy:
     @patch('subprocess.Popen')
     @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":0"}, clear=False)
     def test_copy_wayland_success(self, mock_popen):
-        """Test successful copy on Wayland."""
-        # Mock Popen to return a process with stdin
+        """Test successful copy on Wayland: waits for wl-copy's exit (the
+        event that means the selection is actually owned) before reporting
+        success, and never passes --paste-once (WHISP field bug: a
+        clipboard manager or any reader consuming the one-shot selection
+        left later pastes with stale content)."""
+        # Mock Popen to return a process with stdin that exits 0 (success).
         mock_process = MagicMock()
         mock_process.stdin.write = MagicMock()
         mock_process.stdin.close = MagicMock()
+        mock_process.wait.return_value = 0
         mock_popen.return_value = mock_process
 
         config = ClipboardConfig()
@@ -102,14 +107,18 @@ class TestClipboardCopy:
             result = manager.copy("Test text")
 
             assert result is True
-            # Verify wl-copy was called with Popen
+            # Verify wl-copy was called with Popen, without --paste-once.
             mock_popen.assert_called_once()
             call_args = str(mock_popen.call_args)
             assert 'wl-copy' in call_args
-            assert '--paste-once' in call_args
+            assert '--paste-once' not in call_args
             # Verify stdin was written to
             mock_process.stdin.write.assert_called_once_with(b"Test text")
             mock_process.stdin.close.assert_called_once()
+            # The fix: we must wait for the process to actually exit before
+            # reporting success -- that exit is the event meaning the
+            # selection was set.
+            mock_process.wait.assert_called_once_with(timeout=config.timeout_seconds)
             # Verify fallback was also called for redundancy
             mock_fallback.assert_called_once_with("Test text")
 
@@ -188,6 +197,184 @@ class TestClipboardCopy:
 
         result = manager.copy("")
         assert result is False
+
+    def test_copy_empty_text_notifies_completion_false(self):
+        """on_complete must still fire (with False) for empty text."""
+        config = ClipboardConfig()
+        manager = ClipboardManager(config)
+
+        on_complete = MagicMock()
+        result = manager.copy("", on_complete=on_complete)
+
+        assert result is False
+        on_complete.assert_called_once_with(False)
+
+
+class TestWaylandCopyOrdering:
+    """Field bug (0.3.0 Flatpak, GNOME Wayland): auto-paste pasted the
+    PREVIOUS clipboard content because the daemon reported "copied" and
+    triggered the paste the instant wl-copy's stdin was closed, racing
+    wl-copy's fork into the background (the event that actually means the
+    selection is owned). These tests pin down the fix: _copy_wayland must
+    wait for that process exit -- off the calling thread when a completion
+    callback is supplied -- before reporting success, and no --paste-once."""
+
+    @patch('subprocess.Popen')
+    @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":0"}, clear=False)
+    def test_on_complete_dispatches_to_background_thread(self, mock_popen):
+        """With on_complete given, copy() must return immediately (not
+        block the caller/main-loop thread) while the wait for wl-copy's
+        exit happens on a background thread."""
+        import threading as _threading
+
+        release_wait = _threading.Event()
+        entered_wait = _threading.Event()
+
+        mock_process = MagicMock()
+
+        def _blocking_wait(timeout=None):
+            entered_wait.set()
+            release_wait.wait(timeout=5)
+            return 0
+
+        mock_process.wait.side_effect = _blocking_wait
+        mock_popen.return_value = mock_process
+
+        config = ClipboardConfig()
+        manager = ClipboardManager(config)
+        on_complete = MagicMock()
+
+        with patch.object(manager, '_copy_fallback', return_value=True):
+            dispatched = manager.copy("hello", on_complete=on_complete)
+
+        # copy() returned without waiting for wl-copy's exit.
+        assert dispatched is True
+        assert entered_wait.wait(timeout=2), "wl-copy wait() should have started"
+        on_complete.assert_not_called()  # exit hasn't happened yet
+
+        release_wait.set()
+        # Give the background thread a moment to finish and invoke the callback.
+        for _ in range(100):
+            if on_complete.called:
+                break
+            _threading.Event().wait(0.01)
+
+        on_complete.assert_called_once_with(True)
+
+    @patch('subprocess.Popen')
+    @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":0"}, clear=False)
+    def test_paste_not_invoked_before_copy_process_exits(self, mock_popen):
+        """Simulates the exact field-bug sequencing at the ClipboardManager
+        level: a consumer must not observe on_complete(True) -- and
+        therefore must not trigger a paste -- until wl-copy's parent
+        process has actually exited."""
+        import threading as _threading
+
+        release_wait = _threading.Event()
+        mock_process = MagicMock()
+        mock_process.wait.side_effect = lambda timeout=None: (release_wait.wait(5), 0)[1]
+        mock_popen.return_value = mock_process
+
+        config = ClipboardConfig()
+        manager = ClipboardManager(config)
+
+        paste_triggered = _threading.Event()
+
+        def _on_complete(success):
+            if success:
+                paste_triggered.set()
+
+        with patch.object(manager, '_copy_fallback', return_value=True):
+            manager.copy("hello", on_complete=_on_complete)
+
+            # The process has not exited yet -- paste must not have fired.
+            assert not paste_triggered.is_set()
+
+            release_wait.set()
+            assert paste_triggered.wait(timeout=2), "paste should fire once wl-copy exits"
+
+    @patch('subprocess.Popen')
+    @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":0"}, clear=False)
+    def test_nonzero_exit_reports_failure_no_paste(self, mock_popen):
+        """A failing wl-copy (non-zero exit) must report failure via
+        on_complete, write the fallback file, and log a warning -- never
+        signal success (which would otherwise trigger a paste)."""
+        mock_process = MagicMock()
+        mock_process.wait.return_value = 1
+        mock_process.stderr.read.return_value = b"some error"
+        mock_popen.return_value = mock_process
+
+        config = ClipboardConfig()
+        manager = ClipboardManager(config)
+        on_complete = MagicMock()
+
+        with patch.object(manager, '_copy_fallback', return_value=True) as mock_fallback:
+            manager.copy("hello", on_complete=on_complete)
+
+        on_complete.assert_called_once_with(False)
+        mock_fallback.assert_called_once_with("hello")
+
+    @patch('subprocess.Popen')
+    @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":0"}, clear=False)
+    def test_timeout_waiting_for_exit_reports_failure_no_paste(self, mock_popen):
+        """If wl-copy never exits within the configured timeout, we must
+        degrade to clipboard-only (no paste) -- never treat the timeout as
+        a green light to paste."""
+        mock_process = MagicMock()
+        mock_process.wait.side_effect = subprocess.TimeoutExpired('wl-copy', 5)
+        mock_popen.return_value = mock_process
+
+        config = ClipboardConfig(timeout_seconds=1.0)
+        manager = ClipboardManager(config)
+        on_complete = MagicMock()
+
+        with patch.object(manager, '_copy_fallback', return_value=True) as mock_fallback:
+            manager.copy("hello", on_complete=on_complete)
+
+        on_complete.assert_called_once_with(False)
+        mock_fallback.assert_called_once_with("hello")
+        mock_process.kill.assert_called_once()
+
+    @patch('subprocess.Popen')
+    @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":0"}, clear=False)
+    def test_no_paste_once_flag_and_stdout_is_devnull(self, mock_popen):
+        """Defect 2: --paste-once makes wl-copy serve exactly one paste and
+        exit, so a clipboard manager or any reader consumes it first and
+        later pastes get stale content -- it must never be passed. Defect
+        2 (continued): stdout must be DEVNULL so the backgrounded child
+        never inherits a pipe we never drain."""
+        mock_process = MagicMock()
+        mock_process.wait.return_value = 0
+        mock_popen.return_value = mock_process
+
+        config = ClipboardConfig()
+        manager = ClipboardManager(config)
+
+        with patch.object(manager, '_copy_fallback', return_value=True):
+            manager.copy("hello")
+
+        args, kwargs = mock_popen.call_args
+        assert args[0] == ['wl-copy']
+        assert kwargs.get('stdout') == subprocess.DEVNULL
+
+    @patch('subprocess.Popen')
+    @patch.dict(os.environ, {"WAYLAND_DISPLAY": ":0"}, clear=False)
+    def test_sync_call_without_on_complete_blocks_until_exit(self, mock_popen):
+        """A caller that doesn't pass on_complete gets the old-style
+        synchronous contract back, but now backed by a real wait for
+        process exit rather than an assumed instant success."""
+        mock_process = MagicMock()
+        mock_process.wait.return_value = 0
+        mock_popen.return_value = mock_process
+
+        config = ClipboardConfig()
+        manager = ClipboardManager(config)
+
+        with patch.object(manager, '_copy_fallback', return_value=True):
+            result = manager.copy("hello")
+
+        assert result is True
+        mock_process.wait.assert_called_once_with(timeout=config.timeout_seconds)
 
 
 class TestFallback:
