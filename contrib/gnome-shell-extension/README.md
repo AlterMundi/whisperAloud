@@ -34,16 +34,16 @@ Everything is event-driven, with no polling timers:
 - `Gio.bus_watch_name` on `org.fede.whisperaloud` tracks whether the daemon
   runs.
 - `StatusChanged(s)`, `ModelStateChanged(s, s)`, `HotkeyStateChanged(b, s, s)`
-  (API 1.8.0) and `ConfigChanged` signals carry state changes.
+  (API 1.9.0) and `ConfigChanged` signals carry state changes.
 - One `GetStatus()` call runs when the daemon appears, when it returns to
   `idle` and when its config changes. Every key is read defensively, so
-  daemons older than API 1.6.0/1.7.0/1.8.0 still work.
+  daemons older than API 1.6.0/1.7.0/1.9.0 still work.
 - `HotkeyStateChanged` fires on every hotkey binding-state transition
   (portal bind result, GNOME's response=2-with-shortcuts quirk,
   `ShortcutsChanged` recovery, keybinder register/unregister, a backend
   re-probe, a hotkey config change, and daemon shutdown), so the extension
   never needs to re-read `GetStatus()` on a timer to learn `hotkey_bound`
-  changing. Daemons older than API 1.8.0 never emit it; the "Ready, but no
+  changing. Daemons older than API 1.9.0 never emit it; the "Ready, but no
   global hotkey" state then only clears on the next `StatusChanged`/
   `ConfigChanged`-triggered `GetStatus()`.
 

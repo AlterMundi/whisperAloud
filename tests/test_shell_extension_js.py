@@ -97,7 +97,7 @@ check('no fallback while the portal binding is pending/declined (1.7.0)',
 check('no fallback when not running',
       s.needsFallbackKeybinding({running: false, status: null}), false);
 
-// HotkeyStateChanged (API 1.8.0, WHISP-99): applyHotkeyState patches the
+// HotkeyStateChanged (API 1.9.0, WHISP-99): applyHotkeyState patches the
 // status dict the same way GetStatus's hotkey_* keys would read.
 {
     const hs = st({hotkey_bound: false, hotkey_trigger: '', hotkey_backend: 'portal'});

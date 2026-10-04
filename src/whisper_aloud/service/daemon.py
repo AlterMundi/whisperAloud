@@ -76,7 +76,7 @@ EXIT_ALREADY_RUNNING = 3
 # Error("model_not_available", ...)). The refusal reuses the same code and
 # is synchronous with the call, and still kicks the background re-check.
 #
-# 1.8.0 (WHISP-99): additive -- new HotkeyStateChanged(b bound, s trigger,
+# 1.9.0 (WHISP-99): additive -- new HotkeyStateChanged(b bound, s trigger,
 # s backend) signal, emitted on every hotkey binding-state transition
 # (portal bind result, GNOME's response=2-with-shortcuts quirk,
 # ShortcutsChanged recovery, keybinder register/unregister, a WHISP-90
@@ -84,7 +84,9 @@ EXIT_ALREADY_RUNNING = 3
 # service/hotkey.py's `on_state_change`. `hotkey_bound`/`hotkey_trigger`
 # (GetStatus) no longer need a client-side recheck timer to learn about a
 # late portal bind; they still reflect the same values this signal carries.
-API_VERSION = "1.8.0"
+# 1.8.0 is reserved for WHISP-96 (TranscribeFile), landing separately --
+# this branch was rebased past it without needing anything from it.
+API_VERSION = "1.9.0"
 
 # ExportHistory (WHISP-79): default/maximum number of entries a single
 # export may include. Keeps one unbounded/malicious `limit` from building an

@@ -343,7 +343,7 @@ class TestWhisperAloudClient:
         mock_proxy.ModelStateChanged.connect.assert_called_once_with(callback)
 
     def test_signal_subscription_hotkey_state_changed(self):
-        """on_hotkey_state_changed should subscribe callback to the 1.8.0
+        """on_hotkey_state_changed should subscribe callback to the 1.9.0
         signal (WHISP-99)."""
         _, client, _, mock_proxy = self._make_client()
         callback = MagicMock()

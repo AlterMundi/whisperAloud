@@ -259,7 +259,7 @@ Valid in any state. Returns a dict of GLib variants:
 "all OK" without the main window when `model_state == "ready"` and
 `hotkey_bound` is true. `ModelStateChanged` covers the model and
 `ConfigChanged` covers `autostart`; `hotkey_bound`/`hotkey_trigger`/
-`hotkey_backend` are covered by `HotkeyStateChanged` (1.8.0) -- subscribe to
+`hotkey_backend` are covered by `HotkeyStateChanged` (1.9.0) -- subscribe to
 it before calling `GetStatus()` so a transition racing the call is never
 missed, the same pattern `ModelStateChanged` uses.
 
@@ -720,7 +720,7 @@ needs the current state should subscribe first and then call `GetStatus()`
 HotkeyStateChanged(b bound, s trigger, s backend)
 ```
 
-Emitted on every global-hotkey binding-state transition (1.8.0): a portal
+Emitted on every global-hotkey binding-state transition (1.9.0): a portal
 bind result (including GNOME's "response=2 but the shortcuts results say
 bound" quirk -- see the portal's own notes), a later `ShortcutsChanged`
 recovery, a libkeybinder3 register/unregister, a backend re-probe after a
@@ -952,7 +952,7 @@ contract itself (methods, signals, properties, and their shapes) — not the
 WhisperAloud application version, and not `GetConfig`'s internal key
 names.
 
-### 1.8.0 — 2026-10-04
+### 1.9.0 — 2026-10-04
 
 Minor (additive), WHISP-99.
 

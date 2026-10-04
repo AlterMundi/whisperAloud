@@ -501,7 +501,7 @@ class WhisperAloudClient:
 
     def on_hotkey_state_changed(self, callback: Callable) -> None:
         """Subscribe to HotkeyStateChanged signal (bound, trigger, backend)
-        -- API 1.8.0 (WHISP-99).
+        -- API 1.9.0 (WHISP-99).
 
         Emitted on every hotkey binding-state transition (portal bind
         result, ShortcutsChanged recovery, keybinder register/unregister, a
