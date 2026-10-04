@@ -1862,7 +1862,13 @@ class WhisperAloudService:
     def _watch_shell_extension(self):
         """Hide the tray icon while the GNOME Shell extension (which shows its
         own top-bar indicator) owns its bus name. Event-driven bus-name watch;
-        only when there is a tray icon to hide. Never fatal."""
+        only when there is a tray icon to hide. Never fatal.
+
+        WHISP-90: also the window-manager backend's re-probe trigger -- the
+        GNOME extension also owns the window-capture D-Bus service
+        (`clipboard/window_manager.py`'s "gnome-extension" backend), so this
+        one watcher drives both instead of opening a second, duplicate
+        `Gio.bus_watch_name()` on the same bus name."""
         if self.indicator is None:
             return None
         try:
@@ -1873,6 +1879,11 @@ class WhisperAloudService:
                     self.indicator.set_suppressed(
                         not tray_should_show(extension_present=present)
                     )
+                if self.window_manager is not None:
+                    try:
+                        self.window_manager.on_shell_extension_presence_changed(present)
+                    except Exception as e:
+                        logger.debug("WindowManager re-probe on presence change failed: %s", e)
 
             return shell_extension_watch.ShellExtensionWatcher(_on_change)
         except Exception as e:

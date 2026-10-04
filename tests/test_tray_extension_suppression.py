@@ -127,6 +127,31 @@ class TestDaemonWiring:
         daemon._cleanup()
         cls.return_value.close.assert_called_once()
 
+    def test_window_manager_reprobes_on_presence_change(self):
+        """WHISP-90: the same watcher that hides the tray also drives
+        WindowManager's backend re-probe -- no second, duplicate
+        Gio.bus_watch_name() for the same bus name."""
+        from tests.test_daemon import _make_daemon
+
+        with patch("whisper_aloud.service.shell_extension_watch.ShellExtensionWatcher") as cls:
+            daemon = _make_daemon()
+        on_change = cls.call_args.args[0]
+        on_change(True)
+        daemon.window_manager.on_shell_extension_presence_changed.assert_called_with(True)
+        on_change(False)
+        daemon.window_manager.on_shell_extension_presence_changed.assert_called_with(False)
+
+    def test_window_manager_reprobe_failure_is_contained(self):
+        """A broken WindowManager must never break tray suppression."""
+        from tests.test_daemon import _make_daemon
+
+        with patch("whisper_aloud.service.shell_extension_watch.ShellExtensionWatcher") as cls:
+            daemon = _make_daemon()
+        daemon.window_manager.on_shell_extension_presence_changed.side_effect = RuntimeError("x")
+        on_change = cls.call_args.args[0]
+        on_change(True)  # must not raise
+        daemon.indicator.set_suppressed.assert_called_with(True)
+
     def test_no_watcher_without_indicator(self):
         from tests.test_daemon import _make_daemon
 

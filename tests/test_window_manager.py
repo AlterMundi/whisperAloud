@@ -73,6 +73,60 @@ class TestXdotoolBackend:
         assert wm.activate_window(info) is False
 
 
+class TestShellExtensionPresenceHook:
+    """WHISP-90: the daemon's single ShellExtensionWatcher forwards
+    NameOwnerChanged events here instead of WindowManager opening its own,
+    duplicate Gio.bus_watch_name() for the same bus name."""
+
+    def test_presence_change_reprobes_and_can_upgrade_to_gnome(self, caplog):
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"99\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                wm = WindowManager()
+        assert wm.backend == "xdotool"
+
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            with caplog.at_level(logging.INFO):
+                wm.on_shell_extension_presence_changed(True)
+
+        assert wm.backend == "gnome-extension"
+        assert any(
+            "backend changed" in r.message and "xdotool -> gnome-extension" in r.message
+            for r in caplog.records
+        )
+
+    def test_presence_change_falls_back_when_extension_vanishes(self):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            wm = WindowManager()
+        assert wm.backend == "gnome-extension"
+
+        with patch(
+            "whisper_aloud.clipboard.window_manager.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=b"99\n"),
+        ):
+            with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+                wm.on_shell_extension_presence_changed(False)
+
+        assert wm.backend == "xdotool"
+
+    def test_presence_change_without_effect_logs_no_transition(self, caplog):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=False):
+            with patch(
+                "whisper_aloud.clipboard.window_manager.subprocess.run",
+                side_effect=FileNotFoundError,
+            ):
+                wm = WindowManager()
+                assert wm.backend == "none"
+
+                with caplog.at_level(logging.INFO):
+                    wm.on_shell_extension_presence_changed(False)
+
+        assert wm.backend == "none"
+        assert not any("backend changed" in r.message for r in caplog.records)
+
+
 class TestBackendReprobeOnFailure:
     """WHISP-90: the backend detected at __init__ is no longer cached
     forever -- a real operation failure re-probes it."""

@@ -34,6 +34,21 @@ class WindowManager:
         self.backend = self._detect_backend()
         logger.info(f"WindowManager initialized with backend: {self.backend}")
 
+    def on_shell_extension_presence_changed(self, present: bool) -> None:
+        """Re-probe on a NameOwnerChanged event for the GNOME extension's
+        bus name (WHISP-90), instead of only on a failed operation.
+
+        The daemon already owns a single `ShellExtensionWatcher` (see
+        `service/shell_extension_watch.py`) for hiding the tray icon --
+        rather than this class opening a second, duplicate
+        `Gio.bus_watch_name()` on the same name (and, worse, doing so from
+        every `WindowManager()` constructed in a plain unit test, which
+        would reach the real session bus), the daemon forwards that
+        watcher's callback here. Safe to call even when the backend is
+        unaffected (xdotool/none): `_reprobe()` only logs a transition if
+        one actually happened."""
+        self._reprobe(f"GNOME extension {'appeared' if present else 'vanished'}")
+
     def _reprobe(self, reason: str) -> None:
         """Re-detect the backend (WHISP-90).
 
@@ -49,7 +64,8 @@ class WindowManager:
         actually fails (an exception from the D-Bus call or the
         subprocess) -- an unambiguous, observable signal that the
         environment changed, unlike a plain "no active window right now"
-        result. Never on a timer."""
+        result -- and from `on_shell_extension_presence_changed()` above.
+        Never on a timer."""
         old = self.backend
         self._gnome_proxy = None
         new = self._detect_backend()
