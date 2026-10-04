@@ -75,7 +75,16 @@ EXIT_ALREADY_RUNNING = 3
 # engine recorded anyway and only failed afterwards, on StopRecording, with
 # Error("model_not_available", ...)). The refusal reuses the same code and
 # is synchronous with the call, and still kicks the background re-check.
-API_VERSION = "1.7.1"
+#
+# 1.8.0 (WHISP-99): additive -- new HotkeyStateChanged(b bound, s trigger,
+# s backend) signal, emitted on every hotkey binding-state transition
+# (portal bind result, GNOME's response=2-with-shortcuts quirk,
+# ShortcutsChanged recovery, keybinder register/unregister, a WHISP-90
+# backend re-probe, a hotkey config change, and daemon shutdown) -- see
+# service/hotkey.py's `on_state_change`. `hotkey_bound`/`hotkey_trigger`
+# (GetStatus) no longer need a client-side recheck timer to learn about a
+# late portal bind; they still reflect the same values this signal carries.
+API_VERSION = "1.8.0"
 
 # ExportHistory (WHISP-79): default/maximum number of entries a single
 # export may include. Keeps one unbounded/malicious `limit` from building an
@@ -330,6 +339,11 @@ class WhisperAloudService:
           <arg type="s" name="state"/>
           <arg type="s" name="detail"/>
         </signal>
+        <signal name="HotkeyStateChanged">
+          <arg type="b" name="bound"/>
+          <arg type="s" name="trigger"/>
+          <arg type="s" name="backend"/>
+        </signal>
         <property name="ApiVersion" type="s" access="read"/>
       </interface>
     </node>
@@ -347,6 +361,7 @@ class WhisperAloudService:
     DownloadProgress = signal()
     DownloadFinished = signal()
     ModelStateChanged = signal()
+    HotkeyStateChanged = signal()
 
     def __init__(
         self,
@@ -502,9 +517,17 @@ class WhisperAloudService:
         if self._test_mode:
             logger.info("WHISPER_ALOUD_TEST_MODE=1: hotkeys disabled, D-Bus methods only")
             self.hotkey_manager = None
+            # WHISP-99: no HotkeyManager is ever constructed in test mode,
+            # so nothing would otherwise emit HotkeyStateChanged -- fire the
+            # (only ever) definitive "none"/unbound state once, up front,
+            # so a client that subscribed before the daemon started still
+            # gets one, instead of only ever learning this via GetStatus.
+            self._on_hotkey_state_change(False, "", "none")
         else:
             try:
-                self.hotkey_manager = HotkeyManager()
+                self.hotkey_manager = HotkeyManager(
+                    on_state_change=self._on_hotkey_state_change
+                )
                 if self.hotkey_manager.available:
                     self.hotkey_manager.register(
                         self.config.hotkey.toggle_recording,
@@ -512,10 +535,13 @@ class WhisperAloudService:
                     )
                     logger.info(f"Hotkey registered: {self.config.hotkey.toggle_recording} (backend: {self.hotkey_manager.backend})")
                 else:
+                    # HotkeyManager.__init__ already notified the initial
+                    # ("none"/unbound) state via on_state_change.
                     logger.info("No hotkey backend available, D-Bus methods only")
             except Exception as e:
                 logger.warning(f"Failed to initialize hotkey manager: {e}")
                 self.hotkey_manager = None
+                self._on_hotkey_state_change(False, "", "none")
 
         # Initialize notifications (skipped entirely in test mode).
         if self._test_mode:
@@ -612,6 +638,23 @@ class WhisperAloudService:
         the main loop."""
         logger.info("Model state: %s%s", state, f" ({detail})" if detail else "")
         GLib.idle_add(_call_once_idle(self.ModelStateChanged, state, detail))
+
+    def _on_hotkey_state_change(self, bound: bool, trigger: str, backend: str) -> None:
+        """HotkeyManager.on_state_change listener (WHISP-99).
+
+        Fires from `HotkeyManager.register()`/`unregister()`/`_reprobe()`
+        (called from `__init__`, `_apply_config_changes` and `_cleanup`,
+        always already on the daemon's main thread) and from the portal
+        backend's `on_bound` callback -- itself a GDBus signal/Response
+        callback, already dispatched on the main loop. `GLib.idle_add` is
+        used regardless, matching `_on_model_state_change`'s pattern, so
+        the emission is always marshalled the same way no matter which of
+        those call sites triggered it."""
+        logger.info(
+            "Hotkey state: bound=%s backend=%s%s",
+            bound, backend, f" ({trigger})" if trigger else "",
+        )
+        GLib.idle_add(_call_once_idle(self.HotkeyStateChanged, bound, trigger, backend))
 
     def _start_model_load(self, engine=None, config=None) -> None:
         """Start loading `engine` (default: the current transcriber) for

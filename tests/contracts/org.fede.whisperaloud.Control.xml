@@ -109,6 +109,11 @@
       <arg type="s" name="state" />
       <arg type="s" name="detail" />
     </signal>
+    <signal name="HotkeyStateChanged">
+      <arg type="b" name="bound" />
+      <arg type="s" name="trigger" />
+      <arg type="s" name="backend" />
+    </signal>
     <property name="ApiVersion" type="s" access="read" />
   </interface>
 </node>

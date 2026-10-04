@@ -499,6 +499,18 @@ class WhisperAloudClient:
         racing that call is never missed."""
         self._subscribe_signal("ModelStateChanged", callback)
 
+    def on_hotkey_state_changed(self, callback: Callable) -> None:
+        """Subscribe to HotkeyStateChanged signal (bound, trigger, backend)
+        -- API 1.8.0 (WHISP-99).
+
+        Emitted on every hotkey binding-state transition (portal bind
+        result, ShortcutsChanged recovery, keybinder register/unregister, a
+        backend re-probe, a hotkey config change, and daemon shutdown) --
+        mirrors GetStatus()'s hotkey_bound/hotkey_trigger/hotkey_backend
+        keys. Subscribe before reading GetStatus() so a transition racing
+        that call is never missed, same as on_model_state_changed."""
+        self._subscribe_signal("HotkeyStateChanged", callback)
+
     def _subscribe_signal(self, signal_name: str, callback: Callable) -> None:
         """Internal: subscribe to a D-Bus signal by name.
 

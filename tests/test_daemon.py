@@ -754,6 +754,21 @@ class TestDaemonMethods:
         assert result is True
         daemon.recorder.start.assert_called_once()
 
+    def test_hotkey_manager_wired_with_state_change_listener(self, daemon):
+        """WHISP-99: HotkeyManager must be constructed with the daemon's own
+        listener so hotkey binding transitions become HotkeyStateChanged."""
+        _args, kwargs = daemon._mock_hotkey_cls.call_args
+        assert kwargs["on_state_change"] == daemon._on_hotkey_state_change
+
+    def test_on_hotkey_state_change_emits_signal_on_main_loop(self, daemon):
+        """WHISP-99: the listener logs and marshals HotkeyStateChanged onto
+        the main loop via idle_add -- the same pattern as
+        _on_model_state_change for ModelStateChanged."""
+        daemon._on_hotkey_state_change(True, "Press <Control>space", "portal")
+        daemon.HotkeyStateChanged.assert_called_once_with(
+            True, "Press <Control>space", "portal"
+        )
+
     # ─── Field bug: idle_add callback must never return a truthy value ────
 
     def test_safe_toggle_idle_callback_returns_falsy(self, daemon):

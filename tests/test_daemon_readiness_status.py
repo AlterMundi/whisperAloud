@@ -112,7 +112,7 @@ def test_setconfig_autostart_is_visible_in_status(daemon, tmp_path, monkeypatch)
     assert _status(daemon)["autostart"] is True
 
 
-def test_api_version_is_1_7_1(daemon):
-    # 1.7.1 (model gate, fix/model-gate-reprobe): no new surface, but a
-    # documented behaviour change -- see docs/dbus-api.md's Changelog.
-    assert daemon._daemon_module.API_VERSION == "1.7.1"
+def test_api_version_is_1_8_0(daemon):
+    # 1.8.0 (WHISP-99): additive -- new HotkeyStateChanged signal. See
+    # docs/dbus-api.md's Changelog.
+    assert daemon._daemon_module.API_VERSION == "1.8.0"
