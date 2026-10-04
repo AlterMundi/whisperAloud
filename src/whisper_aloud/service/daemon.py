@@ -410,6 +410,16 @@ class WhisperAloudService:
         # drop silently -- no signal, no clipboard/paste, no history write.
         self._job_id = 0
 
+        # WHISP-89: set in StartRecording right before the (now
+        # event-driven) media-pause confirmation wait, cleared once capture
+        # actually begins. Lets CancelRecording/StartRecording recognize a
+        # "pause confirmation still pending, recorder.is_recording not yet
+        # True" window that didn't exist before (recorder.start() used to
+        # run synchronously right after a fixed sleep) and either refuse a
+        # re-entrant StartRecording or, on cancel, resume/restore media
+        # that was paused for a capture that will now never begin.
+        self._start_token: Optional[str] = None
+
         # WHISP-74: a model-reload SetConfig()/ReloadConfig() that lands
         # while a recording or transcription is in flight stores the new
         # config here instead of swapping self.transcriber immediately; it
@@ -841,6 +851,15 @@ class WhisperAloudService:
             self.Error("recorder_error", "Recorder not initialized")
             return False
 
+        # WHISP-89: a previous StartRecording is still waiting on media-pause
+        # confirmation (recorder.start() hasn't run yet) -- refuse rather
+        # than racing a second pause_all_playing()/_begin_capture() against
+        # the first. CancelRecording clears this before it could ever be
+        # observed as a user-facing double-press stall.
+        if self._start_token is not None:
+            logger.info("StartRecording: a start is already pending media confirmation, ignoring")
+            return False
+
         # A previous recording's transcription (batch transcribe_numpy, or a
         # streaming engine's finalize()) is still running on the executor.
         # Starting a new session now would call engine.start_session() (or
@@ -899,63 +918,102 @@ class WhisperAloudService:
                 self.notifications.show_error(message)
             return False
 
-        try:
-            rf = self.config.recording_flow
+        rf = self.config.recording_flow
+        token = uuid.uuid4().hex
+        self._start_token = token
 
-            # Pause media before recording
-            if rf.pause_media:
-                self._mpris.pause_all_playing()
-                if rf.pre_pause_delay_ms > 0:
-                    time.sleep(rf.pre_pause_delay_ms / 1000.0)
+        def _begin_capture() -> bool:
+            # WHISP-89: runs once media pause is confirmed (or degraded) --
+            # from MprisController's on_done, always on the main loop, never
+            # from a background thread. A CancelRecording() that landed
+            # while this was pending already invalidated `token` and handled
+            # its own gain/media cleanup, so this is a silent no-op then.
+            # The return value only matters for the synchronous
+            # (pause_media=False) call below -- MprisController ignores
+            # whatever on_done returns.
+            if self._start_token != token:
+                logger.info("StartRecording: capture start superseded, discarding")
+                return False
+            self._start_token = None
+            try:
+                # Raise mic gain before recording
+                if rf.raise_mic_gain:
+                    self._gain.raise_to(rf.target_gain_linear)
 
-            # Raise mic gain before recording
-            if rf.raise_mic_gain:
-                self._gain.raise_to(rf.target_gain_linear)
+                # WHISP-57: a fresh session_id per recording, regardless of
+                # engine -- TranscriptionReady always carries it in meta so
+                # clients can correlate (streaming or not). `is_streaming`
+                # (computed above) is checked with `is True` rather than
+                # truthiness: a MagicMock
+                # test double for a *non*-streaming engine auto-creates a
+                # truthy `.is_streaming` attribute, which would otherwise send
+                # every mocked-engine test down the streaming path by accident.
+                self._current_session_id = uuid.uuid4().hex
+                self._streaming_session = is_streaming
+                if is_streaming:
+                    # The model is `ready` here (checked above) -- never
+                    # loaded synchronously on the main loop.
+                    self.transcriber.start_session(self.config.transcription.language)
+                    self.recorder.on_processed_chunk = self.transcriber.accept_chunk
+                    self._last_partial_seq = None
+                else:
+                    self.recorder.on_processed_chunk = None
 
-            # WHISP-57: a fresh session_id per recording, regardless of
-            # engine -- TranscriptionReady always carries it in meta so
-            # clients can correlate (streaming or not). `is_streaming`
-            # (computed above) is checked with `is True` rather than
-            # truthiness: a MagicMock
-            # test double for a *non*-streaming engine auto-creates a
-            # truthy `.is_streaming` attribute, which would otherwise send
-            # every mocked-engine test down the streaming path by accident.
-            self._current_session_id = uuid.uuid4().hex
-            self._streaming_session = is_streaming
-            if is_streaming:
-                # The model is `ready` here (checked above) -- never loaded
-                # synchronously on the main loop.
-                self.transcriber.start_session(self.config.transcription.language)
-                self.recorder.on_processed_chunk = self.transcriber.accept_chunk
-                self._last_partial_seq = None
-            else:
-                self.recorder.on_processed_chunk = None
+                self.recorder.start()
+                if is_streaming:
+                    self._start_partial_timer()
+                self._start_level_timer()
+                self.RecordingStarted()
+                self.StatusChanged("recording")
+                if self.indicator:
+                    self.indicator.set_state("recording")
+                if self.notifications:
+                    self.notifications.show_recording_started()
+                logger.info("Recording started via D-Bus")
+                return True
+            except Exception as e:
+                # Best-effort cleanup on start failure
+                self._gain.restore()
+                self._mpris.clear()
+                if self._streaming_session:
+                    self._stop_partial_timer()
+                    try:
+                        self.transcriber.cancel_session()
+                    except Exception as cancel_error:
+                        logger.warning(
+                            f"engine cancel_session on start failure failed: {cancel_error}"
+                        )
+                    self._streaming_session = False
+                self.Error("recording_failed", str(e))
+                return False
 
-            self.recorder.start()
-            if is_streaming:
-                self._start_partial_timer()
-            self._start_level_timer()
-            self.RecordingStarted()
-            self.StatusChanged("recording")
-            if self.indicator:
-                self.indicator.set_state("recording")
-            if self.notifications:
-                self.notifications.show_recording_started()
-            logger.info("Recording started via D-Bus")
-            return True
-        except Exception as e:
-            # Best-effort cleanup on start failure
-            self._gain.restore()
-            self._mpris.clear()
-            if self._streaming_session:
-                self._stop_partial_timer()
-                try:
-                    self.transcriber.cancel_session()
-                except Exception as cancel_error:
-                    logger.warning(f"engine cancel_session on start failure failed: {cancel_error}")
-                self._streaming_session = False
-            self.Error("recording_failed", str(e))
-            return False
+        # WHISP-89: pause_all_playing() no longer blocks on a fixed sleep --
+        # capture begins (via _begin_capture, above) only once every player
+        # we asked to pause has actually confirmed Paused/Stopped (or
+        # vanished from the bus), or a bounded, logged degradation kicks in
+        # for a non-compliant player. See media_control.py's module
+        # docstring for why a delayed-start continuation was chosen over
+        # trimming/muting leading audio.
+        #
+        # pause_all_playing() still calls _begin_capture() *inline* (and
+        # therefore still before this method returns) whenever there was
+        # nothing to actually wait for -- no bus, or nothing currently
+        # playing, which is the overwhelmingly common case. `outcome`
+        # captures that real result when it happens synchronously; when a
+        # real player genuinely needs confirmation, pause_all_playing
+        # returns before on_done fires, outcome stays empty, and True
+        # ("accepted") is returned -- the same already-established contract
+        # background model loading and streaming finalization rely on
+        # elsewhere in this class. _begin_capture reports the real outcome
+        # via RecordingStarted()/Error() whenever it does run.
+        outcome: dict = {}
+        if rf.pause_media:
+            self._mpris.pause_all_playing(
+                on_done=lambda: outcome.setdefault("result", _begin_capture()),
+                settle_delay_ms=rf.pre_pause_delay_ms,
+            )
+            return outcome.get("result", True)
+        return _begin_capture()
 
     def StopRecording(self) -> str:
         """Stop recording and start async transcription."""
@@ -1068,6 +1126,27 @@ class WhisperAloudService:
         # (if any) can never again be mistaken for the current one, however
         # late its success/error emission eventually runs.
         self._job_id += 1
+
+        # WHISP-89: a StartRecording() may still be waiting on media-pause
+        # confirmation -- recorder.is_recording is False, but media may
+        # already be paused/gain already raised for a capture that must now
+        # never begin. Invalidate the pending token first (makes the
+        # eventual _begin_capture callback a no-op) and undo whatever it
+        # already did, exactly like the recorder.is_recording branch below
+        # does for a capture that *had* already started.
+        if self._start_token is not None:
+            self._start_token = None
+            try:
+                self._gain.restore()
+            except Exception as e:
+                logger.warning(f"Gain restore on cancel (pre-capture) failed: {e}")
+            try:
+                if self.config.recording_flow.pause_media:
+                    self._mpris.resume_ours()
+            except Exception as e:
+                logger.warning(f"Media resume on cancel (pre-capture) failed: {e}")
+            logger.info("Recording cancelled via D-Bus while awaiting media-pause confirmation")
+            return True
 
         if self.recorder and self.recorder.is_recording:
             self._stop_level_timer()

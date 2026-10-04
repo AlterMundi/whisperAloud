@@ -294,12 +294,23 @@ class AudioProcessingConfig:
 
 @dataclass
 class RecordingFlowConfig:
-    """Configuration for smart recording flow (MPRIS + hardware gain)."""
+    """Configuration for smart recording flow (MPRIS + hardware gain).
+
+    WHISP-89: pause/resume no longer rely on `pre_pause_delay_ms`/
+    `post_resume_delay_ms` as the mechanism for waiting out a media
+    player's own pause/resume latency -- that is now event-driven (a
+    PropertiesChanged PlaybackStatus confirmation, or the player vanishing,
+    with a bounded logged-WARNING degradation if neither ever arrives; see
+    service/media_control.py). These two settings are now only an
+    *additional*, optional settle margin on top of that confirmation,
+    honored via GLib.timeout_add (never a blocking time.sleep) -- the
+    default of 0 means "no extra margin, proceed as soon as confirmed".
+    """
     pause_media: bool = True            # Pause active MPRIS players on record start
     raise_mic_gain: bool = True         # Raise mic gain to target before recording
     target_gain_linear: float = 0.85   # Target mic gain (0.0–1.5, applied only if above current)
-    pre_pause_delay_ms: int = 0        # Optional delay after pausing media before recording
-    post_resume_delay_ms: int = 0      # Optional delay after recording before resuming media
+    pre_pause_delay_ms: int = 0        # Extra settle delay after pause is confirmed, before recording
+    post_resume_delay_ms: int = 0      # Extra settle delay before re-checking status and resuming
     gain_restore_on_crash: bool = True  # Persist gain snapshot for restore after crash
 
 
