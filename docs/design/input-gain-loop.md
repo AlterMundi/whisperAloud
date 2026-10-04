@@ -48,7 +48,8 @@ sees speech at a known level.
   and applies a smoothed digital gain toward a target. The gain is bounded:
   by default it's capped at 30 dB, it can rise by at most 3 dB/s, it keeps
   headroom so it can't clip, and it's capped so the amplified noise floor
-  stays under a maximum output noise level (-50 dBFS). A limiter follows.
+  stays under a maximum output noise level (-50 dBFS in AGC2; -40 dBFS
+  here, see the defaults table). A limiter follows.
   The older analog AGC1 path that moved the OS mixer volume is the legacy,
   opt-in route.
 - **Per-app capture stream:** under PipeWire and PulseAudio each app gets
@@ -93,20 +94,22 @@ G* = target_dbfs - speech_db                        (aim)
 G* = min(G*, max_gain_db)                           (bounded boost)
 G* = min(G*, max_output_noise_dbfs - noise_floor)   (don't lift noise above the cap)
 G* = max(G*, 0)                                     (amplify only; never attenuate)
-per frame:  g = min(G, peak_ceiling_dbfs - frame_peak_db)   (headroom: never clip)
+per frame:  g = max(0, min(G, peak_ceiling_dbfs - frame_peak_db))   (headroom: never clip)
             g rises back after a headroom cut at <= 60 dB/s (release)
 ```
 
 Within a frame, a rising gain is ramped linearly from the previous value,
 and every sample's gain is at most that frame's `g`. A falling gain applies
-from the frame's first sample. So `|out| <= 10^(peak_ceiling_dbfs/20)`
-holds **by construction**, and the clip test checks it.
+from the frame's first sample. So `|out| <= max(10^(peak_ceiling_dbfs/20),
+|in|)` holds **by construction**, and the clip test checks it. The stage
+never pushes a sample above the ceiling, and a sample that was already
+above it passes through unchanged at 0 dB.
 
 | default | value | why |
 |---|---|---|
 | `target_dbfs` | -20 dBFS | Speech RMS at -20 leaves about 17 dB of crest-factor headroom below the -3 dBFS peak ceiling. It sits 2 dB under the unchanged AGC target (-18), so the AGC only makes small corrections, and 20 dB above the unchanged gate's -40 open threshold. |
 | `max_gain_db` | +30 dB | Covers the field case: about -45 to -47 dBFS speech needs +25 to +27 dB. It matches WebRTC AGC2's default cap. More than that only amplifies a nearly dead channel. |
-| `max_output_noise_dbfs` | -50 dBFS | Same as AGC2. It keeps the amplified noise floor more than 4 dB under the unchanged NoiseGate *close* threshold (-46 dBFS), so the gate still closes in pauses after normalization. In the field case (floor -66) this caps the boost at +16 dB, which puts speech around -26 to -31 dBFS: well inside the gate's open region instead of muted. |
+| `max_output_noise_dbfs` | -40 dBFS | Caps the amplified noise floor at the unchanged NoiseGate's *open* threshold, so normalizing never by itself lifts stationary noise above it. AGC2 uses -50 because its listeners are people who hear the residual noise. Here the listener is an ASR model, and the failure we have to avoid is speech kept *under* the gate. In the field case (speech -47, floor -66, so 19 dB SNR), a -50 cap would stop at +16 dB, leaving speech near -31 dBFS. The -40 cap allows +26 dB, which puts speech within 1 dB of the target. Lower it if you prefer quieter pauses over level. |
 | `peak_ceiling_dbfs` | -3 dBFS | Headroom above which no normalized sample may go. The unchanged PeakLimiter (-1 dBFS) still handles anything the AGC adds later. |
 | `max_gain_change_db_per_s` | 10 dB/s | Upward slew for the **streaming** path only, because the batch path uses a single non-causal gain. AGC2 uses 3 dB/s, but it runs for whole calls. Dictation sessions last seconds, and the session starts from the previous session's gain (in-memory), so 10 dB/s is a compromise between convergence speed and audible pumping. Downward moves are not slew-limited. |
 
@@ -157,7 +160,7 @@ New section `input_gain` (all keys optional):
 | `enabled` | `true` | `WHISPER_ALOUD_INPUT_GAIN_ENABLED` |
 | `target_dbfs` | `-20.0` | `WHISPER_ALOUD_INPUT_GAIN_TARGET_DBFS` |
 | `max_gain_db` | `30.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_GAIN_DB` |
-| `max_output_noise_dbfs` | `-50.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS` |
+| `max_output_noise_dbfs` | `-40.0` | `WHISPER_ALOUD_INPUT_GAIN_MAX_OUTPUT_NOISE_DBFS` |
 | `peak_ceiling_dbfs` | `-3.0` | — |
 | `max_gain_change_db_per_s` | `10.0` | — |
 | `hardware_control` | `false` | `WHISPER_ALOUD_INPUT_GAIN_HARDWARE_CONTROL` |
@@ -220,7 +223,7 @@ On normalized input, `AGC`'s 300 ms window still sees the amplified noise
 in pauses once the gate's release tail has decayed, and it can boost that
 noise by up to its `max_gain_db` (20 dB). This behaviour predates this
 change. AGC only "holds" below an RMS of 1e-8, and the gate's 50 ms release
-tail takes several hundred milliseconds to fall that far. This change
-doesn't make the effect worse: the -50 dBFS noise cap is what lets the gate
-close in pauses at all. The effect hasn't been measured here. A follow-up
+tail takes several hundred milliseconds to fall that far. With the
+noise floor capped at the gate's open threshold, the gate still closes on
+noise that sits below it. The effect hasn't been measured here. A follow-up
 could make AGC hold on unvoiced frames using the same voiced decision.
