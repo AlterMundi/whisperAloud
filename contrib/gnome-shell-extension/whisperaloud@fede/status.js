@@ -5,11 +5,20 @@
 // anything only GNOME Shell provides.
 //
 // `status` is the daemon's GetStatus() dict, unpacked to plain JS values
-// (see docs/dbus-api.md), later patched in place by the StatusChanged and
-// ModelStateChanged signals. Every key is read defensively: older daemons
-// lack model_state (< 1.6.0) and hotkey_bound/autostart (< 1.7.0).
+// (see docs/dbus-api.md), later patched in place by the StatusChanged,
+// ModelStateChanged and HotkeyStateChanged signals. Every key is read
+// defensively: older daemons lack model_state (< 1.6.0), hotkey_bound/
+// autostart (< 1.7.0), and HotkeyStateChanged (< 1.8.0).
 //
 // "All OK" (API 1.7.0): model_state == "ready" and hotkey_bound.
+//
+// hotkey_bound used to have no change signal, so the extension re-read
+// GetStatus on a bounded backoff timer while it was false. API 1.8.0 added
+// HotkeyStateChanged, which fires on every binding-state transition
+// (portal bind result, ShortcutsChanged recovery, keybinder register/
+// unregister, backend re-probe, hotkey config change, shutdown) -- the
+// extension now applies it directly (see applyHotkeyState below) and the
+// timer is gone entirely.
 
 export const IndicatorState = Object.freeze({
     NOT_RUNNING: 'not-running',
@@ -41,13 +50,6 @@ export const STYLE_CLASSES = Object.freeze({
     'recording': 'whisperaloud-recording',
     'ready-no-hotkey': 'whisperaloud-degraded',
 });
-
-// hotkey_bound has no change signal (docs/dbus-api.md): while the daemon
-// says "not bound yet" (e.g. GNOME's shortcut consent dialog is still open)
-// the extension re-reads GetStatus at these delays, then gives up until the
-// next ConfigChanged or daemon restart (a return to idle still re-reads
-// GetStatus once). Bounded on purpose: this is not a presence poll.
-export const HOTKEY_RECHECK_DELAYS_S = Object.freeze([2, 5, 10, 20, 40, 60]);
 
 function str(value) {
     return typeof value === 'string' ? value : '';
@@ -133,14 +135,6 @@ export function needsFallbackKeybinding({running, status}) {
     return Boolean(running && status) && hotkeyInfo(status).backend === 'none';
 }
 
-/** Whether hotkey_bound may still flip to true without any signal. */
-export function shouldRecheckHotkey({running, status}) {
-    if (!running || !status)
-        return false;
-    const {bound, backend} = hotkeyInfo(status);
-    return bound === false && backend !== 'none' && backend !== '';
-}
-
 /** One-line status for the panel menu header. */
 export function statusLabel(state, status) {
     switch (state) {
@@ -214,4 +208,18 @@ export function applyModelState(status, state, detail) {
         return;
     status.model_state = state;
     status.model_error = (state === 'missing' || state === 'error') ? str(detail) : '';
+}
+
+/**
+ * Apply a HotkeyStateChanged(bound, trigger, backend) signal (API 1.8.0,
+ * WHISP-99) to a status dict in place. Mirrors GetStatus's hotkey_bound/
+ * hotkey_trigger/hotkey_backend keys exactly, so deriveState/hotkeyInfo
+ * read the result the same way they read a fresh GetStatus() reply.
+ */
+export function applyHotkeyState(status, bound, trigger, backend) {
+    if (!status)
+        return;
+    status.hotkey_bound = bound;
+    status.hotkey_trigger = str(trigger);
+    status.hotkey_backend = str(backend);
 }
