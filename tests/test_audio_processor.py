@@ -301,3 +301,177 @@ def test_denoiser_exception_logged_as_error(caplog):
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert len(error_records) > 0, "No ERROR log emitted on denoiser failure"
     assert result is not None, "process() must still return audio on failure"
+
+
+# ── WHISP-93: adaptive (relative) trim_silence ───────────────────────────────
+#
+# Field bug: under Flatpak, GainController's hardware-gain-raise step is a
+# structural no-op (WHISP-61), so a quiet recording's RMS never cleared the
+# old fixed absolute vad_threshold (0.02) and trim_silence discarded
+# everything but the single loudest clause. See
+# docs/audits/2026-10-04-runtime-assumptions-pass2.md's WHISP-93 section.
+
+
+def _quiet_speech_like(sr=16000, duration_s=6.4, seed=0, speech_rms=0.008, floor_rms=0.0006):
+    """Amplitude-modulated noise bursts simulating quiet, under-gained speech:
+    RMS ~0.005-0.01 during "talking" bursts, a much lower noise floor in the
+    gaps between them -- well under the old fixed 0.02 absolute threshold,
+    but clearly voice relative to its own noise floor (WHISP-93)."""
+    rng = np.random.default_rng(seed)
+    n = int(sr * duration_s)
+    t = np.arange(n) / sr
+    burst_period = 0.28
+    duty = 0.7
+    phase = (t % burst_period) / burst_period
+    envelope = np.where(phase < duty, speech_rms, floor_rms)
+    noise = rng.standard_normal(n)
+    return (noise * envelope).astype(np.float32)
+
+
+def _old_trim_silence_absolute(audio, sample_rate, threshold):
+    """Reproduces the pre-fix trim_silence algorithm (absolute RMS gate via
+    detect_voice_activity) for before/after comparison in the regression
+    test below. Not production code -- trim_silence itself no longer works
+    this way."""
+    from whisper_aloud.audio.audio_processor import AudioProcessor
+
+    activity = AudioProcessor.detect_voice_activity(audio, threshold, sample_rate)
+    voice_indices = np.where(activity)[0]
+    if len(voice_indices) == 0:
+        return audio, 0, len(audio)
+    start_idx = voice_indices[0]
+    end_idx = voice_indices[-1]
+    padding_samples = int(0.1 * sample_rate)
+    start_idx = max(0, start_idx - padding_samples)
+    end_idx = min(len(audio), end_idx + padding_samples)
+    return audio[start_idx:end_idx], start_idx, end_idx
+
+
+def test_trim_silence_quiet_speech_not_collapsed_to_a_fraction():
+    """A quiet-but-real recording (RMS ~0.005-0.01, well under the old fixed
+    0.02 threshold) must not be trimmed down to a small fraction of its
+    duration -- this is the core WHISP-93 fix."""
+    sr = 16000
+    lead_silence = np.zeros(int(sr * 0.3), dtype=np.float32)
+    speech = _quiet_speech_like(sr=sr, duration_s=6.4)
+    trail_silence = np.zeros(int(sr * 0.3), dtype=np.float32)
+    audio = np.concatenate([lead_silence, speech, trail_silence])
+    raw_duration = len(audio) / sr
+
+    trimmed, start, end = AudioProcessor.trim_silence(audio, sr)
+    kept_duration = (end - start) / sr
+
+    assert kept_duration / raw_duration > 0.8, (
+        f"kept only {kept_duration:.2f}s of {raw_duration:.2f}s "
+        f"({100 * kept_duration / raw_duration:.0f}%) -- quiet speech was "
+        "collapsed to a small fraction, reproducing the WHISP-93 bug"
+    )
+
+
+def test_trim_silence_still_trims_leading_and_trailing_silence():
+    """The adaptive algorithm must still trim real leading/trailing silence
+    around a loud, unambiguous speech segment."""
+    sr = 16000
+    silence = np.zeros(int(sr * 1.0), dtype=np.float32)
+    voice = (np.ones(int(sr * 1.0), dtype=np.float32) * 0.3)
+    audio = np.concatenate([silence, voice, silence])
+
+    trimmed, start, end = AudioProcessor.trim_silence(audio, sr)
+
+    assert start > 0, "Leading silence was not trimmed"
+    assert end < len(audio), "Trailing silence was not trimmed"
+    assert len(trimmed) < len(audio)
+
+
+def test_trim_silence_pure_silence_returns_original():
+    """Pure digital silence must be handled the same as before: original
+    audio returned unchanged, not an empty array."""
+    sr = 16000
+    silent = np.zeros(sr, dtype=np.float32)
+    trimmed, start, end = AudioProcessor.trim_silence(silent, sr)
+
+    assert len(trimmed) == len(silent)
+    assert start == 0
+    assert end == len(silent)
+
+
+def test_trim_silence_loud_recording_unchanged_behavior():
+    """A loud recording (well above both the old and new thresholds) must
+    still get sensible leading/trailing trim, matching pre-fix behavior."""
+    sr = 16000
+    silence = np.zeros(8000, dtype=np.float32)
+    voice = np.ones(8000, dtype=np.float32) * 0.5
+    audio = np.concatenate([silence, voice, silence])
+
+    trimmed, start, end = AudioProcessor.trim_silence(audio, sr)
+
+    assert len(trimmed) < len(audio)
+    assert 0 <= start <= end <= len(audio)
+    # The loud voice segment (indices 8000:16000) must be fully retained.
+    assert start <= 8000
+    assert end >= 16000
+
+
+def test_trim_silence_regression_field_ratio_fixed():
+    """Reproduces the exact WHISP-93 field signature: a mostly-quiet 6.4s
+    recording with one short loud clause. The old absolute-threshold
+    algorithm collapsed this to ~1.45s (22.7%); the new adaptive algorithm
+    must keep the great majority of the recording."""
+    sr = 16000
+    quiet = _quiet_speech_like(sr=sr, duration_s=6.4, seed=1)
+    raw_duration = len(quiet) / sr
+
+    # Inject a short loud clause (RMS ~0.03, above the old 0.02 threshold)
+    # into the middle of the quiet recording, exactly the kind of "one loud
+    # moment" the field logs' "What?" / 41.97%-confidence fragments suggest.
+    loud_start = int(sr * 3.0)
+    loud_len = int(sr * 1.1)
+    rng = np.random.default_rng(2)
+    quiet[loud_start : loud_start + loud_len] = rng.standard_normal(loud_len) * 0.03
+
+    old_trimmed, old_start, old_end = _old_trim_silence_absolute(quiet, sr, threshold=0.02)
+    old_ratio = (old_end - old_start) / len(quiet)
+
+    new_trimmed, new_start, new_end = AudioProcessor.trim_silence(quiet, sr, threshold=0.02)
+    new_ratio = (new_end - new_start) / len(quiet)
+
+    # Reproduce the bug with the old algorithm (sanity check on the fixture).
+    assert old_ratio < 0.4, (
+        f"fixture did not reproduce the field collapse: old algorithm kept "
+        f"{100 * old_ratio:.0f}% of {raw_duration:.2f}s"
+    )
+    # The new algorithm must keep the great majority of the recording.
+    assert new_ratio > 0.8, (
+        f"new algorithm only kept {100 * new_ratio:.0f}% of {raw_duration:.2f}s "
+        f"(old algorithm kept {100 * old_ratio:.0f}%) -- WHISP-93 not fixed"
+    )
+
+
+def test_trim_silence_conservative_backstop_logs_warning(caplog):
+    """If the adaptive decision would keep only a small fraction of a
+    recording whose overall RMS is clearly not near-silent, trim_silence
+    must skip the trim and log a WARNING rather than silently discarding
+    most of the audio."""
+    import logging
+    from unittest.mock import patch
+
+    sr = 16000
+    lead_silence = np.zeros(int(sr * 0.3), dtype=np.float32)
+    speech = _quiet_speech_like(sr=sr, duration_s=4.0, seed=3)
+    loud_start, loud_len = int(sr * 2.0), int(sr * 0.5)
+    rng = np.random.default_rng(5)
+    speech[loud_start : loud_start + loud_len] = rng.standard_normal(loud_len) * 0.03
+    trail_silence = np.zeros(int(sr * 0.3), dtype=np.float32)
+    audio = np.concatenate([lead_silence, speech, trail_silence])
+
+    # Push the adaptive threshold pathologically close to the speech-level
+    # estimate so only the short loud clause clears it -- exercising the
+    # backstop (default _MIN_KEPT_FRACTION) independently of the main
+    # algorithm's own (already well-behaved) margin.
+    with patch("whisper_aloud.audio.audio_processor._RELATIVE_VOICE_MARGIN", 0.95):
+        with caplog.at_level(logging.WARNING, logger="whisper_aloud.audio.audio_processor"):
+            trimmed, start, end = AudioProcessor.trim_silence(audio, sr)
+
+    assert len(trimmed) == len(audio)
+    assert start == 0 and end == len(audio)
+    assert any("safety net" in r.getMessage() for r in caplog.records)

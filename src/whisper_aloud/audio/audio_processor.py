@@ -12,6 +12,54 @@ from ..exceptions import AudioProcessingError
 
 logger = logging.getLogger(__name__)
 
+# --- trim_silence (WHISP-93) tunables -------------------------------------
+#
+# These control the *relative* voice/silence decision described in
+# AudioProcessor.trim_silence's docstring. They are intentionally not wired
+# to AudioConfig: unlike noise_gate/AGC/highpass/vad_threshold (all
+# user-tunable because they trade off differently per mic/room), these are
+# an internal implementation detail of how "voice" is estimated from the
+# recording's own level distribution, not a knob a user would sensibly want
+# to retune per install.
+
+# Percentile of the per-window RMS profile used to estimate the recording's
+# background noise floor / peak speech level.
+_NOISE_FLOOR_PERCENTILE = 10.0
+_SPEECH_LEVEL_PERCENTILE = 95.0
+
+# A window counts as "voice" once its RMS clears
+# noise_floor + _RELATIVE_VOICE_MARGIN * (speech_level - noise_floor).
+# 0.2 reproduces (at a loud, high-dynamic-range recording) roughly the same
+# absolute threshold the old fixed 0.02 default used, while scaling down
+# automatically for a quiet/under-gained recording instead of silently
+# assuming the mic is already "loud enough" (WHISP-93 root cause).
+_RELATIVE_VOICE_MARGIN = 0.2
+
+# Hard cap on how high the legacy absolute `threshold` (AudioConfig.vad_threshold)
+# can push the "is there any voice at all" / minimum-gate guard. This is what
+# keeps the old 0.02 default (or any value a user configured before this
+# fix existed) from ever again silently classifying real quiet speech
+# (field-observed RMS ~0.005-0.01 under Flatpak, see WHISP-93) as pure
+# digital silence -- `threshold` is still read for backward config
+# compatibility, but only ever narrows the guard down from this cap, never
+# widens it above it.
+_DIGITAL_SILENCE_GUARD_CAP = 0.001
+
+# If the adaptive decision would keep less than this fraction of the raw
+# recording's duration, and the recording's *overall* RMS (not just the
+# windowed profile) is clearly not near-silent, trimming is skipped
+# entirely and a WARNING is logged instead -- a conservative backstop
+# against ever again silently discarding most of a real recording (the
+# exact failure mode WHISP-93 reported).
+_MIN_KEPT_FRACTION = 0.25
+
+# Overall (whole-buffer) RMS below which a recording is considered "near
+# silent overall" for the purposes of the backstop above -- i.e. low enough
+# that even a tiny kept fraction is plausible/expected rather than
+# suspicious. Deliberately well below the quiet-speech range WHISP-93's
+# field data showed (~0.005-0.01).
+_NEAR_SILENT_OVERALL_RMS = 0.003
+
 
 class NoiseGate:
     """Noise gate with smooth attack/release, hysteresis, and hold time."""
@@ -529,6 +577,43 @@ class AudioProcessor:
         return activity
 
     @staticmethod
+    def _windowed_rms_profile(
+        audio: np.ndarray,
+        sample_rate: int,
+        window_ms: float = 25.0,
+        hop_ms: float = 10.0,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute RMS over sliding windows across ``audio``.
+
+        Same window/hop sizing as ``detect_voice_activity`` (so the two stay
+        in sync), but returns the actual per-window RMS values rather than a
+        boolean mask -- ``trim_silence``'s adaptive threshold needs the
+        *distribution* of levels across the whole recording (noise floor vs.
+        speech level), not just a yes/no against a fixed constant.
+
+        Mirrors ``detect_voice_activity``'s edge behaviour for very short
+        audio: if ``len(audio) <= window_size`` no windows are produced
+        (empty arrays returned) rather than guessing.
+
+        Returns:
+            Tuple of (window_start_indices, window_rms_values).
+        """
+        window_size = max(1, int(sample_rate * (window_ms / 1000.0)))
+        hop_size = max(1, int(sample_rate * (hop_ms / 1000.0)))
+        n = len(audio)
+
+        starts = np.arange(0, max(0, n - window_size), hop_size)
+        if starts.size == 0:
+            return starts, np.array([], dtype=np.float64)
+
+        rms_values = np.empty(starts.size, dtype=np.float64)
+        for i, s in enumerate(starts):
+            window = audio[s : s + window_size]
+            rms_values[i] = np.sqrt(np.mean(np.square(window, dtype=np.float64)))
+
+        return starts, rms_values
+
+    @staticmethod
     def trim_silence(
         audio: np.ndarray,
         sample_rate: int,
@@ -538,11 +623,49 @@ class AudioProcessor:
         """
         Trim silence from start and end of audio.
 
+        Voice/silence is decided *relative to this recording's own observed
+        levels* rather than solely against ``threshold`` as a fixed absolute
+        RMS constant (WHISP-93 fix). A window counts as "voice" once its RMS
+        clears ``noise_floor + _RELATIVE_VOICE_MARGIN * (speech_level -
+        noise_floor)``, where ``noise_floor``/``speech_level`` are the
+        10th/95th percentile (``_NOISE_FLOOR_PERCENTILE`` /
+        ``_SPEECH_LEVEL_PERCENTILE``) of this recording's own per-window RMS
+        profile (see ``_windowed_rms_profile``).
+
+        This matters because a fixed absolute threshold silently assumes the
+        mic's gain/level is already "good enough" by the time this runs. In
+        the field (WHISP-93), under Flatpak, the hardware-gain-raise step
+        (``service.media_control.GainController``) is a structural no-op
+        (WHISP-61: no ``wpctl``, no PipeWire socket in the sandbox), so a
+        quiet recording's RMS never cleared the old fixed ~0.02 (-34dBFS)
+        default and ``trim_silence`` discarded everything but the single
+        loudest clause -- confirmed root cause, see
+        ``docs/audits/2026-10-04-runtime-assumptions-pass2.md``.
+
+        ``threshold`` (``AudioConfig.vad_threshold``) is kept for config/API
+        compatibility but is now **only a lower guard against pure digital
+        silence** -- internally capped at ``_DIGITAL_SILENCE_GUARD_CAP`` so
+        it can never again single-handedly reject real (if quiet) speech the
+        way the old absolute gate did. A recording whose estimated speech
+        level never clears this guard is treated as having no voice at all
+        (same as before: original audio is returned unchanged).
+
+        Conservative safety net: if the adaptive decision would keep less
+        than ``_MIN_KEPT_FRACTION`` of the recording's raw duration while the
+        recording's *overall* level (whole-buffer RMS, not just the windowed
+        profile) is clearly not near-silent, trimming is skipped entirely
+        (original audio returned unchanged) and a WARNING is logged with the
+        numbers -- this is the backstop against ever again silently
+        discarding most of a real recording.
+
         Args:
             audio: Input audio array
             sample_rate: Sample rate in Hz
-            threshold: RMS threshold for voice detection
-            min_silence_duration: Minimum silence duration to trim (seconds)
+            threshold: Legacy absolute RMS lower-guard
+                (``AudioConfig.vad_threshold``); see above -- no longer the
+                primary decision threshold.
+            min_silence_duration: Unused by the adaptive algorithm (kept for
+                API/signature compatibility with existing callers).
 
         Returns:
             Tuple of (trimmed_audio, start_sample, end_sample)
@@ -550,28 +673,70 @@ class AudioProcessor:
         if audio.size == 0:
             return audio, 0, 0
 
-        # Detect voice activity (pass sample_rate so windows scale correctly)
-        activity = AudioProcessor.detect_voice_activity(audio, threshold, sample_rate)
+        window_size = max(1, int(sample_rate * 0.025))
+        starts, rms_values = AudioProcessor._windowed_rms_profile(audio, sample_rate)
 
-        # Find first and last voice activity
-        voice_indices = np.where(activity)[0]
-
-        if len(voice_indices) == 0:
-            # No voice detected, return empty or original
+        if starts.size == 0:
+            # Too short for even one window -- same "can't tell" fallback
+            # detect_voice_activity's caller relied on previously.
             logger.warning("No voice activity detected in audio")
             return audio, 0, len(audio)
 
-        start_idx = voice_indices[0]
-        end_idx = voice_indices[-1]
+        noise_floor = float(np.percentile(rms_values, _NOISE_FLOOR_PERCENTILE))
+        speech_level = float(np.percentile(rms_values, _SPEECH_LEVEL_PERCENTILE))
+        digital_silence_guard = min(threshold, _DIGITAL_SILENCE_GUARD_CAP)
+
+        if speech_level <= digital_silence_guard:
+            logger.warning("No voice activity detected in audio")
+            return audio, 0, len(audio)
+
+        adaptive_threshold = max(
+            noise_floor + _RELATIVE_VOICE_MARGIN * (speech_level - noise_floor),
+            digital_silence_guard,
+        )
+
+        voice_window_indices = np.where(rms_values > adaptive_threshold)[0]
+        if voice_window_indices.size == 0:
+            logger.warning("No voice activity detected in audio")
+            return audio, 0, len(audio)
+
+        start_idx = int(starts[voice_window_indices[0]])
+        end_idx = int(min(len(audio), starts[voice_window_indices[-1]] + window_size))
 
         # Add small padding
         padding_samples = int(0.1 * sample_rate)  # 100ms padding
         start_idx = max(0, start_idx - padding_samples)
         end_idx = min(len(audio), end_idx + padding_samples)
 
+        raw_duration = len(audio) / sample_rate
+        kept_duration = (end_idx - start_idx) / sample_rate
+        overall_rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+
+        if (
+            raw_duration > 0
+            and kept_duration / raw_duration < _MIN_KEPT_FRACTION
+            and overall_rms > _NEAR_SILENT_OVERALL_RMS
+        ):
+            logger.warning(
+                "trim_silence: adaptive decision would keep only %.2fs of "
+                "%.2fs (%.0f%%) while overall_rms=%.4f suggests real content "
+                "throughout -- skipping trim as a conservative safety net "
+                "(noise_floor=%.4f speech_level=%.4f adaptive_threshold=%.4f)",
+                kept_duration, raw_duration,
+                100.0 * kept_duration / raw_duration,
+                overall_rms, noise_floor, speech_level, adaptive_threshold,
+            )
+            return audio, 0, len(audio)
+
         trimmed = audio[start_idx:end_idx]
-        logger.debug(f"Trimmed {start_idx / sample_rate:.2f}s from start, "
-                    f"{(len(audio) - end_idx) / sample_rate:.2f}s from end")
+        logger.info(
+            "trim_silence: kept %.2fs of %.2fs (trimmed %.2fs from start, "
+            "%.2fs from end; noise_floor=%.4f speech_level=%.4f "
+            "adaptive_threshold=%.4f)",
+            kept_duration, raw_duration,
+            start_idx / sample_rate, (len(audio) - end_idx) / sample_rate,
+            noise_floor, speech_level, adaptive_threshold,
+        )
 
         return trimmed, start_idx, end_idx
 
