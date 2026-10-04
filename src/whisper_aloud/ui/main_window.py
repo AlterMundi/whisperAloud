@@ -90,6 +90,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # Daemon-backed history manager adapter (all data via D-Bus)
         self.history_manager: Optional[DaemonHistoryManager] = None
 
+        # "Start in background at login" (WHISP-87). Lives as long as the
+        # GUI, not the settings dialog: a Background portal answer can
+        # arrive after the dialog was closed. Created on first use.
+        self._autostart_controller = None
+
         # Sound feedback (initialized early as it's lightweight)
         self.sound_feedback = SoundFeedback(enabled=True)
 
@@ -1313,8 +1318,45 @@ class MainWindow(Gtk.ApplicationWindow):
             return
 
         # Create and show settings dialog
-        dialog = SettingsDialog(self, self.config, on_save_callback=self._on_settings_saved)
+        dialog = SettingsDialog(
+            self,
+            self.config,
+            on_save_callback=self._on_settings_saved,
+            autostart_controller=self._get_autostart_controller(),
+        )
         dialog.present()
+
+    def _get_autostart_controller(self):
+        """The process-wide AutostartController (WHISP-87), or None if it
+        cannot be built (the Startup section then shows as unavailable)."""
+        if self._autostart_controller is None:
+            try:
+                from ..sandbox import is_flatpak_sandbox
+                from .startup_logic import AutostartController
+
+                self._autostart_controller = AutostartController(
+                    sandboxed=is_flatpak_sandbox(),
+                    initial=bool(self.config and self.config.startup.autostart_background),
+                    persist=self._persist_autostart,
+                )
+            except Exception:
+                logger.exception("Could not set up the login autostart controller")
+                return None
+        return self._autostart_controller
+
+    def _persist_autostart(self, enabled: bool) -> None:
+        """Store the confirmed autostart state (daemon SetConfig, else file)."""
+        from .startup_logic import persist_autostart_setting
+
+        if self.config is not None:
+            self.config.startup.autostart_background = bool(enabled)
+        client = (
+            self.client
+            if self.client and self.client.is_connected and self._daemon_available
+            else None
+        )
+        where = persist_autostart_setting(enabled, client, load_config=WhisperAloudConfig.load)
+        logger.info("startup.autostart_background=%s stored via %s", enabled, where)
 
     def _on_settings_saved(self) -> None:
         """Handle settings saved event.
@@ -1422,6 +1464,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._retry_timeout_id:
             GLib.source_remove(self._retry_timeout_id)
             self._retry_timeout_id = 0
+
+        if self._autostart_controller is not None:
+            self._autostart_controller.close()
 
         # Disconnect D-Bus client
         if self.client:

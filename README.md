@@ -163,6 +163,14 @@ WhisperAloud was granted, so both dialogs reappear next time. See
 [`docs/flatpak.md`](docs/flatpak.md#first-run) for more detail on the
 Flatpak build specifically.
 
+To have dictation ready right after login without opening the window, turn
+on **Settings → General → Startup → Start in background at login**. Only
+the background service starts: the model loads, the shortcut is bound, and
+the top-bar indicator shows when everything is ready. In the Flatpak, GNOME
+asks once for permission to run in the background (see
+[`docs/flatpak.md`](docs/flatpak.md#start-in-background-at-login-background-portal)).
+Closing the window never stops the background service.
+
 ## Privacy and offline operation
 
 WhisperAloud makes no network calls during recording or transcription.
@@ -225,10 +233,9 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full list. Highlights:
 
 - Flatpak bundle: done — see [`docs/flatpak.md`](docs/flatpak.md). A
   Flathub listing is not planned for now (see
-  [`docs/flathub-submission.md`](docs/flathub-submission.md)). Still
-  pending: a "start in background at login" switch via the Background
-  portal, so the global hotkey works right after login without opening
-  the window first.
+  [`docs/flathub-submission.md`](docs/flathub-submission.md)). "Start in
+  background at login" (Background portal) is done; it still needs a
+  field pass on a real GNOME login.
 - Execute the 0.3.0 field-validation pass
   ([`docs/validation/0.3.0-field-checklist.md`](docs/validation/0.3.0-field-checklist.md))
   on a real desktop and fold its findings back into the backlog.

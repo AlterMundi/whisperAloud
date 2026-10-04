@@ -31,6 +31,7 @@ from . import model_state
 from .hotkey import HotkeyManager
 from .indicator import WhisperAloudIndicator
 from .media_control import GainController, MprisController
+from .readiness import hotkey_bound
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,11 @@ EXIT_ALREADY_RUNNING = 3
 #
 # 1.6.0 (model preload, 0.3.0): additive -- new ModelStateChanged(s state,
 # s detail) signal and GetStatus "model_state"/"model_error" keys.
-API_VERSION = "1.6.0"
+#
+# 1.7.0 (WHISP-87, start in background at login): additive -- GetStatus
+# "hotkey_bound" and "autostart" keys, and the "startup.autostart_background"
+# config key.
+API_VERSION = "1.7.0"
 
 # ExportHistory (WHISP-79): default/maximum number of entries a single
 # export may include. Keeps one unbounded/malicious `limit` from building an
@@ -1126,6 +1131,10 @@ class WhisperAloudService:
                 if self.hotkey_manager
                 else "",
             ),
+            # 1.7.0 (WHISP-87): readiness summary for indicators -- "all OK"
+            # is model_state == "ready" and hotkey_bound.
+            "hotkey_bound": GLib.Variant("b", hotkey_bound(self.hotkey_manager)),
+            "autostart": GLib.Variant("b", bool(self.config.startup.autostart_background)),
             "uptime": GLib.Variant("d", time.monotonic() - self._start_time),
             "downloading": GLib.Variant("b", self._downloading),
             # WHISP-93: surface whether hardware mic-gain-raise is actually

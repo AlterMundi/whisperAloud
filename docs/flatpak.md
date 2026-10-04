@@ -81,6 +81,38 @@ interact with.
   The next daemon start (for the shortcut) and the next paste attempt (for
   Remote Desktop) will prompt again.
 
+### Start in background at login (Background portal)
+
+Settings → General → **Startup** → **Start in background at login** makes
+the daemon start at every login *without* the window: the model preloads,
+the global shortcut binds (no dialog after the first time), and auto-paste
+is prewarmed, so the shortcut dictates right away and the top-bar indicator
+shows that all is ready. Closing the window never stops the daemon.
+
+- **Turning it on** asks GNOME for permission to run in the background. The
+  switch waits (and cannot be toggled again) until you answer; there is no
+  time limit. If you allow it, the portal writes
+  `~/.config/autostart/org.fede.whisperaloud.desktop` on the host, running
+  `flatpak run --command=whisper-aloud org.fede.whisperaloud --daemon`.
+  If you refuse or close the dialog, the switch goes back off and says why.
+- **Turning it off** asks the portal to remove that entry.
+- The confirmed state is stored as `startup.autostart_background` in
+  `config.json` and reported by D-Bus `GetStatus()["autostart"]` (API
+  1.7.0), next to `"model_state"` and `"hotkey_bound"`; `whisper-aloud
+  status` shows all three. If you answer the dialog after closing
+  Settings, the answer is still recorded; if you quit the whole app before
+  answering, the portal still applies your answer but the switch may show
+  the old state until you toggle it again.
+- To revoke background permission later: GNOME Settings → Apps →
+  WhisperAloud → "Run in Background", or `flatpak permission-reset
+  org.fede.whisperaloud` (which resets every portal grant).
+
+Native installs get the same switch; it writes or removes
+`~/.config/autostart/whisper-aloud-autostart.desktop` (the name
+`install.sh` already uses) instead of calling the portal, and reports any
+older entry (`whisperaloud-daemon.desktop`,
+`org.fede.whisperaloud-daemon.desktop`) rather than adding a duplicate.
+
 ## Portal notes (WHISP-59)
 
 ### Correction: no portal `--talk-name` is needed
@@ -208,15 +240,16 @@ opening a second one.
   file. On install, Flatpak rewrites it to
   `Exec=flatpak run --branch=stable --arch=x86_64 --command=whisper-aloud org.fede.whisperaloud --daemon`.
   The desktop entry and its Toggle/Cancel actions get the same rewrite.
-- **Autostart is deferred** to a follow-up ticket: a "Start in background at
-  login" switch that calls the Background portal (`RequestBackground` with
-  `autostart=true`). A Flatpak app cannot write `~/.config/autostart`
-  itself, and doing this properly needs UI, a consent flow and tests, which
-  makes it a feature rather than packaging. Without autostart, the daemon
-  starts the first time the window opens, a desktop action runs, or a CLI
-  command is used. Until the daemon is running, the global shortcut does
-  nothing. Users who need the shortcut right after login can add the manual
-  autostart entry described below.
+- **Start in background at login** (WHISP-87) is a setting, off by
+  default: Settings → General → Startup. A Flatpak app cannot write
+  `~/.config/autostart` itself, so the switch calls the Background portal
+  (`RequestBackground` with `autostart`, `commandline: ["whisper-aloud",
+  "--daemon"]`, `dbus-activatable: false`); see
+  [Start in background at login](#start-in-background-at-login-background-portal).
+  With it off, the daemon starts the first time the window opens, a desktop
+  action runs, or a CLI command is used, and until then the global shortcut
+  does nothing. The manual autostart entry described below stays as a
+  fallback.
 - **finish-args.** Each argument is justified in a comment in the manifest:
   - `wayland`, `fallback-x11`, `ipc` and `dri`: display;
   - `pulseaudio`: microphone;
@@ -430,6 +463,9 @@ from Flathub.
    GNOME lists WhisperAloud under "Background Apps" in the quick settings.
    That is expected. Stopping it there kills the daemon, and the next
    window launch re-activates it.
+7. **Start at login** (optional). Turn on Settings → General → Startup →
+   "Start in background at login" and accept the background dialog; see
+   [Start in background at login](#start-in-background-at-login-background-portal).
 
 ### 5. Field-test checklist (things only a real install can verify)
 
@@ -459,7 +495,10 @@ from Flathub.
 - [ ] Known off: sound feedback (no GSound in the runtime) and mic gain
       boost (no wpctl in the sandbox).
 
-Optional manual autostart, until the Background portal toggle exists:
+Fallback manual autostart, only if the "Start in background at login"
+setting cannot be used (for example, no Background portal backend on the
+desktop). Do not combine it with the setting: two entries would both try
+to start the daemon, and the loser just exits (`EXIT_ALREADY_RUNNING`).
 
 ```sh
 cat > ~/.config/autostart/org.fede.whisperaloud-daemon.desktop <<'EOT'
@@ -483,6 +522,7 @@ recorded while testing the Flatpak stays only in `~/.var/app/$ID/`.
 flatpak kill org.fede.whisperaloud 2>/dev/null || true
 flatpak uninstall --user org.fede.whisperaloud          # keeps ~/.var/app/$ID (add --delete-data to drop it)
 rm -f ~/.config/autostart/org.fede.whisperaloud-daemon.desktop   # only if created above
+rm -f ~/.config/autostart/org.fede.whisperaloud.desktop          # written by the portal if "Start in background at login" was on
 PARK=~/whisper-aloud-native-parked
 for f in "$PARK"/*; do
     case "$(basename "$f")" in

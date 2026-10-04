@@ -38,6 +38,7 @@ from .settings_logic import (
     normalize_language_input,
     should_block_close,
 )
+from .startup_section import StartupSection
 
 
 def _fmt_size(size_mb: Optional[int]) -> str:
@@ -55,7 +56,8 @@ class SettingsDialog(Gtk.Window):
         self,
         parent: Gtk.Window,
         config: WhisperAloudConfig,
-        on_save_callback: Optional[callable] = None
+        on_save_callback: Optional[callable] = None,
+        autostart_controller=None,
     ) -> None:
         """
         Initialize the settings dialog.
@@ -64,6 +66,8 @@ class SettingsDialog(Gtk.Window):
             parent: Parent window
             config: Current configuration
             on_save_callback: Callback function to run after saving
+            autostart_controller: ui.startup_logic.AutostartController for
+                the "Startup" section (WHISP-87); None shows it unavailable
         """
         super().__init__()
 
@@ -78,6 +82,7 @@ class SettingsDialog(Gtk.Window):
         self._config = config
         self._parent = parent
         self._on_save_callback = on_save_callback
+        self._autostart_controller = autostart_controller
 
         # Build UI
         self._build_ui()
@@ -628,6 +633,10 @@ class SettingsDialog(Gtk.Window):
         hotkey_help_box.append(hotkey_help_label)
         hotkey_help_box.append(copy_cmd_button)
         page.append(hotkey_help_box)
+
+        # --- Startup Section (WHISP-87): applies immediately, see startup_section.py ---
+        self._startup_section = StartupSection(self._autostart_controller)
+        page.append(self._startup_section.widget)
 
         self._style_setting_rows_in_page(page)
 
@@ -1657,6 +1666,11 @@ class SettingsDialog(Gtk.Window):
                 max_value=1.5,
                 field_name="Target mic gain"
             )
+
+            # The Startup switch applies on its own (portal/autostart file);
+            # never overwrite its confirmed state with this dialog's copy.
+            if self._autostart_controller is not None:
+                self._config.startup.autostart_background = self._autostart_controller.enabled
 
             logger.debug("Saving config to file")
             # Save to file using config's built-in save method

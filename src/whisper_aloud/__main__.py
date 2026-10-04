@@ -229,6 +229,11 @@ def cmd_status(args) -> int:
         model_error = _val(status.get("model_error", ""))
 
         hotkey_display = f"{hotkey} ({hotkey_trigger})" if hotkey_trigger else hotkey
+        # API 1.7.0 (WHISP-87) readiness keys; absent from older daemons.
+        hotkey_bound = status.get("hotkey_bound")
+        if hotkey_bound is not None:
+            hotkey_display += " [bound]" if _val(hotkey_bound) else " [not bound]"
+        autostart = status.get("autostart")
         model_state_display = f" [{model_state}]" if model_state else ""
 
         print(f"WhisperAloud v{version}")
@@ -237,6 +242,9 @@ def cmd_status(args) -> int:
         if model_error:
             print(f"  Model error: {model_error}")
         print(f"  Hotkey:   {hotkey_display}")
+        if autostart is not None:
+            login = "starts in background" if _val(autostart) else "not started at login"
+            print(f"  Login:    {login}")
         print(f"  Uptime:   {_format_uptime(uptime)}")
         return 0
     except WhisperAloudError as e:
