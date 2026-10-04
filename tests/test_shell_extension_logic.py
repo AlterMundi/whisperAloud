@@ -315,3 +315,103 @@ def test_bundled_zip_candidates_order(tmp_path):
 def test_tray_hidden_while_extension_present():
     assert se.tray_should_show(extension_present=False) is True
     assert se.tray_should_show(extension_present=True) is False
+
+
+# ── D-Bus error mapping for our extension's GetInfo ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        ("org.freedesktop.DBus.Error.ServiceUnknown", None),
+        ("org.freedesktop.DBus.Error.NameHasNoOwner", None),
+        ("org.freedesktop.DBus.Error.AccessDenied", None),
+        # v1 extension: owns the name, but has no ShellExtension object.
+        ("org.freedesktop.DBus.Error.UnknownMethod", {}),
+        ("org.freedesktop.DBus.Error.UnknownObject", {}),
+        ("org.freedesktop.DBus.Error.UnknownInterface", {}),
+        ("", None),
+    ],
+)
+def test_running_info_from_dbus_error(error, expected):
+    assert se.running_info_from_dbus_error(error) == expected
+
+
+# ── Settings section view model ──────────────────────────────────────────────
+
+
+def _report_for(status):
+    return se.ExtensionReport(
+        status=status, summary=se.STATUS_SUMMARIES[status], installed_version=2,
+        bundled_version=2, show_install_command=False, show_enable_command=False,
+        toggle_action=None,
+    )
+
+
+def test_every_status_has_a_title():
+    for status in se.Status:
+        assert se.status_title(_report_for(status))
+
+
+def test_status_title_includes_version_when_active():
+    assert se.status_title(_report_for(se.Status.ACTIVE)) == "Running (version 2)"
+
+
+def test_view_not_installed_with_zip(tmp_path):
+    zip_path = tmp_path / "x y.zip"
+    view = se.section_view(_classify(shell_info=se.parse_shell_info({})), zip_path)
+    assert view.install_command == se.install_command(zip_path)
+    assert view.enable_command == se.ENABLE_COMMAND
+    assert view.toggle_label is None
+    assert view.package_missing is False
+
+
+def test_view_install_needed_but_no_zip():
+    view = se.section_view(_classify(shell_info=se.parse_shell_info({})), None)
+    assert view.install_command is None
+    assert view.package_missing is True
+
+
+def test_view_active_native_offers_disable_button(tmp_path):
+    report = _classify(
+        shell_info=se.parse_shell_info(
+            {"uuid": se.EXTENSION_UUID, "state": 1.0, "enabled": True, "version": 2.0}),
+    )
+    view = se.section_view(report, tmp_path / "z.zip")
+    assert view.toggle_label == "Disable"
+    assert view.install_command is None
+    assert view.enable_command is None
+    assert view.disable_command is None
+
+
+def test_view_disabled_native_offers_enable_button():
+    report = _classify(shell_info=se.parse_shell_info(
+        {"uuid": se.EXTENSION_UUID, "state": 2.0, "enabled": False, "version": 2.0}))
+    view = se.section_view(report, None)
+    assert view.toggle_label == "Enable"
+    assert view.package_missing is False
+
+
+def test_view_disabled_sandboxed_like_shows_enable_command():
+    report = _classify(shell_info=se.parse_shell_info(
+        {"uuid": se.EXTENSION_UUID, "state": 2.0, "enabled": False, "version": 2.0}),
+        sandboxed=True)
+    view = se.section_view(report, None)
+    assert view.toggle_label is None
+    assert view.enable_command == se.ENABLE_COMMAND
+
+
+def test_view_active_sandboxed_shows_disable_command():
+    # No org.gnome.Shell.Extensions access: tell the user how to turn it off.
+    view = se.section_view(_classify(sandboxed=True, running_info={"version": 2}), None)
+    assert view.toggle_label is None
+    assert view.disable_command == se.DISABLE_COMMAND
+
+
+def test_view_not_gnome_shows_nothing_actionable():
+    view = se.section_view(_classify(is_gnome=False), None)
+    assert view.install_command is None
+    assert view.enable_command is None
+    assert view.disable_command is None
+    assert view.toggle_label is None
+    assert view.package_missing is False

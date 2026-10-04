@@ -308,6 +308,83 @@ def resolve_install_zip(*, sandboxed: bool, data_home: Path, bundled: Optional[P
     return dest if export_zip(bundled, dest) else None
 
 
+_NO_OBJECT_ERRORS = frozenset(
+    {
+        "org.freedesktop.DBus.Error.UnknownMethod",
+        "org.freedesktop.DBus.Error.UnknownObject",
+        "org.freedesktop.DBus.Error.UnknownInterface",
+    }
+)
+
+
+def running_info_from_dbus_error(error_name: str) -> Optional[dict]:
+    """Interpret a failed GetInfo call on our extension's bus name.
+
+    The name answered but has no ShellExtension object -> the v1 extension is
+    running ({}). Anything else (no owner, access denied, timeout) -> treat
+    it as not running (None).
+    """
+    return {} if error_name in _NO_OBJECT_ERRORS else None
+
+
+STATUS_TITLES = {
+    Status.NOT_GNOME: "Not available",
+    Status.ACTIVE: "Running",
+    Status.OUTDATED: "Update available",
+    Status.DISABLED: "Disabled",
+    Status.ERROR: "Error",
+    Status.NOT_INSTALLED: "Not installed",
+    Status.UNKNOWN: "Not running",
+}
+
+
+def status_title(report: ExtensionReport) -> str:
+    title = STATUS_TITLES[report.status]
+    if report.status == Status.ACTIVE and report.installed_version is not None:
+        title = f"{title} (version {report.installed_version})"
+    return title
+
+
+@dataclass(frozen=True)
+class SectionView:
+    """What the Settings "Top bar indicator" section shows."""
+
+    title: str
+    summary: str
+    install_command: Optional[str]
+    enable_command: Optional[str]
+    disable_command: Optional[str]
+    # "Enable"/"Disable" button via org.gnome.Shell.Extensions (native only).
+    toggle_label: Optional[str]
+    # The install command is needed but this installation has no zip.
+    package_missing: bool
+
+
+def section_view(report: ExtensionReport, install_zip: Optional[Path]) -> SectionView:
+    install_cmd = None
+    package_missing = False
+    if report.show_install_command:
+        if install_zip is not None:
+            install_cmd = install_command(install_zip)
+        else:
+            package_missing = True
+    disable_cmd = None
+    if report.toggle_action is None and report.status in (
+        Status.ACTIVE, Status.OUTDATED, Status.ERROR
+    ):
+        disable_cmd = DISABLE_COMMAND
+    toggle_label = {"enable": "Enable", "disable": "Disable"}.get(report.toggle_action or "")
+    return SectionView(
+        title=status_title(report),
+        summary=report.summary,
+        install_command=install_cmd,
+        enable_command=ENABLE_COMMAND if report.show_enable_command else None,
+        disable_command=disable_cmd,
+        toggle_label=toggle_label,
+        package_missing=package_missing,
+    )
+
+
 def tray_should_show(*, extension_present: bool) -> bool:
     """The daemon's AppIndicator tray icon duplicates the extension's
     top-bar indicator; hide it while the extension is running."""
