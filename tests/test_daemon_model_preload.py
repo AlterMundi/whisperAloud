@@ -206,42 +206,64 @@ class TestBatchJobWaitsForReady:
         assert daemon.TranscriptionReady.call_args[0][0] == "from engine"
         daemon.Error.assert_not_called()
 
-    def test_job_fails_clearly_when_model_missing(self, daemon):
+    def test_start_recording_rejects_all_engines_when_model_missing(self, daemon):
+        """1.6.1: a `missing` model now refuses the start up front for every
+        engine (batch included), instead of letting the user record into a
+        job that is guaranteed to fail afterwards."""
         engine = _GatedEngine()
         self._arm(daemon, engine)
         daemon._model_state.set_state(ms.MISSING, "Model 'base' is not downloaded")
 
         with _available(daemon, False):
-            # Re-checks availability in the background (the model may have
-            # been downloaded out-of-band) but still lets the user record.
-            assert daemon.StartRecording() is True
-            daemon.recorder.is_recording = True
-            assert daemon.StopRecording() == "transcribing"
-            daemon.recorder.is_recording = False
-            daemon.executor.shutdown(wait=True)
+            # Rejected immediately; the refusal still re-checks availability
+            # in the background (the model may have been downloaded
+            # out-of-band), so it settles back to `missing` here.
+            assert daemon.StartRecording() is False
             _join_loader(daemon)
 
+        daemon.recorder.start.assert_not_called()
         engine.transcribe_numpy.assert_not_called()
         daemon.TranscriptionReady.assert_not_called()
         code, message = daemon.Error.call_args[0]
         assert code == "model_not_available"
         assert message.startswith("Model not available")
         assert "base" in message
-        daemon.StatusChanged.assert_called_with("idle")
+        daemon.notifications.show_error.assert_called_once_with(message)
         assert daemon._transcribing is False
+        assert daemon._model_state.state == ms.MISSING
 
-    def test_start_recording_rechecks_missing_model_and_job_uses_it(self, daemon):
+    def test_start_recording_rejects_all_engines_when_model_errored(self, daemon):
+        engine = _GatedEngine()
+        self._arm(daemon, engine)
+        daemon._model_state.set_state(ms.ERROR, "CUDA exploded")
+
+        with _available(daemon, True):
+            assert daemon.StartRecording() is False
+            _join_loader(daemon)
+
+        daemon.recorder.start.assert_not_called()
+        code, message = daemon.Error.call_args[0]
+        assert code == "model_not_available"
+        assert "CUDA exploded" in message
+
+    def test_start_recording_rechecks_missing_model_and_succeeds_once_ready(self, daemon):
         engine = _GatedEngine()
         self._arm(daemon, engine)
         daemon._model_state.set_state(ms.MISSING, "gone")
 
         with _available(daemon, True):  # downloaded out-of-band meanwhile
+            # The first attempt still observes the stale `missing` snapshot
+            # and is refused, but that refusal is what kicks the recheck.
+            assert daemon.StartRecording() is False
+            _join_loader(daemon)
+            assert daemon._model_state.state == ms.READY
+
+            # The next attempt sees `ready` and proceeds normally.
             assert daemon.StartRecording() is True
             daemon.recorder.is_recording = True
             assert daemon.StopRecording() == "transcribing"
             daemon.recorder.is_recording = False
             daemon.executor.shutdown(wait=True)
-            _join_loader(daemon)
 
         daemon.TranscriptionReady.assert_called_once()
         assert daemon._model_state.state == ms.READY
@@ -292,6 +314,24 @@ class TestStreamingNeverLoadsOnMainThread:
         # Once ready, the next StartRecording proceeds normally.
         assert daemon.StartRecording() is True
         engine.start_session.assert_called_once()
+
+    def test_streaming_start_rejected_as_model_not_available_when_missing(self, daemon):
+        """1.6.1: `missing`/`error` is refused the same way for streaming and
+        batch engines alike -- `model_not_available`, not the
+        loading/downloading-only `model_not_ready`."""
+        engine = _StreamingEngine()
+        daemon.transcriber = engine
+        daemon.recorder.is_recording = False
+        daemon._model_state.set_state(ms.MISSING, "gone")
+
+        with _available(daemon, False):
+            assert daemon.StartRecording() is False
+            _join_loader(daemon)
+
+        engine.start_session.assert_not_called()
+        code, message = daemon.Error.call_args[0]
+        assert code == "model_not_available"
+        assert daemon._model_state.state == ms.MISSING
 
     def test_streaming_start_while_loading_does_not_start_a_second_load(self, daemon):
         gate = threading.Event()
