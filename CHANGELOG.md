@@ -24,6 +24,20 @@ All notable user-facing changes to this project are documented here.
   the model is still loading is transcribed as soon as it is ready; a model
   that is not downloaded is never fetched automatically and fails with a
   clear "Model not available" error instead.
+- The optional GNOME Shell extension (`whisperaloud@fede`, version 2) is now
+  a top-bar indicator. It shows whether the service is running, whether the
+  model is loading, ready or missing, whether the hotkey is registered, and
+  the recording/transcribing state, all driven by D-Bus signals. Its menu
+  can toggle recording, start the service and open the window. It supports
+  GNOME Shell 45–51.
+- While the extension is active, the tray icon hides itself.
+- A new Settings → Advanced → "Top bar indicator (GNOME Shell extension)"
+  section shows the extension's status, the exact command to install it
+  (with a Copy button), and on native installs an Enable/Disable button. The
+  Flatpak ships the extension zip.
+- The Flatpak can now reach the extension's window service
+  (`--talk-name=org.gnome.Shell.Extensions.whisperaloud`), so pasting into
+  the window that was focused when recording started can work there too.
 
 - "Start in background at login" setting (Settings → General → Startup,
   `startup.autostart_background`, off by default). At login only the daemon

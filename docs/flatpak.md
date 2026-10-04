@@ -255,12 +255,16 @@ opening a second one.
   - `pulseaudio`: microphone;
   - `network`: model downloads only;
   - `talk-name=org.kde.StatusNotifierWatcher`: tray;
-  - `talk-name=org.mpris.MediaPlayer2.*`: pause media while recording.
+  - `talk-name=org.mpris.MediaPlayer2.*`: pause media while recording;
+  - `talk-name=org.gnome.Shell.Extensions.whisperaloud`: the optional GNOME
+    Shell extension. See "GNOME Shell extension (top-bar indicator)" below.
 
   The manifest deliberately does not request:
   - `--filesystem=home` or any other host path;
   - any portal talk-name;
-  - `--own-name`.
+  - `--own-name`;
+  - `talk-name=org.gnome.Shell.Extensions`, GNOME Shell's extension manager.
+    See below.
 
   `flatpak-builder-lint manifest` reports only `appid-url-not-reachable`
   (fede.org; see `docs/flathub-submission.md`). `lint repo` adds only the
@@ -277,6 +281,93 @@ opening a second one.
   - the model cache already follows `XDG_CACHE_HOME`, which is
     `~/.var/app/org.fede.whisperaloud/cache/`. That holds both
     `huggingface/` and `whisper_aloud/models/`.
+
+### GNOME Shell extension (top-bar indicator)
+
+The extension `whisperaloud@fede`
+(`contrib/gnome-shell-extension/`, see its README) is an optional
+companion. It shows a top-bar indicator: whether the daemon is running,
+whether the model is ready, whether the hotkey is registered, and the
+recording state. It also exports the window-capture service that
+`paste_to_captured_window` needs. Flatpak changes two things about it.
+
+**1. The daemon must reach the extension's bus name.** The extension owns
+exactly `org.gnome.Shell.Extensions.whisperaloud` (`EXT_BUS_NAME` in
+`extension.js`). On that name it exports:
+
+- `org.fede.whisperaloud.Window`: `GetFocusedWindow`/`ActivateWindow`, used
+  by `clipboard/window_manager.py`'s "gnome-extension" backend;
+- `org.fede.whisperaloud.ShellExtension.GetInfo`, which Settings uses to
+  read the extension's version.
+
+Without a talk-name, the bus proxy hides the name from the sandbox. The
+daemon's `WindowManager` then falls back to backend `none`, and
+`paste_to_captured_window` cannot re-focus the captured window. The
+manifest therefore adds:
+
+```
+--talk-name=org.gnome.Shell.Extensions.whisperaloud
+```
+
+This is an exact name with no wildcard, owned by our own extension. It does
+not match `org.gnome.Shell.Extensions` or `org.gnome.Shell`, because
+Flatpak's talk-name matching is exact unless the name ends in `.*`.
+
+The same permission lets the daemon watch the name, through
+`NameOwnerChanged` for a name the app may see. The daemon uses that to hide
+its AppIndicator tray icon while the extension's indicator is shown, and
+shows the icon again when the extension goes away. The watch is
+event-driven, with no polling.
+
+**2. The extension can't be installed from inside the sandbox.** The
+manifest packs it with `scripts/pack_shell_extension.py` into
+`/app/share/whisper-aloud/gnome-shell-extension/whisperaloud@fede.shell-extension.zip`.
+**Settings → Advanced → Top bar indicator (GNOME Shell extension)** copies the
+zip to `$XDG_DATA_HOME/whisper-aloud/gnome-shell-extension/`. Inside Flatpak,
+that is `~/.var/app/org.fede.whisperaloud/data/...`, the same absolute path
+on the host. The section shows the host command, with a Copy button:
+
+```sh
+gnome-extensions install --force ~/.var/app/org.fede.whisperaloud/data/whisper-aloud/gnome-shell-extension/whisperaloud@fede.shell-extension.zip
+# log out and back in (Wayland loads new extensions only at login), then:
+gnome-extensions enable whisperaloud@fede
+```
+
+**Why not `--talk-name=org.gnome.Shell.Extensions`.** That service would
+give a precise installed/enabled status and an in-app Enable/Disable
+button. But the same interface also exposes:
+
+- `EnableExtension`/`DisableExtension` for **any** uuid;
+- `UninstallExtension`;
+- `InstallRemoteExtension`;
+- `LaunchExtensionPrefs`;
+- the writable `UserExtensionsEnabled` property, which turns all extensions
+  off at once.
+
+A compromised or buggy app holding that permission could silently disable
+or remove the user's other extensions, including security- or
+privacy-related ones. That is far more than a status display needs, and
+Flathub review flags it. The sandboxed app therefore uses only its own
+extension's name:
+
+- name owned → enabled and running, with `GetInfo` giving the version (an
+  older version means "Update available");
+- not owned → "not installed **or** disabled".
+
+When the extension is not running, the section can't tell those two cases
+apart, so it shows both the install and the enable command. Native,
+unsandboxed installs do query `org.gnome.Shell.Extensions`
+(`GetExtensionInfo`) and get the Enable/Disable button.
+
+**Limits.**
+
+- Installing is a manual host step.
+- Updates need `install --force` and a re-login.
+- The extension is not on extensions.gnome.org. Publishing it there would
+  give one-click install and updates, and is a possible future step.
+- `shell-version` lists 45–51. It was tested on 48. 49–51 were added
+  because none of the APIs used appears in the gjs.guide porting guides'
+  lists of breaking changes (details in the extension README).
 
 ### Building
 
@@ -486,6 +577,26 @@ from Flathub.
 - [ ] Global shortcut toggles recording while the window is closed.
 - [ ] Tray icon appears, if the AppIndicator extension is enabled, and its
       menu works.
+- [ ] Settings → Advanced → Top bar indicator: with the old (v1)
+      extension installed, it says "Update available". The install command
+      points at an existing file under
+      `~/.var/app/org.fede.whisperaloud/data/whisper-aloud/gnome-shell-extension/`,
+      and Copy puts it on the clipboard.
+- [ ] Running that command on the host, then logging out and back in,
+      installs v2. Settings then says "Running (version 2)".
+- [ ] Top-bar indicator after login: it shows "Starting…"/"Loading
+      model…", then "Ready". The menu shows the model and the bound hotkey.
+      Recording, transcribing and stopping the daemon (`flatpak kill`)
+      update it without delay. "Start WhisperAloud" brings the daemon back
+      through D-Bus activation.
+- [ ] While the extension is enabled, the AppIndicator tray icon is hidden.
+      After `gnome-extensions disable whisperaloud@fede`, it comes back
+      without restarting the daemon.
+- [ ] `paste_to_captured_window`: the daemon log shows
+      `WindowManager initialized with backend: gnome-extension`, and paste
+      goes back to the window that was focused when recording started.
+- [ ] With the daemon's hotkey bound (portal), pressing it toggles once,
+      not twice: the extension's fallback keybinding is not grabbed.
 - [ ] Media pause/resume with a playing MPRIS player.
 - [ ] Copied history entries are visible, and new entries persist across
       `flatpak kill org.fede.whisperaloud` and a relaunch.
