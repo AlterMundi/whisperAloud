@@ -34,6 +34,31 @@ class WindowManager:
         self.backend = self._detect_backend()
         logger.info(f"WindowManager initialized with backend: {self.backend}")
 
+    def _reprobe(self, reason: str) -> None:
+        """Re-detect the backend (WHISP-90).
+
+        Previously `self.backend` was decided once at `__init__` and cached
+        for the daemon's entire lifetime: a user enabling the GNOME
+        "whisperaloud" shell extension (or installing xdotool) after the
+        daemon started left `get_active_window()`/`activate_window()` stuck
+        on whatever was detected at startup until a restart, and -- the
+        other direction -- a backend that stopped working (extension
+        disabled, xdotool uninstalled) kept being retried forever.
+
+        Called from the backend-specific operations below when one of them
+        actually fails (an exception from the D-Bus call or the
+        subprocess) -- an unambiguous, observable signal that the
+        environment changed, unlike a plain "no active window right now"
+        result. Never on a timer."""
+        old = self.backend
+        self._gnome_proxy = None
+        new = self._detect_backend()
+        self.backend = new
+        if new != old:
+            logger.info("WindowManager backend changed (%s): %s -> %s", reason, old, new)
+        else:
+            logger.debug("WindowManager re-probed backend (%s): still %s", reason, new)
+
     def _detect_backend(self) -> str:
         if self._check_gnome_extension():
             return "gnome-extension"
@@ -114,6 +139,7 @@ class WindowManager:
     def _get_active_gnome(self) -> Optional[WindowInfo]:
         """Get active window via GNOME extension D-Bus typed proxy."""
         if not self._ensure_gnome_proxy():
+            self._reprobe("GNOME proxy unavailable")
             return None
         try:
             res = self._gnome_proxy.call_sync(
@@ -132,11 +158,16 @@ class WindowManager:
             )
         except Exception as e:
             logger.warning(f"GNOME GetFocusedWindow failed: {e}")
+            # WHISP-90: a real failure (not just "no focused window"), e.g.
+            # the extension was disabled since __init__ -- re-probe instead
+            # of retrying the same dead backend forever.
+            self._reprobe("GetFocusedWindow failed")
             return None
 
     def _activate_gnome(self, info: WindowInfo) -> bool:
         """Activate window via GNOME extension D-Bus typed proxy."""
         if not self._ensure_gnome_proxy():
+            self._reprobe("GNOME proxy unavailable")
             return False
         try:
             v = GLib.Variant("(u)", (int(info.window_id),))
@@ -148,6 +179,7 @@ class WindowManager:
             return True
         except Exception as e:
             logger.warning(f"GNOME ActivateWindow failed: {e}")
+            self._reprobe("ActivateWindow failed")
             return False
 
     # -- xdotool backend --------------------------------------------------
@@ -175,6 +207,12 @@ class WindowManager:
             return WindowInfo(window_id=window_id, title=title, backend="xdotool")
         except Exception as e:
             logger.warning(f"xdotool getactivewindow failed: {e}")
+            # WHISP-90: an exception (e.g. FileNotFoundError -- the binary
+            # was uninstalled since __init__) is a real backend failure,
+            # unlike a non-zero exit (which can just mean "no active
+            # window right now") -- re-probe so the next call doesn't
+            # retry a backend that is actually gone.
+            self._reprobe("xdotool getactivewindow failed")
             return None
 
     def _activate_xdotool(self, info: WindowInfo) -> bool:
@@ -191,4 +229,5 @@ class WindowManager:
             return False
         except Exception as e:
             logger.warning(f"xdotool windowactivate failed: {e}")
+            self._reprobe("xdotool windowactivate failed")
             return False
