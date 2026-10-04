@@ -129,8 +129,10 @@ class WhisperAloudIndicator extends PanelMenu.Button {
                 try {
                     reply = conn.call_finish(res);
                 } catch (e) {
-                    if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
-                        console.debug(`WhisperAloud: ${method} failed: ${e.message}`);
+                    // Cancelled: the indicator is being destroyed, touch nothing.
+                    if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        return;
+                    console.debug(`WhisperAloud: ${method} failed: ${e.message}`);
                 }
                 onReply?.(reply);
             });
