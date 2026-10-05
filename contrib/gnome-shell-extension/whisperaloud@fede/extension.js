@@ -119,6 +119,11 @@ class WhisperAloudIndicator extends PanelMenu.Button {
     }
 
     _onDaemonSignal(signal, params) {
+        // The daemon claims its bus name before it exports the object, so the
+        // GetStatus sent from _onDaemonAppeared can fail. Any signal proves the
+        // object is exported now: fetch the full status if we still lack it.
+        if (!this._status && this._running)
+            this._fetchStatus();
         if (signal === 'StatusChanged') {
             const [state] = params.deepUnpack();
             if (this._status)
