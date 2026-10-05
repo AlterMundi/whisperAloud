@@ -60,3 +60,57 @@ def test_set_config_wraps_bool_and_int_values_too(client):
     config = client.get_config()
     assert config["transcription.vad_filter"] is False
     assert config["transcription.beam_size"] == 3
+
+
+def test_preferences_binding_round_trip_against_real_daemon(daemon):
+    """HIG-07 instant apply end to end: a Preferences row change goes out as
+    SetConfig through PrefsBinding, persists in the daemon, and another
+    client's ConfigChanged updates a second (watching) binding."""
+    from whisper_aloud.config import WhisperAloudConfig
+    from whisper_aloud.ui.prefs_binding import PrefsBinding, initial_values
+
+    handle = daemon()
+    dialog_client = handle.client()
+    observer = handle.client()
+    try:
+        changed = SignalCapture(observer, "ConfigChanged")
+        errors = []
+        binding = PrefsBinding(
+            dialog_client,
+            initial_values(WhisperAloudConfig(), dialog_client),
+            on_error=errors.append,
+        )
+        assert binding.get("clipboard.paste_backend") == "auto"
+
+        result = binding.apply({"clipboard.paste_backend": "clipboard"})
+        assert result.ok is True, errors
+        assert dialog_client.get_config()["clipboard.paste_backend"] == "clipboard"
+
+        (changes,) = changed.wait(
+            timeout=5.0, predicate=lambda c: "clipboard.paste_backend" in c
+        )
+        other = PrefsBinding(observer, {"clipboard.paste_backend": "auto"})
+        seen = []
+        other.watch("clipboard.paste_backend", seen.append)
+        other.config_changed(changes)
+        assert seen == ["clipboard"]
+
+        # A value the daemon would reject is refused locally, never sent.
+        bad = binding.apply({"clipboard.paste_backend": "carrier-pigeon"})
+        assert bad.ok is False and errors
+        assert dialog_client.get_config()["clipboard.paste_backend"] == "clipboard"
+    finally:
+        observer.disconnect()
+        dialog_client.disconnect()
+
+
+def test_set_config_device_id_sentinel_selects_system_default(client):
+    """a{sv} cannot carry None: audio.device_id = -1 means System Default.
+    GetConfig then omits the key (None) and ConfigChanged echoes -1."""
+    changed = SignalCapture(client, "ConfigChanged")
+
+    assert client.set_config({"audio.device_id": -1}) is True
+
+    changes = changed.wait(timeout=5.0, predicate=lambda c: "audio.device_id" in c)[0]
+    assert changes["audio.device_id"] == -1
+    assert "audio.device_id" not in client.get_config()

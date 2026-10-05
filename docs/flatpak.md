@@ -55,7 +55,7 @@ is available inside the sandbox. The default (`clipboard.paste_backend =
 field, or pastes it with Shift+Insert where typing is not possible. It
 reuses the talk-name the manifest already grants (see "GNOME Shell
 extension" below): no new permission, no dialog, no orange indicator.
-Install it from **Settings → Advanced → Top bar indicator**. See
+Install it from **Preferences → General → Top Bar Indicator**. See
 [`configuration.md`](configuration.md#auto-paste-clipboard) for every
 backend.
 
@@ -109,7 +109,7 @@ interact with.
 
 ### Start in background at login (Background portal)
 
-Settings → General → **Startup** → **Start in background at login** makes
+Preferences → General → **Startup** → **Run in Background at Login** makes
 the daemon start at every login *without* the window: the model preloads,
 the global shortcut binds (no dialog after the first time), and (only with
 the opt-in `remote-desktop` paste backend) the RemoteDesktop session is
@@ -305,7 +305,7 @@ Two ways to feed a host file to the sandboxed CLI:
   `Exec=flatpak run --branch=stable --arch=x86_64 --command=whisper-aloud org.fede.whisperaloud --daemon`.
   The desktop entry and its Toggle/Cancel actions get the same rewrite.
 - **Start in background at login** (WHISP-87) is a setting, off by
-  default: Settings → General → Startup. A Flatpak app cannot write
+  default: Preferences → General → Startup. A Flatpak app cannot write
   `~/.config/autostart` itself, so the switch calls the Background portal
   (`RequestBackground` with `autostart`, `commandline: ["whisper-aloud",
   "--daemon"]`, `dbus-activatable: false`); see
@@ -392,7 +392,7 @@ event-driven, with no polling.
 **2. The extension can't be installed from inside the sandbox.** The
 manifest packs it with `scripts/pack_shell_extension.py` into
 `/app/share/whisper-aloud/gnome-shell-extension/whisperaloud@fede.shell-extension.zip`.
-**Settings → Advanced → Top bar indicator (GNOME Shell extension)** copies the
+**Preferences → General → Top Bar Indicator** copies the
 zip to `$XDG_DATA_HOME/whisper-aloud/gnome-shell-extension/`. Inside Flatpak,
 that is `~/.var/app/org.fede.whisperaloud/data/...`, the same absolute path
 on the host. The section shows the host command, with a Copy button:
@@ -624,8 +624,8 @@ from Flathub.
    GNOME lists WhisperAloud under "Background Apps" in the quick settings.
    That is expected. Stopping it there kills the daemon, and the next
    window launch re-activates it.
-7. **Start at login** (optional). Turn on Settings → General → Startup →
-   "Start in background at login" and accept the background dialog; see
+7. **Start at login** (optional). Turn on Preferences → General → Startup →
+   "Run in Background at Login" and accept the background dialog; see
    [Start in background at login](#start-in-background-at-login-background-portal).
 
 ### 5. Field-test checklist (things only a real install can verify)
@@ -647,7 +647,7 @@ from Flathub.
 - [ ] Global shortcut toggles recording while the window is closed.
 - [ ] Tray icon appears, if the AppIndicator extension is enabled, and its
       menu works.
-- [ ] Settings → Advanced → Top bar indicator: with the old (v1)
+- [ ] Preferences → General → Top Bar Indicator: with the old (v1)
       extension installed, it says "Update available". The install command
       points at an existing file under
       `~/.var/app/org.fede.whisperaloud/data/whisper-aloud/gnome-shell-extension/`,

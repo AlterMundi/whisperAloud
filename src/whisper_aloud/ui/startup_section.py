@@ -1,11 +1,13 @@
-"""Settings "Startup" section: the "Start in background at login" switch (WHISP-87).
+"""Preferences "Startup" group: the "Run in Background at Login" row (WHISP-87).
 
-Self-contained so SettingsDialog only appends ``StartupSection(...).widget``.
-The switch applies immediately (it is not part of the dialog's Save/Cancel
-batch): inside Flatpak it opens the system's consent dialog through the
-Background portal, so it uses Gtk.Switch's delayed-state pattern: the
-handle moves at once (``active``) but the green ``state`` and the final
-position only follow the controller's confirmed answer.
+Self-contained so the Preferences dialog only adds ``StartupSection(...).widget``
+(an Adw.PreferencesGroup) to a page. Like every preference it applies
+immediately, but not through SetConfig: inside Flatpak it opens the system's
+consent dialog through the Background portal, so the row's switch uses
+Gtk.Switch's delayed-state pattern: the handle moves at once (``active``) but
+the green ``state`` and the final position only follow the controller's
+confirmed answer. (Adw.SwitchRow has no delayed state, hence an ActionRow
+with a Gtk.Switch suffix.)
 """
 
 import logging
@@ -14,13 +16,14 @@ from typing import Optional
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk  # noqa: E402
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk  # noqa: E402
 
 from .startup_logic import MODE_PORTAL, AutostartController  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-TITLE = "Start in background at login"
+TITLE = "Run in Background at Login"
 HELP_TEXT = (
     "Starts only the background service when you log in, without opening this "
     "window: the model loads and the global shortcut dictates right away."
@@ -34,35 +37,29 @@ class StartupSection:
         self._token: Optional[int] = None
         self._syncing = False
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        heading = Gtk.Label(label="Startup")
-        heading.set_halign(Gtk.Align.START)
-        heading.add_css_class("heading")
-        heading.set_margin_top(12)
-        box.append(heading)
+        group = Adw.PreferencesGroup()
+        group.set_title("Startup")
 
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        label = Gtk.Label(label=TITLE)
-        label.set_halign(Gtk.Align.START)
-        label.set_hexpand(True)
         self.spinner = Gtk.Spinner()
+        self.spinner.set_valign(Gtk.Align.CENTER)
         self.switch = Gtk.Switch()
         self.switch.set_valign(Gtk.Align.CENTER)
         self.switch.update_property([Gtk.AccessibleProperty.LABEL], [TITLE])
-        row.append(label)
-        row.append(self.spinner)
-        row.append(self.switch)
-        box.append(row)
 
-        help_label = Gtk.Label(label=HELP_TEXT, wrap=True, xalign=0)
-        help_label.add_css_class("dim-label")
-        box.append(help_label)
+        self.row = Adw.ActionRow()
+        self.row.set_title(TITLE)
+        self.row.set_subtitle(HELP_TEXT)
+        self.row.add_suffix(self.spinner)
+        self.row.add_suffix(self.switch)
+        self.row.set_activatable_widget(self.switch)
+        group.add(self.row)
 
         self.status_label = Gtk.Label(wrap=True, xalign=0)
         self.status_label.set_selectable(True)
-        box.append(self.status_label)
+        self.status_label.set_margin_top(6)
+        group.add(self.status_label)
 
-        self.widget = box
+        self.widget = group
 
         if controller is None:
             self.switch.set_sensitive(False)
@@ -71,7 +68,7 @@ class StartupSection:
 
         self.switch.connect("state-set", self._on_state_set)
         self._token = controller.subscribe(self._render)
-        box.connect("destroy", lambda *_: self.detach())
+        group.connect("destroy", lambda *_: self.detach())
         self._render(controller)
 
     def detach(self) -> None:

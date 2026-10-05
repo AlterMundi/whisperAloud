@@ -1,31 +1,39 @@
-"""Settings dialog for WhisperAloud configuration."""
+"""Preferences dialog for WhisperAloud (HIG-07, WHISP-102).
+
+An ``Adw.PreferencesDialog`` (libadwaita >= 1.5; ``Adw.PreferencesWindow`` on
+older libadwaita) with General, Audio and History pages. Every row applies
+immediately: there is no Save/Cancel. Each change goes to the daemon through
+``SetConfig`` via ``prefs_binding.PrefsBinding``, which validates it first,
+puts the row back and shows a toast when it is rejected, and updates rows when
+the daemon reports ``ConfigChanged`` (the CLI or another window changed a
+setting). Text rows apply on Enter / the apply button / focus leaving the row;
+spin rows apply when their value is committed.
+
+The Startup and Top Bar Indicator groups apply on their own (Background
+portal / GNOME Shell), see startup_section.py and shell_extension_section.py.
+
+The Audio and History pages and the model, shortcut and catalog rows are a
+direct port of the previous Settings window; their redesign is HIG-08/09/10.
+"""
 
 import logging
-import os
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional, Sequence
 
 import gi
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Adw, Gdk, GLib, Gtk
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
-from ..config import (
-    NotificationConfig,
-    PersistenceConfig,
-    WhisperAloudConfig,
-    user_data_dir,
-)
-from ..stt import catalog
-from . import dialogs
-from .download_logic import compute_ui_state, requires_license_consent
-from .error_handler import InputValidator, ValidationError
-from .model_picker_logic import (
+from ..config import WhisperAloudConfig  # noqa: E402
+from ..stt import catalog  # noqa: E402
+from . import dialogs  # noqa: E402
+from .download_logic import compute_ui_state, requires_license_consent  # noqa: E402
+from .model_picker_logic import (  # noqa: E402
     badges_for,
     default_index,
-    device_for_index,
-    device_row_index,
     download_state_for,
     entries_for_engine,
     needs_download_note,
@@ -33,16 +41,38 @@ from .model_picker_logic import (
     save_selection,
     selectable_entries,
 )
-from .settings_logic import (
-    has_unsaved_changes,
-    normalize_language_input,
-    should_block_close,
+from .prefs_binding import PrefsBinding, initial_values  # noqa: E402
+from .settings_logic import (  # noqa: E402
+    PASTE_BACKEND_OPTIONS,
+    PASTE_BACKEND_SUBTITLE,
+    include_current_entry,
+    language_options,
+    microphone_changes,
+    microphone_options,
+    option_index,
+    option_value,
+    paste_shortcut_for,
+    uses_preferences_dialog,
+    uses_terminal_shortcut,
 )
-from .startup_section import StartupSection
+from .startup_section import StartupSection  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+# Adw.PreferencesDialog needs libadwaita 1.5 (same gate as ui/dialogs.py).
+USE_PREFERENCES_DIALOG = uses_preferences_dialog(Adw.get_minor_version())
+_PreferencesBase = Adw.PreferencesDialog if USE_PREFERENCES_DIALOG else Adw.PreferencesWindow
+
+# Order must match model_picker_logic._DEVICE_OPTIONS = ("auto", "cpu", "cuda").
+DEVICE_OPTIONS = (("auto", "Auto"), ("cpu", "CPU"), ("cuda", "CUDA (GPU)"))
+# Mirrors config.validate()'s allowlist.
+COMPUTE_TYPE_OPTIONS = (("int8", "int8"), ("float16", "float16"), ("float32", "float32"))
+
+FALLBACK_COMMAND = "whisper-aloud toggle"
 
 
 def _build_shell_extension_section():
-    """The optional "Top bar indicator" section; never breaks the dialog."""
+    """The optional "Top Bar Indicator" group; never breaks the dialog."""
     try:
         from .shell_extension_section import ShellExtensionSection
 
@@ -57,219 +87,291 @@ def _fmt_size(size_mb: Optional[int]) -> str:
     return f"{size_mb} MB" if size_mb is not None else "—"
 
 
-logger = logging.getLogger(__name__)
+def _int(value: float) -> int:
+    return int(round(value))
 
 
-class SettingsDialog(Gtk.Window):
-    """Settings dialog for configuring WhisperAloud."""
+def _decimal(digits: int) -> Callable[[float], float]:
+    return lambda value: round(float(value), digits)
+
+
+class SettingsDialog(_PreferencesBase):
+    """The Preferences dialog. Instant apply; no Save/Cancel."""
 
     def __init__(
         self,
         parent: Gtk.Window,
         config: WhisperAloudConfig,
-        on_save_callback: Optional[callable] = None,
+        client=None,
         autostart_controller=None,
     ) -> None:
         """
-        Initialize the settings dialog.
-
         Args:
-            parent: Parent window
-            config: Current configuration
-            on_save_callback: Callback function to run after saving
-            autostart_controller: ui.startup_logic.AutostartController for
-                the "Startup" section (WHISP-87); None shows it unavailable
+            parent: Window the dialog is presented over.
+            config: The GUI's config copy, used when the daemon's GetConfig is
+                unavailable.
+            client: The connected WhisperAloudClient (SetConfig/GetConfig).
+                Without one every change is refused with a toast.
+            autostart_controller: ui.startup_logic.AutostartController for the
+                Startup group (WHISP-87); None shows it unavailable.
         """
         super().__init__()
+        self.set_title("Preferences")
+        self.set_search_enabled(True)
+        if USE_PREFERENCES_DIALOG:
+            self.set_content_width(640)
+            self.set_content_height(720)
+        else:
+            self.set_default_size(640, 720)
+            self.set_modal(True)
+            self.set_transient_for(parent)
 
-        self.set_title("Settings")
-        self.set_default_size(600, 700)
-        self.set_modal(False)
-        self.set_resizable(True)
-        self.set_transient_for(parent)
-
-        # Store configuration
-        self._config = config
         self._parent = parent
-        self._on_save_callback = on_save_callback
+        self._client = client
         self._autostart_controller = autostart_controller
+        self._syncing = 0
+        self._committing_key: Optional[str] = None
+        self.last_error: Optional[str] = None
+        self.last_toast = None
 
-        # Build UI
-        self._build_ui()
-        self._setup_keyboard_shortcuts()
-        self._allow_close = False
-        self._child_dialog_open = False
-        self._dirty = False
-        self._initial_ui_state = self._capture_ui_state()
-        self._connect_dirty_tracking()
-        self.connect("close-request", self._on_close_request)
-
-        logger.info("Settings dialog initialized")
-
-    def _on_close_request(self, _window: Gtk.Window) -> bool:
-        """Intercept close to protect unsaved changes."""
-        if should_block_close(
-            allow_close=self._allow_close,
-            unsaved_changes=self._has_unsaved_changes(),
-        ):
-            self._show_discard_confirmation()
-            return True
-        return False
-
-    def _show_discard_confirmation(self) -> None:
-        """Ask user to confirm discarding unsaved changes."""
-        self._child_dialog_open = True
-        dialogs.confirm(
-            parent=self,
-            heading="Discard unsaved changes?",
-            body="You have unsaved changes in Settings.",
-            accept_label="Discard",
-            on_accept=self._on_discard_confirmed,
-            destructive=True,
-            cancel_label="Keep Editing",
-            on_response=self._on_discard_confirmation_response,
+        self.binding = PrefsBinding(
+            client, initial_values(config, client), on_error=self._show_error
         )
 
-    def _on_discard_confirmation_response(self, _response: str) -> None:
-        """Runs for every response (Keep Editing or Discard)."""
-        self._child_dialog_open = False
-
-    def _on_discard_confirmed(self) -> None:
-        """Runs only for the 'Discard' (accept) response."""
-        self._allow_close = True
-        self.close()
-
-    def _build_ui(self) -> None:
-        """Build the settings dialog UI."""
-        # Main box
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.set_child(main_box)
-
-        # Header bar
-        header_bar = Gtk.HeaderBar()
-        # "title" gives the header-bar title weight under Adwaita.
-        title_label = Gtk.Label(label="Settings")
-        title_label.add_css_class("title")
-        header_bar.set_title_widget(title_label)
-
-        # Cancel button
-        cancel_button = Gtk.Button(label="Cancel")
-        cancel_button.set_tooltip_text("Discard and close (Esc)")
-        cancel_button.connect("clicked", self._on_cancel_clicked)
-        header_bar.pack_start(cancel_button)
-
-        # Save button
-        save_button = Gtk.Button(label="Save")
-        save_button.add_css_class("suggested-action")
-        save_button.set_tooltip_text("Save settings (Ctrl+S)")
-        save_button.connect("clicked", self._on_save_clicked)
-        header_bar.pack_end(save_button)
-        self.set_titlebar(header_bar)
-
-        # Stack for tabbed interface
-        self.stack = Gtk.Stack()
-        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
-
-        # Stack switcher
-        stack_switcher = Gtk.StackSwitcher()
-        stack_switcher.set_stack(self.stack)
-        stack_switcher.set_halign(Gtk.Align.CENTER)
-        stack_switcher.set_margin_top(12)
-        stack_switcher.set_margin_bottom(12)
-        main_box.append(stack_switcher)
-
-        # Add pages
         self._add_general_page()
+        self._add_audio_page()
         self._add_history_page()
-        self._add_advanced_page()
 
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_vexpand(True)
-        scrolled.set_child(self.stack)
-        main_box.append(scrolled)
+        if USE_PREFERENCES_DIALOG:
+            self.connect("closed", self._on_closed)
+        else:
+            self.connect("close-request", self._on_close_request)
 
-    def _setup_keyboard_shortcuts(self) -> None:
-        """Enable dialog-local keyboard shortcuts for accessibility."""
-        key_controller = Gtk.EventControllerKey()
-        key_controller.connect("key-pressed", self._on_key_pressed)
-        self.add_controller(key_controller)
+        logger.info("Preferences dialog initialized")
 
-    def _on_key_pressed(
-        self,
-        _controller: Gtk.EventControllerKey,
-        keyval: int,
-        _keycode: int,
-        state: Gdk.ModifierType,
-    ) -> bool:
-        """Handle keyboard shortcuts in settings dialog."""
-        ctrl_pressed = bool(state & Gdk.ModifierType.CONTROL_MASK)
+    # ── presenting / closing ────────────────────────────────────────────────
 
-        if keyval == Gdk.KEY_Escape:
-            self._on_cancel_clicked(None)
-            return True
+    def present_for(self, parent: Gtk.Widget) -> None:
+        """Show the dialog over ``parent`` (Adw.Dialog or window fallback)."""
+        if USE_PREFERENCES_DIALOG:
+            self.present(parent)
+        else:
+            self.set_transient_for(parent)
+            self.present()
 
-        if ctrl_pressed and keyval in (Gdk.KEY_s, Gdk.KEY_S):
-            self._on_save_clicked(None)
-            return True
+    def connect_closed(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` once the dialog has been closed."""
+        if USE_PREFERENCES_DIALOG:
+            self.connect("closed", lambda *_: callback())
+        else:
+            self.connect("close-request", lambda *_: callback() or False)
 
+    def _on_closed(self, *_args) -> None:
+        self._startup_section.detach()
+        if self._shell_extension_section is not None:
+            self._shell_extension_section.detach()
+
+    def _on_close_request(self, *_args) -> bool:
+        self._on_closed()
         return False
 
-    def _on_register_hotkey_clicked(self, _btn: Gtk.Button) -> None:
-        """Check hotkey status and give actionable feedback."""
-        # Query daemon
-        backend = "unknown"
+    def _transient_window(self) -> Optional[Gtk.Window]:
+        root = self.get_root()
+        return root if isinstance(root, Gtk.Window) else self._parent
+
+    # ── instant apply plumbing ──────────────────────────────────────────────
+
+    def config_changed(self, changes: dict) -> None:
+        """Daemon ConfigChanged (forwarded by the main window): update rows."""
+        self.binding.config_changed(changes)
+
+    def _show_error(self, message: str) -> None:
+        self.last_error = message
+        logger.warning("Preference not applied: %s", message)
+        toast = Adw.Toast.new(GLib.markup_escape_text(message))
+        self.last_toast = toast
+        self.add_toast(toast)
+
+    @contextmanager
+    def _quiet(self):
+        """Programmatic row updates must not be sent back to the daemon."""
+        self._syncing += 1
         try:
-            from whisper_aloud.service.client import WhisperAloudClient
+            yield
+        finally:
+            self._syncing -= 1
 
-            client = WhisperAloudClient()
-            status = client.get_status()
-            backend = status.get("hotkey_backend", "none")
-        except Exception:
-            self._hotkey_status_label.set_text("Daemon not running")
-            return
+    def _apply(self, changes: dict) -> bool:
+        if self._syncing:
+            return True
+        return self.binding.apply(changes).ok
 
-        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    def _bind_bool(
+        self,
+        row: Gtk.Widget,
+        key: str,
+        prop: str = "active",
+        to_config: Callable[[bool], Any] = bool,
+        from_config: Callable[[Any], bool] = bool,
+    ) -> None:
+        """A boolean row property (SwitchRow.active, ExpanderRow
+        .enable-expansion) bound to ``key``."""
+        row.set_property(prop, from_config(self.binding.get(key)))
 
-        if backend == "keybinder":
-            self._hotkey_status_label.set_text("Active (keybinder)")
-        elif backend == "portal" and "GNOME" not in desktop:
-            # Portal works on KDE/wlroots
-            self._hotkey_status_label.set_text("Active (XDG Portal)")
-        elif "GNOME" in desktop:
-            # On GNOME, portal silently rejects native apps — use extension
-            self._hotkey_status_label.set_text("Use GNOME extension")
-        else:
-            self._hotkey_status_label.set_text("Set system shortcut manually")
+        def _on_notify(widget, _pspec):
+            self._apply({key: to_config(widget.get_property(prop))})
+
+        def _on_config(value):
+            with self._quiet():
+                row.set_property(prop, from_config(value))
+
+        row.connect(f"notify::{prop}", _on_notify)
+        self.binding.watch(key, _on_config)
+
+    def _bind_spin(self, row: "Adw.SpinRow", key: str, cast: Callable[[float], Any]) -> None:
+        """SpinRow bound to ``key``; the value is committed by the +/- buttons,
+        Enter or focus leaving the row, never on every keystroke."""
+        row.set_value(float(self.binding.get(key) or 0))
+
+        def _on_notify(widget, _pspec):
+            self._apply({key: cast(widget.get_value())})
+
+        def _on_config(value):
+            with self._quiet():
+                row.set_value(float(value or 0))
+
+        row.connect("notify::value", _on_notify)
+        self.binding.watch(key, _on_config)
+
+    def _bind_combo(
+        self,
+        row: "Adw.ComboRow",
+        key: str,
+        options: Sequence,
+        changes_for: Optional[Callable[[Any], dict]] = None,
+        after_apply: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """ComboRow over (value, label) ``options`` bound to ``key``."""
+        row.set_model(Gtk.StringList.new([label for _value, label in options]))
+        row.set_selected(option_index(options, self.binding.get(key)))
+
+        def _on_notify(widget, _pspec):
+            if self._syncing:
+                return
+            value = option_value(options, widget.get_selected())
+            if value is None and widget.get_selected() >= len(options):
+                return
+            changes = changes_for(value) if changes_for else {key: value}
+            if self._apply(changes) and after_apply is not None:
+                after_apply()
+
+        def _on_config(value):
+            with self._quiet():
+                row.set_selected(option_index(options, value))
+
+        row.connect("notify::selected", _on_notify)
+        self.binding.watch(key, _on_config)
+
+    def _bind_entry(
+        self,
+        row: "Adw.EntryRow",
+        key: str,
+        validate: Optional[Callable[[str], Optional[str]]] = None,
+    ) -> None:
+        """EntryRow bound to ``key``. Applied on Enter/the apply button or when
+        focus leaves the row; an invalid value keeps the text, marks the row
+        with the error style and shows a toast."""
+        row.set_text(str(self.binding.get(key) or ""))
+        row.set_show_apply_button(True)
+
+        def _commit(*_args):
+            text = row.get_text().strip()
+            if text == str(self.binding.get(key) or ""):
+                row.remove_css_class("error")
+                return
+            error = validate(text) if validate else None
+            if error is not None:
+                row.add_css_class("error")
+                self._show_error(error)
+                return
+            self._committing_key = key
+            try:
+                ok = self._apply({key: text})
+            finally:
+                self._committing_key = None
+            if ok:
+                row.remove_css_class("error")
+            else:
+                row.add_css_class("error")
+
+        def _on_config(value):
+            if self._committing_key == key:
+                return  # keep the user's text on a rejection; row shows the error
+            with self._quiet():
+                row.set_text(str(value or ""))
+            row.remove_css_class("error")
+
+        row.connect("apply", _commit)
+        focus = Gtk.EventControllerFocus()
+        focus.connect("leave", _commit)
+        row.add_controller(focus)
+        self.binding.watch(key, _on_config)
+
+    @staticmethod
+    def _spin_row(title, subtitle, lower, upper, step, digits=0) -> "Adw.SpinRow":
+        row = Adw.SpinRow.new_with_range(lower, upper, step)
+        row.set_title(title)
+        if subtitle:
+            row.set_subtitle(subtitle)
+        row.set_digits(digits)
+        return row
+
+    @staticmethod
+    def _switch_row(title, subtitle=None) -> "Adw.SwitchRow":
+        row = Adw.SwitchRow()
+        row.set_title(title)
+        if subtitle:
+            row.set_subtitle(subtitle)
+        return row
+
+    # ── General page ────────────────────────────────────────────────────────
 
     def _add_general_page(self) -> None:
-        """Add general settings page with common options."""
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_margin_start(24)
-        page.set_margin_end(24)
-        page.set_margin_top(24)
-        page.set_margin_bottom(24)
+        page = Adw.PreferencesPage()
+        page.set_title("General")
+        page.set_icon_name("preferences-system-symbolic")
+        self.general_page = page
 
-        # --- Model Section ---
-        model_section = Gtk.Label(label="Transcription")
-        model_section.set_halign(Gtk.Align.START)
-        model_section.add_css_class("heading")
-        page.append(model_section)
+        self._build_model_group(page)
+        self._build_after_transcribing_group(page)
+        self._build_notifications_group(page)
+        self._build_shortcut_group(page)
 
-        # Model selector — catalog-driven boxed-list (WHISP-42)
-        self._model_list_box = Gtk.ListBox()
-        self._model_list_box.add_css_class("boxed-list")
-        self._model_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        # Startup (WHISP-87): applies through the Background portal.
+        self._startup_section = StartupSection(self._autostart_controller)
+        page.add(self._startup_section.widget)
 
+        # Top bar indicator (GNOME Shell extension): applies on its own.
+        self._shell_extension_section = _build_shell_extension_section()
+        if self._shell_extension_section is not None:
+            page.add(self._shell_extension_section.widget)
+
+        self.add(page)
+
+    def _build_model_group(self, page: "Adw.PreferencesPage") -> None:
+        group = Adw.PreferencesGroup()
+        group.set_title("Speech Model")
+        self.model_group = group
+
+        # Model selector — catalog-driven (WHISP-42). The subpage replacing it
+        # is HIG-08.
         self.model_row = Adw.ComboRow()
         self.model_row.set_title("Model")
         self._model_entries: list = []  # populated by _refresh_model_row()
         self._suppress_model_sync = False
 
-        # Notice widgets must exist *before* the first _refresh_model_row() call below:
-        # it calls _update_notices(), which reads these (WHISP-42 audit BLOCKER #1 —
-        # previously built after _refresh_model_row(), causing an AttributeError on
-        # every dialog open).
+        # Notice widgets must exist before the first _refresh_model_row() call:
+        # it calls _update_notices(), which reads them (WHISP-42 audit BLOCKER #1).
         self._download_notice = Gtk.Label(wrap=True, xalign=0)
         self._download_notice.add_css_class("dim-label")
         self._download_notice.set_visible(False)
@@ -279,17 +381,13 @@ class SettingsDialog(Gtk.Window):
         self._license_notice.set_visible(False)
 
         # Shown when an Advanced->Engine switch has no entries for the configured
-        # language and _refresh_model_row() fell back to that engine's full list
-        # (model_picker_logic.entries_for_engine, WHISP-42 audit HIGH #2).
+        # language and _refresh_model_row() fell back to that engine's full list.
         self._language_fallback_notice = Gtk.Label(wrap=True, xalign=0)
         self._language_fallback_notice.add_css_class("dim-label")
         self._language_fallback_notice.set_visible(False)
 
-        # In-app model download row (WHISP-68): Download button, progress bar,
-        # Cancel, and an error label. Visibility/content is entirely driven by
+        # In-app model download row (WHISP-68), driven entirely by
         # download_logic.compute_ui_state() -- see _update_download_row().
-        # State must also exist before _refresh_model_row() below, since it
-        # ends in _update_notices() -> _update_download_row().
         self._download_client = None
         self._downloading = False
         self._download_active_entry: Optional[tuple] = None  # (engine, name)
@@ -313,17 +411,6 @@ class SettingsDialog(Gtk.Window):
         self._download_error_label.add_css_class("error")
         self._download_error_label.set_visible(False)
 
-        self._refresh_model_row()
-        self._model_list_box.append(self.model_row)
-        page.append(self._model_list_box)
-        page.append(self._download_notice)
-        page.append(self._download_row_box)
-        page.append(self._download_error_label)
-        page.append(self._license_notice)
-        page.append(self._language_fallback_notice)
-
-        self.model_row.connect("notify::selected", self._on_model_row_changed)
-
         # Advanced override: Engine, Device, Compute type (WHISP-42)
         self.advanced_row = Adw.ExpanderRow()
         self.advanced_row.set_title("Advanced")
@@ -335,396 +422,336 @@ class SettingsDialog(Gtk.Window):
         self.engine_row.set_model(
             Gtk.StringList.new([catalog.ENGINES[k] for k in self._engine_keys])
         )
-        if self._config.model.engine in self._engine_keys:
-            self.engine_row.set_selected(self._engine_keys.index(self._config.model.engine))
         self.advanced_row.add_row(self.engine_row)
 
         self.device_row = Adw.ComboRow()
         self.device_row.set_title("Device")
-        # Order must match model_picker_logic._DEVICE_OPTIONS = ("auto", "cpu", "cuda").
-        # "auto" previously had no row option and was silently coerced to "cpu" on
-        # Save (WHISP-42 audit MEDIUM #5) — it's now a first-class, round-trippable
-        # choice.
-        self.device_row.set_model(Gtk.StringList.new(["Auto", "CPU", "CUDA (GPU)"]))
-        self.device_row.set_selected(device_row_index(self._config.model.device))
+        self._bind_combo(self.device_row, "model.device", DEVICE_OPTIONS)
         self.advanced_row.add_row(self.device_row)
 
         self.compute_type_row = Adw.ComboRow()
-        self.compute_type_row.set_title("Compute type")
-        compute_types = ["int8", "float16", "float32"]  # mirrors config.validate()'s allowlist
-        self.compute_type_row.set_model(Gtk.StringList.new(compute_types))
-        self.compute_type_row.set_selected(
-            compute_types.index(self._config.model.compute_type)
-            if self._config.model.compute_type in compute_types
-            else 0
-        )
+        self.compute_type_row.set_title("Compute Type")
+        self._bind_combo(self.compute_type_row, "model.compute_type", COMPUTE_TYPE_OPTIONS)
         self.advanced_row.add_row(self.compute_type_row)
 
-        self._model_list_box.append(self.advanced_row)
+        self._sync_model_rows()
 
-        self.engine_row.connect("notify::selected", self._on_engine_row_changed)
-        # Set initial compute-type sensitivity for whatever engine is configured, without
-        # triggering a spurious model-row repopulation (the row is already correctly
-        # populated from _refresh_model_row() above).
-        self._suppress_model_sync = True
-        try:
-            self._on_engine_row_changed(self.engine_row, None)
-        finally:
-            self._suppress_model_sync = False
-
-        # "View full catalog…" — reachable even when the language/device filter above
-        # hides a model the user still wants to pick manually (WHISP-42 §1.6).
+        # "View Full Catalog…" — reachable even when the language/device filter
+        # hides a model the user still wants to pick (WHISP-42 §1.6).
         catalog_row = Adw.ActionRow()
-        catalog_row.set_title("View full catalog…")
+        catalog_row.set_title("View Full Catalog…")
         catalog_row.set_activatable(True)
         catalog_row.connect("activated", self._on_view_catalog_clicked)
-        self._model_list_box.append(catalog_row)
 
-        # Language (hidden - managed by main window dropdown now)
-        self.language_entry = Gtk.Entry()
-        self.language_entry.set_text(self._config.transcription.language or "")
-        self.language_entry.set_visible(False)  # Hidden, managed by main window
-
-        # --- Audio Section ---
-        audio_section = Gtk.Label(label="Audio Input")
-        audio_section.set_halign(Gtk.Align.START)
-        audio_section.add_css_class("heading")
-        audio_section.set_margin_top(12)
-        page.append(audio_section)
-
-        # Input device selector
-        device_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        device_label = Gtk.Label(label="Microphone:")
-        device_label.set_halign(Gtk.Align.START)
-        device_label.set_hexpand(True)
-
-        from ..audio import DeviceManager
-        self._devices = DeviceManager.list_input_devices()
-        device_names = [
-            f"{d.name}" + (" ⭐" if d.is_default else "")
-            for d in self._devices
-        ]
-
-        self.audio_device_dropdown = Gtk.DropDown.new_from_strings(device_names)
-
-        current_device_id = self._config.audio.device_id
-        if current_device_id is not None:
-            for i, device in enumerate(self._devices):
-                if device.id == current_device_id:
-                    self.audio_device_dropdown.set_selected(i)
-                    break
-        else:
-            for i, device in enumerate(self._devices):
-                if device.is_default:
-                    self.audio_device_dropdown.set_selected(i)
-                    break
-
-        device_box.append(device_label)
-        device_box.append(self.audio_device_dropdown)
-        page.append(device_box)
-
-        # --- Clipboard Section ---
-        clipboard_section = Gtk.Label(label="Clipboard")
-        clipboard_section.set_halign(Gtk.Align.START)
-        clipboard_section.add_css_class("heading")
-        clipboard_section.set_margin_top(12)
-        page.append(clipboard_section)
-
-        # Auto-copy
-        self.auto_copy_switch = Gtk.Switch()
-        self.auto_copy_switch.set_active(self._config.clipboard.auto_copy)
-
-        auto_copy_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        auto_copy_label = Gtk.Label(label="Auto-copy to clipboard:")
-        auto_copy_label.set_halign(Gtk.Align.START)
-        auto_copy_label.set_hexpand(True)
-
-        auto_copy_box.append(auto_copy_label)
-        auto_copy_box.append(self.auto_copy_switch)
-        page.append(auto_copy_box)
-
-        # Auto-paste
-        self.auto_paste_switch = Gtk.Switch()
-        self.auto_paste_switch.set_active(self._config.clipboard.auto_paste)
-
-        auto_paste_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        auto_paste_label = Gtk.Label(label="Auto-paste after transcription:")
-        auto_paste_label.set_halign(Gtk.Align.START)
-        auto_paste_label.set_hexpand(True)
-
-        auto_paste_box.append(auto_paste_label)
-        auto_paste_box.append(self.auto_paste_switch)
-        page.append(auto_paste_box)
-
-        # Terminal paste mode
-        self.terminal_paste_switch = Gtk.Switch()
-        self.terminal_paste_switch.set_active(
-            self._config.clipboard.paste_shortcut == "ctrl+shift+v"
+        # Language: same key as the main window's selector, kept in sync
+        # through ConfigChanged.
+        self.language_row = Adw.ComboRow()
+        self.language_row.set_title("Language")
+        self._language_options = language_options(self.binding.get("transcription.language"))
+        self._bind_combo(
+            self.language_row,
+            "transcription.language",
+            self._language_options,
+            after_apply=self._sync_model_rows,
         )
 
-        terminal_paste_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        terminal_paste_label = Gtk.Label(label="Paste into terminal (Ctrl+Shift+V):")
-        terminal_paste_label.set_halign(Gtk.Align.START)
-        terminal_paste_label.set_hexpand(True)
-        terminal_paste_label.set_tooltip_text(
-            "Use Ctrl+Shift+V instead of Ctrl+V — required for GNOME Terminal and other terminal emulators"
+        group.add(self.model_row)
+        group.add(self.language_row)
+        group.add(self.advanced_row)
+        group.add(catalog_row)
+        for widget in (
+            self._download_notice,
+            self._download_row_box,
+            self._download_error_label,
+            self._license_notice,
+            self._language_fallback_notice,
+        ):
+            widget.set_margin_top(6)
+            group.add(widget)
+
+        self.model_row.connect("notify::selected", self._on_model_row_changed)
+        self.engine_row.connect("notify::selected", self._on_engine_row_changed)
+        for key in ("model.engine", "model.name", "transcription.language"):
+            self.binding.watch(key, lambda _value: self._sync_model_rows())
+
+        page.add(group)
+
+    def _build_after_transcribing_group(self, page: "Adw.PreferencesPage") -> None:
+        group = Adw.PreferencesGroup()
+        group.set_title("After Transcribing")
+
+        self.auto_copy_row = self._switch_row("Copy to Clipboard")
+        self._bind_bool(self.auto_copy_row, "clipboard.auto_copy")
+        group.add(self.auto_copy_row)
+
+        self.auto_paste_row = Adw.ExpanderRow()
+        self.auto_paste_row.set_title("Paste Into Active Window")
+        self.auto_paste_row.set_subtitle("Types the text where the cursor is")
+        self.auto_paste_row.set_show_enable_switch(True)
+        self._bind_bool(self.auto_paste_row, "clipboard.auto_paste", prop="enable-expansion")
+
+        self.terminal_paste_row = self._switch_row(
+            "Use Terminal Shortcut (Ctrl+Shift+V)",
+            "Required by GNOME Terminal and other terminal emulators",
         )
-
-        terminal_paste_box.append(terminal_paste_label)
-        terminal_paste_box.append(self.terminal_paste_switch)
-        page.append(terminal_paste_box)
-
-        # Paste to captured window toggle
-        captured_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        captured_label = Gtk.Label(label="Paste to captured window")
-        captured_label.set_hexpand(True)
-        captured_label.set_halign(Gtk.Align.START)
-        captured_label.set_tooltip_text(
-            "Paste goes to the window active when you stopped recording, "
-            "even if you switch windows during transcription."
+        self._bind_bool(
+            self.terminal_paste_row,
+            "clipboard.paste_shortcut",
+            to_config=paste_shortcut_for,
+            from_config=uses_terminal_shortcut,
         )
-        self._paste_captured_switch = Gtk.Switch()
-        self._paste_captured_switch.set_active(self._config.clipboard.paste_to_captured_window)
-        captured_row.append(captured_label)
-        captured_row.append(self._paste_captured_switch)
-        page.append(captured_row)
+        self.auto_paste_row.add_row(self.terminal_paste_row)
 
-        # --- OSD Notifications Section ---
-        notifications_section = Gtk.Label(label="OSD Notifications")
-        notifications_section.set_halign(Gtk.Align.START)
-        notifications_section.add_css_class("heading")
-        notifications_section.set_margin_top(12)
-        page.append(notifications_section)
-
-        notifications_help = Gtk.Label(
-            label="Choose which desktop popups are shown while using WhisperAloud."
+        self.paste_captured_row = self._switch_row(
+            "Paste Into Window Where Recording Stopped",
+            "Even if you switch windows while the text is transcribed",
         )
-        notifications_help.set_halign(Gtk.Align.START)
-        notifications_help.add_css_class("dim-label")
-        page.append(notifications_help)
+        self._bind_bool(self.paste_captured_row, "clipboard.paste_to_captured_window")
+        self.auto_paste_row.add_row(self.paste_captured_row)
 
-        self.notifications_enabled_switch = Gtk.Switch()
-        self.notifications_enabled_switch.set_active(self._config.notifications.enabled)
-        self.notifications_enabled_switch.connect(
-            "notify::active", self._on_notifications_master_toggled
-        )
+        self.paste_backend_row = Adw.ComboRow()
+        self.paste_backend_row.set_title("Typing Method")
+        self.paste_backend_row.set_subtitle(PASTE_BACKEND_SUBTITLE)
+        self._bind_combo(self.paste_backend_row, "clipboard.paste_backend", PASTE_BACKEND_OPTIONS)
+        self.auto_paste_row.add_row(self.paste_backend_row)
 
-        notifications_enabled_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        notifications_enabled_label = Gtk.Label(label="Enable OSD notifications:")
-        notifications_enabled_label.set_halign(Gtk.Align.START)
-        notifications_enabled_label.set_hexpand(True)
-        notifications_enabled_box.append(notifications_enabled_label)
-        notifications_enabled_box.append(self.notifications_enabled_switch)
-        page.append(notifications_enabled_box)
+        self.paste_delay_row = self._spin_row("Paste Delay", "Milliseconds", 0, 5000, 10)
+        self._bind_spin(self.paste_delay_row, "clipboard.paste_delay_ms", _int)
+        self.auto_paste_row.add_row(self.paste_delay_row)
 
-        self.notification_recording_started_switch = Gtk.Switch()
-        self.notification_recording_started_switch.set_active(
-            self._config.notifications.recording_started
-        )
-        self.notification_recording_stopped_switch = Gtk.Switch()
-        self.notification_recording_stopped_switch.set_active(
-            self._config.notifications.recording_stopped
-        )
-        self.notification_transcription_completed_switch = Gtk.Switch()
-        self.notification_transcription_completed_switch.set_active(
-            self._config.notifications.transcription_completed
-        )
-        self.notification_error_switch = Gtk.Switch()
-        self.notification_error_switch.set_active(self._config.notifications.error)
+        group.add(self.auto_paste_row)
+        page.add(group)
 
-        recording_started_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        recording_started_label = Gtk.Label(label="Recording started:")
-        recording_started_label.set_halign(Gtk.Align.START)
-        recording_started_label.set_hexpand(True)
-        recording_started_box.append(recording_started_label)
-        recording_started_box.append(self.notification_recording_started_switch)
-        page.append(recording_started_box)
+    def _build_notifications_group(self, page: "Adw.PreferencesPage") -> None:
+        group = Adw.PreferencesGroup()
+        group.set_title("Notifications")
 
-        recording_stopped_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        recording_stopped_label = Gtk.Label(label="Recording stopped:")
-        recording_stopped_label.set_halign(Gtk.Align.START)
-        recording_stopped_label.set_hexpand(True)
-        recording_stopped_box.append(recording_stopped_label)
-        recording_stopped_box.append(self.notification_recording_stopped_switch)
-        page.append(recording_stopped_box)
+        self.notifications_row = Adw.ExpanderRow()
+        self.notifications_row.set_title("Desktop Notifications")
+        self.notifications_row.set_subtitle("Choose which notifications are shown")
+        self.notifications_row.set_show_enable_switch(True)
+        self._bind_bool(self.notifications_row, "notifications.enabled", prop="enable-expansion")
 
-        transcription_completed_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        transcription_completed_label = Gtk.Label(label="Transcription completed:")
-        transcription_completed_label.set_halign(Gtk.Align.START)
-        transcription_completed_label.set_hexpand(True)
-        transcription_completed_box.append(transcription_completed_label)
-        transcription_completed_box.append(self.notification_transcription_completed_switch)
-        page.append(transcription_completed_box)
+        self.notification_rows = {}
+        for key, title in (
+            ("notifications.recording_started", "Recording Started"),
+            ("notifications.recording_stopped", "Recording Stopped"),
+            ("notifications.transcription_completed", "Transcription Ready"),
+            ("notifications.error", "Errors"),
+        ):
+            row = self._switch_row(title)
+            self._bind_bool(row, key)
+            self.notifications_row.add_row(row)
+            self.notification_rows[key] = row
 
-        error_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        error_label = Gtk.Label(label="Errors:")
-        error_label.set_halign(Gtk.Align.START)
-        error_label.set_hexpand(True)
-        error_box.append(error_label)
-        error_box.append(self.notification_error_switch)
-        page.append(error_box)
+        group.add(self.notifications_row)
+        page.add(group)
 
-        self._set_notification_type_switches_sensitive(self._config.notifications.enabled)
+    def _build_shortcut_group(self, page: "Adw.PreferencesPage") -> None:
+        # A direct port of the previous section; the redesign is HIG-10.
+        group = Adw.PreferencesGroup()
+        group.set_title("Dictation Shortcut")
 
-        # --- Global Shortcut Section ---
-        hotkey_section = Gtk.Label(label="Global Shortcut")
-        hotkey_section.set_halign(Gtk.Align.START)
-        hotkey_section.add_css_class("heading")
-        hotkey_section.set_margin_top(12)
-        page.append(hotkey_section)
+        self.hotkey_accel_row = Adw.EntryRow()
+        self.hotkey_accel_row.set_title("Shortcut (e.g. &lt;Super&gt;&lt;Alt&gt;r)")
+        self._bind_entry(self.hotkey_accel_row, "hotkey.toggle_recording", self._validate_accel)
+        group.add(self.hotkey_accel_row)
 
-        # Status row: configured accel + backend hint
-        configured_accel = self._config.hotkey.toggle_recording or ""
-        status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        status_label = Gtk.Label(label="Global shortcut:")
-        status_label.set_halign(Gtk.Align.START)
-        status_label.set_hexpand(True)
-        status_value_label = Gtk.Label(label=configured_accel)
-        status_value_label.set_halign(Gtk.Align.END)
-        status_box.append(status_label)
-        status_box.append(status_value_label)
-        page.append(status_box)
-
-        # Accel entry row
-        accel_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        accel_label = Gtk.Label(label="Shortcut key:")
-        accel_label.set_halign(Gtk.Align.START)
-        accel_label.set_hexpand(True)
-        self.hotkey_accel_entry = Gtk.Entry()
-        self.hotkey_accel_entry.set_text(configured_accel)
-        self.hotkey_accel_entry.set_placeholder_text("<Super><Alt>r")
-        accel_box.append(accel_label)
-        accel_box.append(self.hotkey_accel_entry)
-        page.append(accel_box)
-
-        # Hotkey status row
-        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        backend_label = Gtk.Label(label="Backend status:")
-        backend_label.set_halign(Gtk.Align.START)
-        backend_label.set_hexpand(True)
         self._hotkey_status_label = Gtk.Label(label="")
-        self._hotkey_status_label.set_halign(Gtk.Align.END)
+        self._hotkey_status_label.add_css_class("dim-label")
         self._register_hotkey_btn = Gtk.Button(label="Check Status")
+        self._register_hotkey_btn.set_valign(Gtk.Align.CENTER)
         self._register_hotkey_btn.connect("clicked", self._on_register_hotkey_clicked)
-        status_row.append(backend_label)
-        status_row.append(self._hotkey_status_label)
-        status_row.append(self._register_hotkey_btn)
-        page.append(status_row)
+        status_row = Adw.ActionRow()
+        status_row.set_title("Backend Status")
+        status_row.add_suffix(self._hotkey_status_label)
+        status_row.add_suffix(self._register_hotkey_btn)
+        group.add(status_row)
 
-        # Help box (fallback for when portal is not available)
-        hotkey_help_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-
-        hotkey_help_label = Gtk.Label()
-        hotkey_help_label.set_markup(
-            "If registration fails, create a system keyboard shortcut\n"
-            "pointing to the command:  <tt>whisper-aloud toggle</tt>"
+        copy_button = Gtk.Button(label="Copy")
+        copy_button.set_valign(Gtk.Align.CENTER)
+        copy_button.connect("clicked", self._on_copy_command_clicked)
+        command_row = Adw.ActionRow()
+        command_row.set_title("Fallback Command")
+        command_row.set_subtitle(
+            "If registration fails, create a system keyboard shortcut that runs "
+            f"“{FALLBACK_COMMAND}”"
         )
-        hotkey_help_label.set_halign(Gtk.Align.START)
-        hotkey_help_label.set_wrap(True)
-        hotkey_help_label.set_xalign(0.0)
-        hotkey_help_label.add_css_class("dim-label")
+        command_row.add_suffix(copy_button)
+        group.add(command_row)
 
-        copy_cmd_button = Gtk.Button(label="Copy command")
-        copy_cmd_button.set_halign(Gtk.Align.START)
+        page.add(group)
 
-        def _on_copy_command_clicked(_btn: Gtk.Button) -> None:
-            display = Gdk.Display.get_default()
-            if display is not None:
-                display.get_clipboard().set("whisper-aloud toggle")
+    @staticmethod
+    def _validate_accel(text: str) -> Optional[str]:
+        if not text:
+            return None
+        parsed = Gtk.accelerator_parse(text)
+        ok = parsed[0] if isinstance(parsed, tuple) and len(parsed) == 3 else bool(parsed)
+        if not ok:
+            return f"“{text}” is not a valid shortcut (example: <Super><Alt>r)"
+        return None
 
-        copy_cmd_button.connect("clicked", _on_copy_command_clicked)
+    @staticmethod
+    def _on_copy_command_clicked(_button: Gtk.Button) -> None:
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.get_clipboard().set(FALLBACK_COMMAND)
 
-        hotkey_help_box.append(hotkey_help_label)
-        hotkey_help_box.append(copy_cmd_button)
-        page.append(hotkey_help_box)
+    def _on_register_hotkey_clicked(self, _btn: Gtk.Button) -> None:
+        """Check hotkey status and give actionable feedback."""
+        import os
 
-        # --- Startup Section (WHISP-87): applies immediately, see startup_section.py ---
-        self._startup_section = StartupSection(self._autostart_controller)
-        page.append(self._startup_section.widget)
+        client = self._client
+        try:
+            if client is None:
+                from whisper_aloud.service.client import WhisperAloudClient
 
+                client = WhisperAloudClient()
+            backend = client.get_status().get("hotkey_backend", "none")
+        except Exception:
+            self._hotkey_status_label.set_text("Daemon not running")
+            return
 
-        self.stack.add_titled(page, "general", "General")
+        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+
+        if backend == "keybinder":
+            self._hotkey_status_label.set_text("Active (keybinder)")
+        elif backend == "portal" and "GNOME" not in desktop:
+            # Portal works on KDE/wlroots
+            self._hotkey_status_label.set_text("Active (XDG Portal)")
+        elif "GNOME" in desktop:
+            # On GNOME, portal silently rejects native apps — use extension
+            self._hotkey_status_label.set_text("Use GNOME extension")
+        else:
+            self._hotkey_status_label.set_text("Set system shortcut manually")
+
+    # ── Speech model rows (WHISP-42 / WHISP-68), instant apply ──────────────
+
+    def _sync_model_rows(self) -> None:
+        """Re-render Model and Engine rows from the stored config."""
+        self._suppress_model_sync = True
+        try:
+            self._refresh_model_row()
+            engine = self.binding.get("model.engine")
+            if engine in self._engine_keys:
+                with self._quiet():
+                    self.engine_row.set_selected(self._engine_keys.index(engine))
+            self._update_compute_type_sensitivity()
+        finally:
+            self._suppress_model_sync = False
 
     def _refresh_model_row(
         self,
         preferred_engine: Optional[str] = None,
         preferred_name: Optional[str] = None,
     ) -> None:
-        """Repopulate the Model row's list from the catalog, filtered by the current
-        language/device, and (re)select an entry.
+        """Repopulate the Model row's list from the catalog, filtered by the
+        configured language/device, and (re)select an entry.
 
-        `preferred_engine` narrows the list to one engine's entries (used when the
-        Advanced→Engine row changes); `preferred_name` additionally pins the exact
-        entry to select (used when a catalog-view row is explicitly chosen), bypassing
-        the default_index() recommendation fallback since the user already made an
-        explicit choice.
-
-        When both `preferred_engine` and `preferred_name` are given (an explicit
-        catalog-view pick), the language/device filter is bypassed entirely for that
-        engine's entries — the whole point of the full-catalog view (spec §1.6) is to
-        let the user cross a language filter that would otherwise hide the entry they
-        just chose (e.g. picking Parakeet from the catalog while language="ja").
-
-        When only `preferred_engine` is given (an Advanced->Engine switch), uses
-        model_picker_logic.entries_for_engine so a switch to an engine with zero
-        entries for the configured language falls back to that engine's full list
-        instead of silently keeping the *previous* engine's entries on screen (and on
-        Save) — WHISP-42 audit HIGH #2. The language-fallback notice is shown/hidden
-        accordingly.
+        `preferred_engine` narrows the list to one engine's entries (an
+        Advanced→Engine change); with `preferred_name` too (an explicit
+        catalog-view pick) the language/device filter is bypassed for that
+        engine. Without either, the configured model is always listed (even
+        when the filter would hide it), since every selection applies at once.
         """
+        language = self.binding.get("transcription.language") or "auto"
+        device = self.binding.get("model.device") or "auto"
+        engine = self.binding.get("model.engine")
+        name = self.binding.get("model.name")
+
         used_language_fallback = False
         if preferred_engine is not None and preferred_name is not None:
             entries = catalog.models_for(preferred_engine)
         elif preferred_engine is not None:
             entries, used_language_fallback = entries_for_engine(
-                self._config.transcription.language, self._config.model.device, preferred_engine
+                language, device, preferred_engine
             )
         else:
-            entries = selectable_entries(
-                self._config.transcription.language, self._config.model.device
-            )
+            entries = include_current_entry(selectable_entries(language, device), engine, name)
 
         self._model_entries = entries
         if used_language_fallback:
             self._language_fallback_notice.set_text(
-                f"No {self._config.transcription.language} models for this engine; showing all."
+                f"No {language} models for this engine; showing all."
             )
         self._language_fallback_notice.set_visible(used_language_fallback)
 
-        # TODO(WHISP-42-followup): per-row badge pills via Gtk.SignalListItemFactory,
-        # per spec §1.2 — badges are plain text appended to the label for now
-        # (model_picker_logic.row_label), not separate pill widgets.
         labels = [row_label(e, download_state_for(e).downloaded) for e in entries]
-        self.model_row.set_model(Gtk.StringList.new(labels))
+        with self._quiet():
+            self.model_row.set_model(Gtk.StringList.new(labels))
 
-        if not entries:
-            self.model_row.set_selected(Gtk.INVALID_LIST_POSITION)
-            self._update_notices()
-            return
+            if not entries:
+                self.model_row.set_selected(Gtk.INVALID_LIST_POSITION)
+                self._update_notices()
+                return
 
-        if preferred_name is not None:
-            index = next((i for i, e in enumerate(entries) if e.name == preferred_name), 0)
-        else:
-            index = default_index(
-                entries,
-                self._config.model.engine,
-                self._config.model.name,
-                self._config.transcription.language,
-            )
-        self.model_row.set_selected(index)
+            if preferred_name is not None:
+                index = next((i for i, e in enumerate(entries) if e.name == preferred_name), 0)
+            else:
+                index = default_index(entries, engine, name, language)
+            self.model_row.set_selected(index)
         self._update_notices()
 
+    def _update_compute_type_sensitivity(self) -> None:
+        index = self.engine_row.get_selected()
+        engine = self._engine_keys[index] if 0 <= index < len(self._engine_keys) else None
+        self.compute_type_row.set_sensitive(engine != "parakeet")
+        self.compute_type_row.set_tooltip_text(
+            "Not used by this engine" if engine == "parakeet" else None
+        )
+
+    def _apply_model_entry(self, entry: "catalog.ModelEntry") -> None:
+        engine, name = save_selection(entry.engine, entry.name)
+        if not self.binding.apply({"model.engine": engine, "model.name": name}).ok:
+            self._sync_model_rows()
+
+    def _on_model_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
+        """A Model row selection change: notices, Engine sync, apply."""
+        self._update_notices()
+        if self._suppress_model_sync or self._syncing:
+            return
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        # entry.engine may be missing from the Engine row (e.g. a catalog entry
+        # whose engine isn't in catalog.ENGINES) — WHISP-42 audit MEDIUM #3.
+        if entry.engine in self._engine_keys:
+            self._suppress_model_sync = True
+            try:
+                with self._quiet():
+                    self.engine_row.set_selected(self._engine_keys.index(entry.engine))
+                self._update_compute_type_sensitivity()
+            finally:
+                self._suppress_model_sync = False
+        self._apply_model_entry(entry)
+
+    def _on_engine_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
+        """An Advanced→Engine change: list that engine's models and apply the
+        preselected one (compute type is unused by sherpa-onnx/Parakeet)."""
+        self._update_compute_type_sensitivity()
+        if self._suppress_model_sync or self._syncing:
+            return
+        engine = self._engine_keys[row.get_selected()]
+        self._suppress_model_sync = True
+        try:
+            self._refresh_model_row(preferred_engine=engine)
+        finally:
+            self._suppress_model_sync = False
+        entry = self._selected_entry()
+        if entry is not None:
+            self._apply_model_entry(entry)
+
     def _update_notices(self) -> None:
-        """Refresh the not-downloaded and license notices for the currently selected
-        Model row entry."""
-        index = self.model_row.get_selected()
-        if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
+        """Refresh the not-downloaded and license notices for the currently
+        selected Model row entry."""
+        entry = self._selected_entry()
+        if entry is None:
             self._download_notice.set_visible(False)
             self._license_notice.set_visible(False)
             self._update_download_row()
             return
 
-        entry = self._model_entries[index]
         state = download_state_for(entry)
         if needs_download_note(state.downloaded):
             self._download_notice.set_text(
@@ -745,18 +772,17 @@ class SettingsDialog(Gtk.Window):
 
         self._update_download_row()
 
-    # ─── WHISP-68: in-app model download ───────────────────────────────────
-
     def _selected_entry(self) -> Optional["catalog.ModelEntry"]:
         index = self.model_row.get_selected()
         if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
+            return None
+        if index >= len(self._model_entries):
             return None
         return self._model_entries[index]
 
     def _get_download_client(self):
         """Lazily create (and keep) one WhisperAloudClient for the download
-        signals, subscribing to DownloadProgress/DownloadFinished exactly
-        once -- mirrors _on_register_hotkey_clicked's lazy-client pattern."""
+        signals, subscribing to DownloadProgress/DownloadFinished once."""
         if self._download_client is None:
             from whisper_aloud.service.client import WhisperAloudClient
 
@@ -767,9 +793,8 @@ class SettingsDialog(Gtk.Window):
         return self._download_client
 
     def _update_download_row(self) -> None:
-        """Render the download row for the currently selected Model-row entry,
-        entirely from download_logic.compute_ui_state() -- no visibility/label
-        decision is made here directly."""
+        """Render the download row for the selected Model-row entry, entirely
+        from download_logic.compute_ui_state()."""
         entry = self._selected_entry()
         if entry is None:
             self._download_row_box.set_visible(False)
@@ -804,27 +829,19 @@ class SettingsDialog(Gtk.Window):
         if entry is None:
             return
         if requires_license_consent(entry):
-            # WHISP-68 audit BLOCKER #1: a needs_review or non-standard-license
-            # entry must never start downloading from a plain click -- show an
-            # explicit consent dialog first. Only its "Accept and download"
-            # response calls _start_download(..., accept_license=True); every
-            # other outcome (Cancel, Esc, closing the dialog) sends nothing at
-            # all, not even accept_license=False.
+            # WHISP-68 audit BLOCKER #1: never download a needs_review or
+            # non-standard-license entry from a plain click.
             self._show_license_consent_dialog(entry)
             return
         self._start_download(entry, accept_license=False)
 
-    # Findings doc referenced by the license-consent dialog for the one
-    # catalog entry that needs it today (nemotron-streaming's OpenMDW-1.1
-    # pending-review license). Relative to the repo root (settings_dialog.py
-    # lives at src/whisper_aloud/ui/, three parents up).
+    # Findings doc referenced by the license-consent dialog. Relative to the
+    # repo root (this file lives at src/whisper_aloud/ui/, three parents up).
     _LICENSE_FINDINGS_DOC = "docs/superpowers/specs/2026-10-01-whisp55-nemotron-sherpa-findings.md"
 
     def _license_findings_doc_markup(self) -> str:
-        """A clickable `file://` link to the findings doc when it can be
-        resolved on disk (a source checkout), else just its repo-relative
-        path as plain text (e.g. an installed package without docs/) --
-        never a broken link."""
+        """A clickable `file://` link to the findings doc in a source checkout,
+        else its repo-relative path as plain text -- never a broken link."""
         repo_root = Path(__file__).resolve().parents[3]
         doc_path = repo_root / self._LICENSE_FINDINGS_DOC
         escaped_rel = GLib.markup_escape_text(self._LICENSE_FINDINGS_DOC)
@@ -833,11 +850,7 @@ class SettingsDialog(Gtk.Window):
         return escaped_rel
 
     def _show_license_consent_dialog(self, entry: "catalog.ModelEntry") -> None:
-        """Explicit license-consent dialog for a needs_review/non-standard-
-        license entry (WHISP-68 audit BLOCKER #1). Shows the model label, the
-        license id, the pending-review status, and a link to the findings doc
-        (or the license itself) -- never started implicitly from a notice
-        merely being visible."""
+        """Explicit license-consent dialog (WHISP-68 audit BLOCKER #1)."""
         status = (
             "This model's license is pending human legal review."
             if entry.needs_review
@@ -883,12 +896,6 @@ class SettingsDialog(Gtk.Window):
         self._update_download_row()
 
     def _on_download_cancel_clicked(self, _button: Gtk.Button) -> None:
-        # Cancel is only ever visible/clickable while a download this dialog
-        # itself started is in flight (see compute_ui_state's cancel_visible),
-        # so a client always already exists by the time this can fire --
-        # still routed through _get_download_client() (not self._download_client
-        # directly) so it's consistent with _on_download_clicked and trivially
-        # fakeable in tests.
         self._get_download_client().cancel_download()
 
     def _on_download_progress_signal(
@@ -907,53 +914,14 @@ class SettingsDialog(Gtk.Window):
         self._downloading = False
         self._download_progress_state = None
         self._download_error = None if ok else (error or "Download failed")
-        # Prefer refreshing the download state after DownloadFinished over
-        # tracking "downloaded" locally -- re-derives it from disk via
-        # model_picker_logic.download_state_for (the single source of
-        # truth), which also keeps the row's badges/notices consistent.
-        self._refresh_model_row()
-
-    def _on_model_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
-        """Handle a (user- or programmatically-driven) Model row selection change."""
-        self._update_notices()
-        if self._suppress_model_sync:
-            return
-        index = row.get_selected()
-        if not self._model_entries or index == Gtk.INVALID_LIST_POSITION or index < 0:
-            return
-        entry = self._model_entries[index]
-        # Guard like _on_catalog_entry_chosen does: entry.engine may not be in
-        # self._engine_keys for a catalog entry whose engine isn't registered in
-        # catalog.ENGINES yet (e.g. WHISP-56's nemotron-streaming) — WHISP-42 audit
-        # MEDIUM #3. Such an entry is reachable via the full-catalog view even though
-        # it's never in the Advanced->Engine dropdown.
-        if hasattr(self, "engine_row") and entry.engine in self._engine_keys:
-            self._suppress_model_sync = True
-            try:
-                self.engine_row.set_selected(self._engine_keys.index(entry.engine))
-            finally:
-                self._suppress_model_sync = False
-
-    def _on_engine_row_changed(self, row: "Adw.ComboRow", _pspec: object) -> None:
-        """Handle an Advanced→Engine row change: repopulate/re-sync the Model row and
-        update the Compute type row's sensitivity (sherpa-onnx/Parakeet ignores it)."""
-        engine = self._engine_keys[row.get_selected()]
-        self.compute_type_row.set_sensitive(engine != "parakeet")
-        self.compute_type_row.set_tooltip_text(
-            "Not used by this engine" if engine == "parakeet" else None
-        )
-        if self._suppress_model_sync:
-            return
-        self._suppress_model_sync = True
-        try:
-            self._refresh_model_row(preferred_engine=engine)
-        finally:
-            self._suppress_model_sync = False
+        # Re-derive "downloaded" from disk (model_picker_logic.download_state_for).
+        self._sync_model_rows()
 
     def _on_view_catalog_clicked(self, _row: "Adw.ActionRow") -> None:
-        """Open a read-only window listing every catalog.entries() row, unfiltered by
-        language/device — the only way to cross the Model row's language filter."""
-        window = Gtk.Window(transient_for=self, modal=True)
+        """A read-only window listing every catalog entry, unfiltered by
+        language/device — the only way to cross the Model row's language
+        filter. Replaced by a subpage in HIG-08."""
+        window = Gtk.Window(transient_for=self._transient_window(), modal=True)
         window.set_title("Model Catalog")
         window.set_default_size(560, 480)
 
@@ -984,760 +952,197 @@ class SettingsDialog(Gtk.Window):
     def _on_catalog_entry_chosen(
         self, _row: "Adw.ActionRow", entry: "catalog.ModelEntry", window: Gtk.Window
     ) -> None:
-        """Honor an explicit catalog-view pick: select that exact entry (bypassing the
-        default_index() recommendation fallback) and sync Advanced→Engine to match."""
+        """Honor an explicit catalog-view pick: show and apply that exact entry."""
         window.close()
         self._suppress_model_sync = True
         try:
             self._refresh_model_row(preferred_engine=entry.engine, preferred_name=entry.name)
             if entry.engine in self._engine_keys:
-                self.engine_row.set_selected(self._engine_keys.index(entry.engine))
+                with self._quiet():
+                    self.engine_row.set_selected(self._engine_keys.index(entry.engine))
+            self._update_compute_type_sensitivity()
         finally:
             self._suppress_model_sync = False
         self._update_notices()
-        self._mark_dirty()
+        self._apply_model_entry(entry)
 
-    def _set_notification_type_switches_sensitive(self, enabled: bool) -> None:
-        """Enable/disable per-type notification switches from master toggle."""
-        self.notification_recording_started_switch.set_sensitive(enabled)
-        self.notification_recording_stopped_switch.set_sensitive(enabled)
-        self.notification_transcription_completed_switch.set_sensitive(enabled)
-        self.notification_error_switch.set_sensitive(enabled)
+    # ── Audio page (direct port; redesign is HIG-09) ────────────────────────
 
-    def _on_notifications_master_toggled(self, switch: Gtk.Switch, _param: object) -> None:
-        """Handle master notifications toggle changes."""
-        self._set_notification_type_switches_sensitive(switch.get_active())
+    def _add_audio_page(self) -> None:
+        page = Adw.PreferencesPage()
+        page.set_title("Audio")
+        page.set_icon_name("audio-input-microphone-symbolic")
+        self.audio_page = page
 
-    def _capture_ui_state(self) -> dict:
-        """Capture current form state for unsaved-change detection."""
-        engine_idx = self.engine_row.get_selected()
-        return {
-            "model_engine": (
-                self._engine_keys[engine_idx]
-                if 0 <= engine_idx < len(self._engine_keys)
-                else ""
-            ),
-            "model_name": (
-                self._model_entries[self.model_row.get_selected()].name
-                if self._model_entries
-                and self.model_row.get_selected() != Gtk.INVALID_LIST_POSITION
-                else ""
-            ),
-            "model_device": self.device_row.get_selected(),
-            "model_compute_type": self.compute_type_row.get_selected(),
-            "language": self.language_entry.get_text(),
-            "audio_device": self.audio_device_dropdown.get_selected(),
-            "auto_copy": self.auto_copy_switch.get_active(),
-            "auto_paste": self.auto_paste_switch.get_active(),
-            "terminal_paste": self.terminal_paste_switch.get_active(),
-            "paste_captured": self._paste_captured_switch.get_active(),
-            "notifications_enabled": self.notifications_enabled_switch.get_active(),
-            "notif_start": self.notification_recording_started_switch.get_active(),
-            "notif_stop": self.notification_recording_stopped_switch.get_active(),
-            "notif_done": self.notification_transcription_completed_switch.get_active(),
-            "notif_error": self.notification_error_switch.get_active(),
-            "sample_rate": self.sample_rate_entry.get_text(),
-            "vad_enabled": self.vad_switch.get_active(),
-            "vad_threshold": self.vad_threshold_entry.get_text(),
-            "normalize": self.normalize_switch.get_active(),
-            "paste_delay": self.paste_delay_entry.get_text(),
-            "save_audio": self.save_audio_switch.get_active(),
-            "dedupe_audio": self.deduplicate_audio_switch.get_active(),
-            "auto_cleanup": self.auto_cleanup_switch.get_active(),
-            "edit_history": self.edit_history_switch.get_active(),
-            "cleanup_days": self.cleanup_days_entry.get_text(),
-            "max_entries": self.max_entries_entry.get_text(),
-            "db_path": self.db_path_entry.get_text(),
-            "audio_archive_path": self.audio_archive_entry.get_text(),
-            "hotkey_accel": self.hotkey_accel_entry.get_text(),
-        }
-
-    def _has_unsaved_changes(self) -> bool:
-        """Return True when current UI state differs from initial state."""
-        return has_unsaved_changes(self._initial_ui_state, self._capture_ui_state())
-
-    def _mark_dirty(self, *_args: object) -> None:
-        """Update dirty flag based on current form state."""
-        self._dirty = self._has_unsaved_changes()
-
-    def _connect_dirty_tracking(self) -> None:
-        """Connect form inputs to unsaved-change tracking."""
-        tracked_widgets = [
-            self.model_row,
-            self.engine_row,
-            self.device_row,
-            self.compute_type_row,
-            self.language_entry,
-            self.audio_device_dropdown,
-            self.auto_copy_switch,
-            self.auto_paste_switch,
-            self.terminal_paste_switch,
-            self._paste_captured_switch,
-            self.notifications_enabled_switch,
-            self.notification_recording_started_switch,
-            self.notification_recording_stopped_switch,
-            self.notification_transcription_completed_switch,
-            self.notification_error_switch,
-            self.sample_rate_entry,
-            self.vad_switch,
-            self.vad_threshold_entry,
-            self.normalize_switch,
-            self.paste_delay_entry,
-            self.save_audio_switch,
-            self.deduplicate_audio_switch,
-            self.auto_cleanup_switch,
-            self.edit_history_switch,
-            self.cleanup_days_entry,
-            self.max_entries_entry,
-            self.db_path_entry,
-            self.audio_archive_entry,
-            self.hotkey_accel_entry,
-        ]
-
-        for widget in tracked_widgets:
-            if isinstance(widget, Gtk.Switch):
-                widget.connect("notify::active", self._mark_dirty)
-            elif isinstance(widget, (Gtk.DropDown, Adw.ComboRow)):
-                widget.connect("notify::selected", self._mark_dirty)
-            elif isinstance(widget, Gtk.Entry):
-                widget.connect("changed", self._mark_dirty)
-
-    def _add_history_page(self) -> None:
-        """Add History & Storage settings page."""
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_vexpand(True)
-
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_margin_start(24)
-        page.set_margin_end(24)
-        page.set_margin_top(24)
-        page.set_margin_bottom(24)
-        scrolled.set_child(page)
-
-        # --- History Behaviour ---
-        behaviour_section = Gtk.Label(label="History Behaviour")
-        behaviour_section.set_halign(Gtk.Align.START)
-        behaviour_section.add_css_class("heading")
-        page.append(behaviour_section)
-
-        # Allow editing transcriptions
-        self.edit_history_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.edit_history_switch.set_active(self._config.persistence.edit_history_enabled)
-
-        edit_history_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        edit_history_label = Gtk.Label(label="Allow editing transcriptions:")
-        edit_history_label.set_halign(Gtk.Align.START)
-        edit_history_label.set_hexpand(True)
-        edit_history_box.append(edit_history_label)
-        edit_history_box.append(self.edit_history_switch)
-        page.append(edit_history_box)
-
-        # Auto-cleanup toggle
-        self.auto_cleanup_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.auto_cleanup_switch.set_active(self._config.persistence.auto_cleanup_enabled)
-
-        cleanup_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        cleanup_label = Gtk.Label(label="Auto-cleanup old entries:")
-        cleanup_label.set_halign(Gtk.Align.START)
-        cleanup_label.set_hexpand(True)
-        cleanup_box.append(cleanup_label)
-        cleanup_box.append(self.auto_cleanup_switch)
-        page.append(cleanup_box)
-
-        # Cleanup after N days
-        cleanup_days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        cleanup_days_label = Gtk.Label(label="Cleanup after (days):")
-        cleanup_days_label.set_halign(Gtk.Align.START)
-        cleanup_days_label.set_hexpand(True)
-        self.cleanup_days_entry = Gtk.Entry()
-        if self._config.persistence:
-            self.cleanup_days_entry.set_text(str(self._config.persistence.auto_cleanup_days))
-        else:
-            self.cleanup_days_entry.set_text("90")
-        cleanup_days_box.append(cleanup_days_label)
-        cleanup_days_box.append(self.cleanup_days_entry)
-        page.append(cleanup_days_box)
-
-        # Max entries
-        max_entries_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        max_entries_label = Gtk.Label(label="Maximum entries:")
-        max_entries_label.set_halign(Gtk.Align.START)
-        max_entries_label.set_hexpand(True)
-        self.max_entries_entry = Gtk.Entry()
-        if self._config.persistence:
-            self.max_entries_entry.set_text(str(self._config.persistence.max_entries))
-        else:
-            self.max_entries_entry.set_text("10000")
-        max_entries_box.append(max_entries_label)
-        max_entries_box.append(self.max_entries_entry)
-        page.append(max_entries_box)
-
-        # --- Audio Archive ---
-        audio_section = Gtk.Label(label="Audio Archive")
-        audio_section.set_halign(Gtk.Align.START)
-        audio_section.add_css_class("heading")
-        audio_section.set_margin_top(12)
-        page.append(audio_section)
-
-        # Save audio recordings
-        self.save_audio_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.save_audio_switch.set_active(self._config.persistence.save_audio)
-
-        save_audio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        save_audio_label = Gtk.Label(label="Save audio recordings:")
-        save_audio_label.set_halign(Gtk.Align.START)
-        save_audio_label.set_hexpand(True)
-        save_audio_box.append(save_audio_label)
-        save_audio_box.append(self.save_audio_switch)
-        page.append(save_audio_box)
-
-        # Deduplicate audio
-        self.deduplicate_audio_switch = Gtk.Switch()
-        if self._config.persistence:
-            self.deduplicate_audio_switch.set_active(self._config.persistence.deduplicate_audio)
-
-        dedupe_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        dedupe_label = Gtk.Label(label="Deduplicate audio:")
-        dedupe_label.set_halign(Gtk.Align.START)
-        dedupe_label.set_hexpand(True)
-        dedupe_box.append(dedupe_label)
-        dedupe_box.append(self.deduplicate_audio_switch)
-        page.append(dedupe_box)
-
-        # --- Storage Paths ---
-        paths_section = Gtk.Label(label="Storage Paths")
-        paths_section.set_halign(Gtk.Align.START)
-        paths_section.add_css_class("heading")
-        paths_section.set_margin_top(12)
-        page.append(paths_section)
-
-        # Database path
-        db_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        db_path_label = Gtk.Label(label="Database path:")
-        db_path_label.set_halign(Gtk.Align.START)
-        db_path_label.set_hexpand(True)
-        self.db_path_entry = Gtk.Entry()
-        if self._config.persistence and self._config.persistence.db_path:
-            self.db_path_entry.set_text(str(self._config.persistence.db_path))
-        else:
-            self.db_path_entry.set_text(
-                str(user_data_dir() / "history.db")
-            )
-        self.db_path_entry.set_hexpand(True)
-        db_path_box.append(db_path_label)
-        db_path_box.append(self.db_path_entry)
-        page.append(db_path_box)
-
-        # Audio archive path
-        audio_path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        audio_path_label = Gtk.Label(label="Audio archive path:")
-        audio_path_label.set_halign(Gtk.Align.START)
-        audio_path_label.set_hexpand(True)
-        self.audio_archive_entry = Gtk.Entry()
-        if self._config.persistence and self._config.persistence.audio_archive_path:
-            self.audio_archive_entry.set_text(str(self._config.persistence.audio_archive_path))
-        else:
-            self.audio_archive_entry.set_text(
-                str(user_data_dir() / "audio")
-            )
-        self.audio_archive_entry.set_hexpand(True)
-        audio_path_box.append(audio_path_label)
-        audio_path_box.append(self.audio_archive_entry)
-        page.append(audio_path_box)
-
-        self.stack.add_titled(scrolled, "history", "History")
-
-    def _add_advanced_page(self) -> None:
-        """Add advanced settings page."""
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_vexpand(True)
-
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_margin_start(24)
-        page.set_margin_end(24)
-        page.set_margin_top(24)
-        page.set_margin_bottom(24)
-        scrolled.set_child(page)
-
-        # --- Audio Processing Section ---
-        # (Compute device moved to Settings → General → Model → Advanced, WHISP-42 —
-        # it's now grouped with Engine/Compute type as a single manual-override block.)
-        audio_section = Gtk.Label(label="Audio Processing")
-        audio_section.set_halign(Gtk.Align.START)
-        audio_section.add_css_class("heading")
-        page.append(audio_section)
-
-        # Sample rate
-        rate_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        rate_label = Gtk.Label(label="Sample rate (Hz):")
-        rate_label.set_halign(Gtk.Align.START)
-        rate_label.set_hexpand(True)
-
-        self.sample_rate_entry = Gtk.Entry()
-        self.sample_rate_entry.set_text(str(self._config.audio.sample_rate))
-
-        rate_box.append(rate_label)
-        rate_box.append(self.sample_rate_entry)
-        page.append(rate_box)
-
-        # VAD
-        self.vad_switch = Gtk.Switch()
-        self.vad_switch.set_active(self._config.audio.vad_enabled)
-
-        vad_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        vad_label = Gtk.Label(label="Voice activity detection:")
-        vad_label.set_halign(Gtk.Align.START)
-        vad_label.set_hexpand(True)
-
-        vad_box.append(vad_label)
-        vad_box.append(self.vad_switch)
-        page.append(vad_box)
-
-        # VAD threshold
-        threshold_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        threshold_label = Gtk.Label(label="VAD threshold:")
-        threshold_label.set_halign(Gtk.Align.START)
-        threshold_label.set_hexpand(True)
-
-        self.vad_threshold_entry = Gtk.Entry()
-        self.vad_threshold_entry.set_text(str(self._config.audio.vad_threshold))
-
-        threshold_box.append(threshold_label)
-        threshold_box.append(self.vad_threshold_entry)
-        page.append(threshold_box)
-
-        # Normalize
-        self.normalize_switch = Gtk.Switch()
-        self.normalize_switch.set_active(self._config.audio.normalize_audio)
-
-        normalize_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        normalize_label = Gtk.Label(label="Normalize audio:")
-        normalize_label.set_halign(Gtk.Align.START)
-        normalize_label.set_hexpand(True)
-
-        normalize_box.append(normalize_label)
-        normalize_box.append(self.normalize_switch)
-        page.append(normalize_box)
-
-        # Paste delay
-        delay_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        delay_label = Gtk.Label(label="Paste delay (ms):")
-        delay_label.set_halign(Gtk.Align.START)
-        delay_label.set_hexpand(True)
-
-        self.paste_delay_entry = Gtk.Entry()
-        self.paste_delay_entry.set_text(str(self._config.clipboard.paste_delay_ms))
-
-        delay_box.append(delay_label)
-        delay_box.append(self.paste_delay_entry)
-        page.append(delay_box)
-
-        # --- Audio Pipeline Section ---
-        pipeline_section = Gtk.Label(label="Audio Pipeline")
-        pipeline_section.set_halign(Gtk.Align.START)
-        pipeline_section.add_css_class("heading")
-        pipeline_section.set_margin_top(12)
-        page.append(pipeline_section)
-
-        # Noise gate
-        self.noise_gate_switch = Gtk.Switch()
-        self.noise_gate_switch.set_active(self._config.audio_processing.noise_gate_enabled)
-        ng_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        ng_label = Gtk.Label(label="Noise gate:")
-        ng_label.set_halign(Gtk.Align.START)
-        ng_label.set_hexpand(True)
-        ng_box.append(ng_label)
-        ng_box.append(self.noise_gate_switch)
-        page.append(ng_box)
-
-        # Noise gate threshold
-        ng_thresh_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        ng_thresh_label = Gtk.Label(label="Noise gate threshold (dB):")
-        ng_thresh_label.set_halign(Gtk.Align.START)
-        ng_thresh_label.set_hexpand(True)
-        self.noise_gate_threshold_entry = Gtk.Entry()
-        self.noise_gate_threshold_entry.set_text(str(self._config.audio_processing.noise_gate_threshold_db))
-        self.noise_gate_threshold_entry.set_width_chars(8)
-        ng_thresh_box.append(ng_thresh_label)
-        ng_thresh_box.append(self.noise_gate_threshold_entry)
-        page.append(ng_thresh_box)
-
-        # AGC
-        self.agc_switch = Gtk.Switch()
-        self.agc_switch.set_active(self._config.audio_processing.agc_enabled)
-        agc_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        agc_label = Gtk.Label(label="Auto gain control (AGC):")
-        agc_label.set_halign(Gtk.Align.START)
-        agc_label.set_hexpand(True)
-        agc_box.append(agc_label)
-        agc_box.append(self.agc_switch)
-        page.append(agc_box)
-
-        # AGC target
-        agc_target_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        agc_target_label = Gtk.Label(label="AGC target level (dBFS):")
-        agc_target_label.set_halign(Gtk.Align.START)
-        agc_target_label.set_hexpand(True)
-        self.agc_target_entry = Gtk.Entry()
-        self.agc_target_entry.set_text(str(self._config.audio_processing.agc_target_db))
-        self.agc_target_entry.set_width_chars(8)
-        agc_target_box.append(agc_target_label)
-        agc_target_box.append(self.agc_target_entry)
-        page.append(agc_target_box)
-
-        # AGC max gain
-        agc_max_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        agc_max_label = Gtk.Label(label="AGC max gain (dB):")
-        agc_max_label.set_halign(Gtk.Align.START)
-        agc_max_label.set_hexpand(True)
-        self.agc_max_gain_entry = Gtk.Entry()
-        self.agc_max_gain_entry.set_text(str(self._config.audio_processing.agc_max_gain_db))
-        self.agc_max_gain_entry.set_width_chars(8)
-        agc_max_box.append(agc_max_label)
-        agc_max_box.append(self.agc_max_gain_entry)
-        page.append(agc_max_box)
-
-        # Denoiser
-        self.denoising_switch = Gtk.Switch()
-        self.denoising_switch.set_active(self._config.audio_processing.denoising_enabled)
-        denoise_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        denoise_label = Gtk.Label(label="Noise reduction:")
-        denoise_label.set_halign(Gtk.Align.START)
-        denoise_label.set_hexpand(True)
-        denoise_box.append(denoise_label)
-        denoise_box.append(self.denoising_switch)
-        page.append(denoise_box)
-
-        # Denoiser strength
-        denoise_str_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        denoise_str_label = Gtk.Label(label="Noise reduction strength (0–1):")
-        denoise_str_label.set_halign(Gtk.Align.START)
-        denoise_str_label.set_hexpand(True)
-        self.denoising_strength_entry = Gtk.Entry()
-        self.denoising_strength_entry.set_text(str(self._config.audio_processing.denoising_strength))
-        self.denoising_strength_entry.set_width_chars(8)
-        denoise_str_box.append(denoise_str_label)
-        denoise_str_box.append(self.denoising_strength_entry)
-        page.append(denoise_str_box)
-
-        # Peak limiter
-        self.limiter_switch = Gtk.Switch()
-        self.limiter_switch.set_active(self._config.audio_processing.limiter_enabled)
-        limiter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        limiter_label = Gtk.Label(label="Peak limiter:")
-        limiter_label.set_halign(Gtk.Align.START)
-        limiter_label.set_hexpand(True)
-        limiter_box.append(limiter_label)
-        limiter_box.append(self.limiter_switch)
-        page.append(limiter_box)
-
-        # --- Recording Section ---
-        recording_section = Gtk.Label(label="Recording")
-        recording_section.set_halign(Gtk.Align.START)
-        recording_section.add_css_class("heading")
-        recording_section.set_margin_top(12)
-        page.append(recording_section)
-
-        # Pause media
-        self.pause_media_switch = Gtk.Switch()
-        self.pause_media_switch.set_active(self._config.recording_flow.pause_media)
-        pause_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        pause_label = Gtk.Label(label="Pause media on record:")
-        pause_label.set_halign(Gtk.Align.START)
-        pause_label.set_hexpand(True)
-        pause_box.append(pause_label)
-        pause_box.append(self.pause_media_switch)
-        page.append(pause_box)
-
-        # Raise mic gain
-        self.raise_mic_gain_switch = Gtk.Switch()
-        self.raise_mic_gain_switch.set_active(self._config.recording_flow.raise_mic_gain)
-        gain_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        gain_label = Gtk.Label(label="Raise mic gain on record:")
-        gain_label.set_halign(Gtk.Align.START)
-        gain_label.set_hexpand(True)
-        gain_box.append(gain_label)
-        gain_box.append(self.raise_mic_gain_switch)
-        page.append(gain_box)
-
-        # Target gain
-        target_gain_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        target_gain_label = Gtk.Label(label="Target mic gain (0.0–1.5):")
-        target_gain_label.set_halign(Gtk.Align.START)
-        target_gain_label.set_hexpand(True)
-        self.target_gain_entry = Gtk.Entry()
-        self.target_gain_entry.set_text(str(self._config.recording_flow.target_gain_linear))
-        self.target_gain_entry.set_width_chars(8)
-        target_gain_box.append(target_gain_label)
-        target_gain_box.append(self.target_gain_entry)
-        page.append(target_gain_box)
-
-        # --- Top bar indicator (GNOME Shell extension) ---
-        # Self-contained, not part of the saved config: its actions apply
-        # immediately (see ui/shell_extension_section.py).
-        self._shell_extension_section = _build_shell_extension_section()
-        if self._shell_extension_section is not None:
-            page.append(self._shell_extension_section.widget)
-
-        self.stack.add_titled(scrolled, "advanced", "Advanced")
-
-    def _on_save_clicked(self, button: Optional[Gtk.Button]) -> None:
-        """
-        Handle save button click.
-
-        Args:
-            button: The button that was clicked (or None from keyboard shortcut)
-        """
-        logger.info("Saving settings")
+        # Input
+        group = Adw.PreferencesGroup()
+        group.set_title("Input")
 
         try:
-            logger.debug("Updating model config")
-            # Update model config (catalog-driven — WHISP-42)
-            model_idx = self.model_row.get_selected()
-            if self._model_entries and model_idx != Gtk.INVALID_LIST_POSITION and model_idx >= 0:
-                selected_entry = self._model_entries[model_idx]
-                engine, name = save_selection(selected_entry.engine, selected_entry.name)
-                self._config.model.engine = engine
-                self._config.model.name = name
+            from ..audio import DeviceManager
 
-            self._config.model.device = device_for_index(self.device_row.get_selected())
-
-            compute_types = ["int8", "float16", "float32"]
-            selected_compute_type_idx = self.compute_type_row.get_selected()
-            if selected_compute_type_idx != -1 and selected_compute_type_idx < len(compute_types):
-                self._config.model.compute_type = compute_types[selected_compute_type_idx]
-
-            # Validate language code
-            lang = self.language_entry.get_text()
-            try:
-                self._config.transcription.language = normalize_language_input(lang)
-            except ValueError as e:
-                raise ValidationError(str(e)) from e
-
-            logger.debug("Updating audio config")
-            # Update audio config
-            selected_device_idx = self.audio_device_dropdown.get_selected()
-            # Check if a valid device is selected (index != -1)
-            if selected_device_idx != -1 and selected_device_idx < len(self._devices):
-                selected_device = self._devices[selected_device_idx]
-                # Store None for the default device so the daemon always uses
-                # the current system default (robust across hardware changes)
-                if selected_device.is_default:
-                    self._config.audio.device_id = None
-                else:
-                    self._config.audio.device_id = selected_device.id
-
-            # Update channels based on selected device
-            if self._config.audio.device_id is not None:
-                from ..audio import DeviceManager
-                device = DeviceManager.get_device_by_id(self._config.audio.device_id)
-                # If device is mono-only, force mono. If stereo-capable, respect config or default to stereo?
-                # For now, let's just ensure we don't ask for more channels than available
-                if device.channels < self._config.audio.channels:
-                    self._config.audio.channels = device.channels
-
-            # Validate audio settings
-            self._config.audio.sample_rate = InputValidator.validate_integer(
-                self.sample_rate_entry.get_text(),
-                min_value=8000,
-                max_value=48000,
-                field_name="Sample rate"
-            )
-            self._config.audio.vad_enabled = self.vad_switch.get_active()
-            self._config.audio.vad_threshold = InputValidator.validate_float(
-                self.vad_threshold_entry.get_text(),
-                min_value=0.0,
-                max_value=1.0,
-                field_name="VAD threshold"
-            )
-            self._config.audio.normalize_audio = self.normalize_switch.get_active()
-
-            logger.debug("Updating clipboard config")
-            # Update clipboard config
-            self._config.clipboard.auto_copy = self.auto_copy_switch.get_active()
-            self._config.clipboard.auto_paste = self.auto_paste_switch.get_active()
-            self._config.clipboard.paste_shortcut = (
-                "ctrl+shift+v" if self.terminal_paste_switch.get_active() else "ctrl+v"
-            )
-            self._config.clipboard.paste_to_captured_window = self._paste_captured_switch.get_active()
-            self._config.clipboard.paste_delay_ms = InputValidator.validate_integer(
-                self.paste_delay_entry.get_text(),
-                min_value=0,
-                max_value=5000,
-                field_name="Paste delay"
-            )
-
-            logger.debug("Updating notifications config")
-            if not self._config.notifications:
-                self._config.notifications = NotificationConfig()
-            self._config.notifications.enabled = self.notifications_enabled_switch.get_active()
-            self._config.notifications.recording_started = (
-                self.notification_recording_started_switch.get_active()
-            )
-            self._config.notifications.recording_stopped = (
-                self.notification_recording_stopped_switch.get_active()
-            )
-            self._config.notifications.transcription_completed = (
-                self.notification_transcription_completed_switch.get_active()
-            )
-            self._config.notifications.error = self.notification_error_switch.get_active()
-
-            logger.debug("Updating hotkey config")
-            self._config.hotkey.toggle_recording = self.hotkey_accel_entry.get_text().strip()
-
-            logger.debug("Updating persistence config")
-            # Update persistence config
-            if not self._config.persistence:
-                self._config.persistence = PersistenceConfig()
-
-            self._config.persistence.save_audio = self.save_audio_switch.get_active()
-            self._config.persistence.deduplicate_audio = self.deduplicate_audio_switch.get_active()
-            self._config.persistence.auto_cleanup_enabled = self.auto_cleanup_switch.get_active()
-            self._config.persistence.edit_history_enabled = self.edit_history_switch.get_active()
-            self._config.persistence.auto_cleanup_days = InputValidator.validate_integer(
-                self.cleanup_days_entry.get_text(),
-                min_value=1,
-                max_value=36500,  # ~100 years
-                field_name="Cleanup days"
-            )
-            self._config.persistence.max_entries = InputValidator.validate_integer(
-                self.max_entries_entry.get_text(),
-                min_value=100,
-                max_value=1000000,
-                field_name="Maximum entries"
-            )
-
-            # Update paths (empty string means use defaults)
-            db_path_text = self.db_path_entry.get_text().strip()
-            if db_path_text:
-                self._config.persistence.db_path = Path(db_path_text)
-
-            audio_path_text = self.audio_archive_entry.get_text().strip()
-            if audio_path_text:
-                self._config.persistence.audio_archive_path = Path(audio_path_text)
-
-            logger.debug("Updating audio pipeline config")
-            self._config.audio_processing.noise_gate_enabled = self.noise_gate_switch.get_active()
-            self._config.audio_processing.noise_gate_threshold_db = InputValidator.validate_float(
-                self.noise_gate_threshold_entry.get_text(),
-                min_value=-80.0,
-                max_value=0.0,
-                field_name="Noise gate threshold"
-            )
-            self._config.audio_processing.agc_enabled = self.agc_switch.get_active()
-            self._config.audio_processing.agc_target_db = InputValidator.validate_float(
-                self.agc_target_entry.get_text(),
-                min_value=-60.0,
-                max_value=0.0,
-                field_name="AGC target level"
-            )
-            self._config.audio_processing.agc_max_gain_db = InputValidator.validate_float(
-                self.agc_max_gain_entry.get_text(),
-                min_value=0.0,
-                max_value=40.0,
-                field_name="AGC max gain"
-            )
-            self._config.audio_processing.denoising_enabled = self.denoising_switch.get_active()
-            self._config.audio_processing.denoising_strength = InputValidator.validate_float(
-                self.denoising_strength_entry.get_text(),
-                min_value=0.0,
-                max_value=1.0,
-                field_name="Noise reduction strength"
-            )
-            self._config.audio_processing.limiter_enabled = self.limiter_switch.get_active()
-
-            logger.debug("Updating recording flow config")
-            self._config.recording_flow.pause_media = self.pause_media_switch.get_active()
-            self._config.recording_flow.raise_mic_gain = self.raise_mic_gain_switch.get_active()
-            self._config.recording_flow.target_gain_linear = InputValidator.validate_float(
-                self.target_gain_entry.get_text(),
-                min_value=0.0,
-                max_value=1.5,
-                field_name="Target mic gain"
-            )
-
-            # The Startup switch applies on its own (portal/autostart file);
-            # never overwrite its confirmed state with this dialog's copy.
-            if self._autostart_controller is not None:
-                self._config.startup.autostart_background = self._autostart_controller.enabled
-
-            logger.debug("Saving config to file")
-            # Save to file using config's built-in save method
-            self._config.save()
-
-            logger.debug("Triggering save callback")
-            # Trigger callback
-            if self._on_save_callback:
-                self._on_save_callback()
-
-            # Reset unsaved-change baseline after successful persistence.
-            self._initial_ui_state = self._capture_ui_state()
-            self._dirty = False
-
-            logger.debug("Showing success message")
-            # Show success message
-            self._show_message("Settings saved successfully", Gtk.MessageType.INFO, on_close=self.close)
-
-        except ValidationError as e:
-            logger.error(f"Validation error: {e}")
-            self._show_message(f"Invalid input: {e}", Gtk.MessageType.ERROR)
-        except ValueError as e:
-            logger.error(f"Invalid input: {e}")
-            self._show_message(f"Invalid input: {e}", Gtk.MessageType.ERROR)
+            self._devices = DeviceManager.list_input_devices()
         except Exception as e:
-            logger.error(f"Failed to save settings: {e}", exc_info=True)
-            self._show_message(f"Error saving settings: {e}", Gtk.MessageType.ERROR)
-
-
-    def _on_cancel_clicked(self, button: Optional[Gtk.Button]) -> None:
-        """
-        Handle cancel button click.
-
-        Args:
-            button: The button that was clicked (or None from keyboard shortcut)
-        """
-        logger.info("Settings dialog cancelled")
-        self.close()
-
-    def _show_message(self, message: str, message_type: Gtk.MessageType, on_close: Optional[callable] = None):
-        """
-        Show a message dialog.
-
-        Uses dialogs.show_dialog (WHISP-80) -- Adw.AlertDialog on libadwaita
-        >= 1.5, falling back to the deprecated Adw.MessageDialog on older
-        libadwaita, same as confirm()/_show_discard_confirmation(). Note
-        ``message_type`` no longer changes the dialog's icon/styling: neither
-        AlertDialog nor MessageDialog expose the Gtk.MessageType concept
-        Gtk.MessageDialog had; it is kept for API compatibility with callers.
-
-        Args:
-            message: Message to display
-            message_type: Type of message (INFO, WARNING, ERROR; currently
-                unused for styling)
-            on_close: Optional callback to run when dialog closes
-
-        Returns the constructed dialog (useful for tests).
-        """
-        del message_type  # kept for API compatibility; no Adw equivalent to apply it to
-
-        self._child_dialog_open = True
-
-        def _on_response(_response: str) -> None:
-            self._child_dialog_open = False
-            if on_close:
-                on_close()
-
-        return dialogs.show_dialog(
-            parent=self,
-            heading=message,
-            body="",
-            responses=[("ok", "OK", Adw.ResponseAppearance.DEFAULT)],
-            default_response="ok",
-            close_response="ok",
-            on_response=_on_response,
+            logger.warning(f"Could not list input devices: {e}")
+            self._devices = []
+        self._microphone_options = microphone_options(self._devices)
+        self.microphone_row = Adw.ComboRow()
+        self.microphone_row.set_title("Microphone")
+        self._bind_combo(
+            self.microphone_row,
+            "audio.device_id",
+            self._microphone_options,
+            changes_for=lambda device_id: microphone_changes(
+                device_id, self._devices, int(self.binding.get("audio.channels") or 1)
+            ),
         )
+        group.add(self.microphone_row)
+
+        self.pause_media_row = self._switch_row("Pause Media While Recording")
+        self._bind_bool(self.pause_media_row, "recording_flow.pause_media")
+        group.add(self.pause_media_row)
+
+        self.raise_mic_gain_row = self._switch_row("Raise Microphone Volume While Recording")
+        self._bind_bool(self.raise_mic_gain_row, "recording_flow.raise_mic_gain")
+        group.add(self.raise_mic_gain_row)
+
+        self.target_gain_row = self._spin_row(
+            "Target Microphone Volume", "From 0.0 to 1.5", 0.0, 1.5, 0.05, digits=2
+        )
+        self._bind_spin(self.target_gain_row, "recording_flow.target_gain_linear", _decimal(2))
+        group.add(self.target_gain_row)
+        page.add(group)
+
+        # Processing
+        group = Adw.PreferencesGroup()
+        group.set_title("Processing")
+
+        self.sample_rate_row = self._spin_row("Sample Rate", "Hz", 8000, 48000, 1000)
+        self._bind_spin(self.sample_rate_row, "audio.sample_rate", _int)
+        group.add(self.sample_rate_row)
+
+        self.vad_row = self._switch_row("Voice Activity Detection")
+        self._bind_bool(self.vad_row, "audio.vad_enabled")
+        group.add(self.vad_row)
+
+        self.vad_threshold_row = self._spin_row(
+            "Voice Detection Threshold", None, 0.01, 0.99, 0.01, digits=2
+        )
+        self._bind_spin(self.vad_threshold_row, "audio.vad_threshold", _decimal(2))
+        group.add(self.vad_threshold_row)
+
+        self.normalize_row = self._switch_row("Normalize Audio")
+        self._bind_bool(self.normalize_row, "audio.normalize_audio")
+        group.add(self.normalize_row)
+        page.add(group)
+
+        # Pipeline
+        group = Adw.PreferencesGroup()
+        group.set_title("Audio Pipeline")
+
+        self.noise_gate_row = self._switch_row("Noise Gate")
+        self._bind_bool(self.noise_gate_row, "audio_processing.noise_gate_enabled")
+        group.add(self.noise_gate_row)
+
+        self.noise_gate_threshold_row = self._spin_row(
+            "Noise Gate Threshold", "dB", -80.0, 0.0, 1.0, digits=1
+        )
+        self._bind_spin(
+            self.noise_gate_threshold_row, "audio_processing.noise_gate_threshold_db", _decimal(1)
+        )
+        group.add(self.noise_gate_threshold_row)
+
+        self.agc_row = self._switch_row("Automatic Gain Control")
+        self._bind_bool(self.agc_row, "audio_processing.agc_enabled")
+        group.add(self.agc_row)
+
+        self.agc_target_row = self._spin_row("Gain Target Level", "dBFS", -60.0, 0.0, 1.0, digits=1)
+        self._bind_spin(self.agc_target_row, "audio_processing.agc_target_db", _decimal(1))
+        group.add(self.agc_target_row)
+
+        self.agc_max_gain_row = self._spin_row("Maximum Gain", "dB", 0.0, 40.0, 1.0, digits=1)
+        self._bind_spin(self.agc_max_gain_row, "audio_processing.agc_max_gain_db", _decimal(1))
+        group.add(self.agc_max_gain_row)
+
+        self.denoising_row = self._switch_row("Noise Reduction")
+        self._bind_bool(self.denoising_row, "audio_processing.denoising_enabled")
+        group.add(self.denoising_row)
+
+        self.denoising_strength_row = self._spin_row(
+            "Noise Reduction Strength", "From 0 to 1", 0.0, 1.0, 0.05, digits=2
+        )
+        self._bind_spin(
+            self.denoising_strength_row, "audio_processing.denoising_strength", _decimal(2)
+        )
+        group.add(self.denoising_strength_row)
+
+        self.limiter_row = self._switch_row("Peak Limiter")
+        self._bind_bool(self.limiter_row, "audio_processing.limiter_enabled")
+        group.add(self.limiter_row)
+        page.add(group)
+
+        self.add(page)
+
+    # ── History page (direct port; redesign is HIG-09) ──────────────────────
+
+    def _add_history_page(self) -> None:
+        page = Adw.PreferencesPage()
+        page.set_title("History")
+        page.set_icon_name("document-open-recent-symbolic")
+        self.history_page = page
+
+        group = Adw.PreferencesGroup()
+        group.set_title("History")
+
+        self.edit_history_row = self._switch_row("Allow Editing Transcriptions")
+        self._bind_bool(self.edit_history_row, "persistence.edit_history_enabled")
+        group.add(self.edit_history_row)
+
+        self.auto_cleanup_row = self._switch_row("Delete Old Transcriptions")
+        self._bind_bool(self.auto_cleanup_row, "persistence.auto_cleanup_enabled")
+        group.add(self.auto_cleanup_row)
+
+        self.cleanup_days_row = self._spin_row("Delete After", "Days", 1, 36500, 1)
+        self._bind_spin(self.cleanup_days_row, "persistence.auto_cleanup_days", _int)
+        group.add(self.cleanup_days_row)
+
+        self.max_entries_row = self._spin_row("Keep at Most", "Transcriptions", 100, 1000000, 100)
+        self._bind_spin(self.max_entries_row, "persistence.max_entries", _int)
+        group.add(self.max_entries_row)
+        page.add(group)
+
+        group = Adw.PreferencesGroup()
+        group.set_title("Audio Archive")
+
+        self.save_audio_row = self._switch_row("Save Audio Recordings")
+        self._bind_bool(self.save_audio_row, "persistence.save_audio")
+        group.add(self.save_audio_row)
+
+        self.deduplicate_audio_row = self._switch_row("Skip Duplicate Audio")
+        self._bind_bool(self.deduplicate_audio_row, "persistence.deduplicate_audio")
+        group.add(self.deduplicate_audio_row)
+        page.add(group)
+
+        group = Adw.PreferencesGroup()
+        group.set_title("Storage Paths")
+
+        self.db_path_row = Adw.EntryRow()
+        self.db_path_row.set_title("Database")
+        self._bind_entry(self.db_path_row, "persistence.db_path", self._validate_path)
+        group.add(self.db_path_row)
+
+        self.audio_archive_row = Adw.EntryRow()
+        self.audio_archive_row.set_title("Audio Archive Folder")
+        self._bind_entry(
+            self.audio_archive_row, "persistence.audio_archive_path", self._validate_path
+        )
+        group.add(self.audio_archive_row)
+        page.add(group)
+
+        self.add(page)
+
+    @staticmethod
+    def _validate_path(text: str) -> Optional[str]:
+        if not text:
+            return "Enter a path"
+        return None

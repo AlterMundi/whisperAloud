@@ -76,6 +76,13 @@ class _FakeClient:
     def on_level_update(self, callback):
         pass
 
+    def on_config_changed(self, callback):
+        """HIG-07: MainWindow keeps its config copy live through ConfigChanged."""
+        self._config_changed_cb = callback
+
+    def get_config(self):
+        return {}
+
     def on_error(self, callback):
         pass
 

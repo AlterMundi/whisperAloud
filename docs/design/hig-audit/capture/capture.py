@@ -361,56 +361,71 @@ def main() -> None:
             sw.close()
         pump(0.2)
 
-    # settings dialog
-    before = toplevels()
+    # Preferences dialog (HIG-07: Adw.PreferencesDialog, instant apply). It is
+    # an Adw.Dialog inside the main window, not a toplevel.
     win._on_settings_clicked(None)
-    sd = new_toplevel(before)
+    sd = getattr(win, "_preferences_dialog", None)
+    pump(0.6)
     if sd is not None:
-        pages = ["general", "history", "advanced"] if FULL else ["general"]
-        for i, page in enumerate(pages):
-            sd.stack.set_visible_child_name(page)
-            snap(sd, f"3{i}-settings-{page}")
+        pages = [("general", sd.general_page), ("audio", sd.audio_page),
+                 ("history", sd.history_page)]
+        if not FULL:
+            pages = pages[:1]
+        for i, (name, page) in enumerate(pages):
+            sd.set_visible_page(page)
+            snap(sd, f"3{i}-preferences-{name}", settle=0.4)
         if FULL:
-            sd.set_default_size(620, 2350)
-            pump(0.5)
-            for i, page in enumerate(pages):
-                sd.stack.set_visible_child_name(page)
-                snap(sd, f"3{i}-settings-{page}-full", settle=0.5)
-            sd.stack.set_visible_child_name("general")
-            sd.advanced_row.set_expanded(True)
-            snap(sd, "33-settings-general-model-advanced-expanded", settle=0.5)
-            sd.advanced_row.set_expanded(False)
-            sd.set_default_size(600, 700)
-            pump(0.4)
+            win.set_default_size(1000, 2350)
+            sd.set_content_height(2300)
+            pump(0.6)
+            for i, (name, page) in enumerate(pages):
+                sd.set_visible_page(page)
+                snap(sd, f"3{i}-preferences-{name}-full", settle=0.5)
+            sd.set_visible_page(sd.general_page)
+            # The harness daemon runs with auto_paste/notifications off; turn
+            # the two expanders on for the picture only (_quiet: nothing is
+            # sent to the daemon, so nothing can ever paste).
+            with sd._quiet():
+                sd.auto_paste_row.set_enable_expansion(True)
+                sd.notifications_row.set_enable_expansion(True)
+            for row in (sd.advanced_row, sd.auto_paste_row, sd.notifications_row):
+                row.set_expanded(True)
+            snap(sd, "33-preferences-general-expanded-full", settle=0.6)
+            for row in (sd.advanced_row, sd.auto_paste_row, sd.notifications_row):
+                row.set_expanded(False)
+            with sd._quiet():
+                sd.auto_paste_row.set_enable_expansion(False)
+                sd.notifications_row.set_enable_expansion(False)
+            win.set_default_size(900, 600)
+            sd.set_content_height(720)
+            pump(0.6)
             before2 = toplevels()
             sd._on_view_catalog_clicked(None)
             cat = new_toplevel(before2)
             if cat is not None:
-                snap(cat, "34-settings-model-catalog")
+                snap(cat, "34-preferences-model-catalog")
                 cat.close()
             pump(0.2)
-            # unsaved-changes confirmation
-            sd.auto_paste_switch.set_active(not sd.auto_paste_switch.get_active())
-            before3 = toplevels()
-            sd.close()
-            conf = new_toplevel(before3)
-            if conf is not None:
-                snap(conf, "35-settings-discard-confirm")
-                conf.close()
-            pump(0.3)
-            # save -> success alert
-            before4 = toplevels()
-            sd._on_save_clicked(None)
-            ok = new_toplevel(before4)
-            if ok is not None:
-                snap(ok, "36-settings-saved-alert")
-                ok.close()
-            pump(0.3)
-        try:
-            sd._allow_close = True
-            sd.close()
-        except Exception:
-            pass
+            # Inline validation: a malformed shortcut keeps the text, marks
+            # the row and shows a toast; nothing is sent to the daemon.
+            sd.hotkey_accel_row.set_text("<Bogus>@@")
+            sd.hotkey_accel_row.emit("apply")
+            sd.hotkey_accel_row.grab_focus()
+            snap(sd, "35-preferences-invalid-shortcut", settle=0.5)
+            sd.hotkey_accel_row.set_text(sd.binding.get("hotkey.toggle_recording") or "")
+            sd.hotkey_accel_row.remove_css_class("error")
+            if sd.last_toast is not None:
+                sd.last_toast.dismiss()
+            # Live update: another client changes a setting while the dialog
+            # is open (ConfigChanged), the row follows.
+            with sd._quiet():
+                sd.auto_paste_row.set_enable_expansion(True)  # picture only
+            sd.auto_paste_row.set_expanded(True)
+            _bus.get(BUS_NAME).SetConfig({"clipboard.paste_backend": GLib.Variant("s", "clipboard")})
+            wait_until(lambda: sd.binding.get("clipboard.paste_backend") == "clipboard", 5,
+                       "ConfigChanged in Preferences")
+            snap(sd, "36-preferences-live-update", settle=0.5)
+        sd.close()
         pump(0.3)
 
     # narrow width (metainfo promises display_length >= 360)

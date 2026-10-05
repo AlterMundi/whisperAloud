@@ -72,10 +72,15 @@ dictated into is no longer focused. Details:
 
 `paste_shortcut` applies to `ydotool`/`xdotool` and `remote-desktop` only;
 the extension picks its own layout-independent chord. To roll back to the
-0.3.0 behavior without reinstalling, set `"paste_backend":
-"remote-desktop"` in `config.json` (or run the daemon with
-`WHISPER_ALOUD_CLIPBOARD_PASTE_BACKEND=remote-desktop`) and reload the
-config.
+0.3.0 behavior without reinstalling, pick **Remote Desktop Portal** in
+Preferences → General → Paste Into Active Window → Typing Method (applies at
+once), or set `"paste_backend": "remote-desktop"` in `config.json` (or run
+the daemon with `WHISPER_ALOUD_CLIPBOARD_PASTE_BACKEND=remote-desktop`) and
+reload the config.
+
+Every row in Preferences applies immediately through the daemon's
+`SetConfig` (there is no Save button); a change made with the CLI or
+another window shows up in an open Preferences dialog right away.
 
 ## Input normalization (`input_gain`)
 
@@ -114,7 +119,7 @@ separate and unchanged. It raises the shared mic volume to
 |---|---|---|
 | `startup.autostart_background` | `false` | `WHISPER_ALOUD_STARTUP_AUTOSTART_BACKGROUND` |
 
-Set it from Settings → General → Startup, not by hand: the switch is what
+Set it from Preferences → General → Startup, not by hand: the switch is what
 creates or removes the login entry (the Background portal inside Flatpak,
 `~/.config/autostart/whisper-aloud-autostart.desktop` natively), and it
 stores here the state that was actually confirmed. Editing the key alone

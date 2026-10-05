@@ -173,20 +173,24 @@ def test_answer_after_dialog_closed_is_still_stored(monkeypatch):
     dialog, _ = _dialog(monkeypatch, ctl)
     dialog._startup_section.switch.set_active(True)
     dialog._startup_section.detach()
-    dialog.destroy()
+    # Adw.PreferencesDialog (libadwaita >= 1.5) or the window fallback.
+    if hasattr(dialog, "force_close"):
+        dialog.force_close()
+    else:
+        dialog.destroy()
     portal.answer(0, True, True)
     assert stored == [True]
     assert ctl.enabled is True
 
 
-def test_save_keeps_the_confirmed_autostart_state(monkeypatch):
+def test_startup_row_is_not_part_of_the_set_config_binding(monkeypatch):
+    """The Startup row applies through the controller (portal/autostart
+    file), never as a Preferences SetConfig of its own."""
     ctl, portal, _ = _portal_controller()
-    dialog, config = _dialog(monkeypatch, ctl)
+    dialog, _ = _dialog(monkeypatch, ctl)
     dialog._startup_section.switch.set_active(True)
     portal.answer(0, True, True)
-    config.startup.autostart_background = False  # stale copy
-    dialog._on_save_clicked(None)
-    assert config.startup.autostart_background is True
+    assert dialog.last_error is None  # no client: a SetConfig would have failed
 
 
 def test_without_controller_the_switch_is_unavailable(monkeypatch):

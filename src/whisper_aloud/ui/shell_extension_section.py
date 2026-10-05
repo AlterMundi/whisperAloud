@@ -1,4 +1,4 @@
-"""Settings section: "Top bar indicator (GNOME Shell extension)".
+"""Preferences group: "Top Bar Indicator" (GNOME Shell extension).
 
 Optional component. Shows whether the whisperaloud@fede extension is
 installed/enabled/up to date, the host command to install it, and (native
@@ -19,7 +19,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
 from .. import shell_extension as se  # noqa: E402
 from ..sandbox import is_flatpak_sandbox  # noqa: E402
@@ -27,7 +28,7 @@ from .shell_extension_probe import ShellExtensionProbe  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-SECTION_TITLE = "Top bar indicator (GNOME Shell extension)"
+SECTION_TITLE = "Top Bar Indicator"
 SECTION_DESCRIPTION = (
     "Optional. A WhisperAloud icon in the GNOME top bar shows at a glance whether "
     "the service is running, the speech model is ready and the global hotkey is "
@@ -48,7 +49,8 @@ def _copy_to_clipboard(text: str) -> None:
 
 
 class ShellExtensionSection:
-    """The section's widgets. ``widget`` is a vertical Gtk.Box to append."""
+    """The section's widgets. ``widget`` is an Adw.PreferencesGroup to add to a
+    preferences page (rows first, then the command boxes and notes)."""
 
     def __init__(
         self,
@@ -88,53 +90,51 @@ class ShellExtensionSection:
     # ── widgets ──────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_margin_top(12)
-        self.widget = box
+        group = Adw.PreferencesGroup()
+        group.set_title(SECTION_TITLE)
+        group.set_description(SECTION_DESCRIPTION)
+        self.widget = group
 
-        title = Gtk.Label(label=SECTION_TITLE)
-        title.set_halign(Gtk.Align.START)
-        title.add_css_class("heading")
-        box.append(title)
-
-        box.append(self._wrapped_label(SECTION_DESCRIPTION, dim=True))
-
-        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        label = Gtk.Label(label="Status:")
-        label.set_halign(Gtk.Align.START)
-        label.set_hexpand(True)
         self.status_label = Gtk.Label(label="Checking…")
         self.status_label.set_halign(Gtk.Align.END)
+        self.status_label.add_css_class("dim-label")
         self.toggle_button = Gtk.Button(label="Enable")
+        self.toggle_button.set_valign(Gtk.Align.CENTER)
         self.toggle_button.set_visible(False)
         self.toggle_button.connect("clicked", self._on_toggle_clicked)
         self.refresh_button = Gtk.Button(label="Refresh")
+        self.refresh_button.set_valign(Gtk.Align.CENTER)
         self.refresh_button.connect("clicked", lambda _b: self.refresh())
-        status_row.append(label)
-        status_row.append(self.status_label)
-        status_row.append(self.toggle_button)
-        status_row.append(self.refresh_button)
-        box.append(status_row)
+        self.status_row = Adw.ActionRow()
+        self.status_row.set_title("Status")
+        self.status_row.add_suffix(self.status_label)
+        self.status_row.add_suffix(self.toggle_button)
+        self.status_row.add_suffix(self.refresh_button)
+        group.add(self.status_row)
+        box = group
 
         self.summary_label = self._wrapped_label("", dim=True)
-        box.append(self.summary_label)
+        self.summary_label.set_margin_top(6)
+        box.add(self.summary_label)
 
         self.install_box, self.install_label = self._command_box(
             "Install or update (then log out and back in):")
         self.enable_box, self.enable_label = self._command_box("Enable:")
         self.disable_box, self.disable_label = self._command_box("Disable:")
         for b in (self.install_box, self.enable_box, self.disable_box):
-            box.append(b)
+            b.set_margin_top(6)
+            box.add(b)
 
         self.package_missing_label = self._wrapped_label(
             "The extension package is not part of this installation. From a source "
             "checkout, build it with scripts/pack_shell_extension.py OUT.zip, or use "
             "install.sh.", dim=True)
         self.package_missing_label.set_visible(False)
-        box.append(self.package_missing_label)
+        box.add(self.package_missing_label)
 
         self.limits_label = self._wrapped_label(LIMITS_NOTE, dim=True)
-        box.append(self.limits_label)
+        self.limits_label.set_margin_top(6)
+        box.add(self.limits_label)
 
     @staticmethod
     def _wrapped_label(text: str, dim: bool = False) -> Gtk.Label:
@@ -212,6 +212,10 @@ class ShellExtensionSection:
         self.toggle_button.set_sensitive(False)
         self._probe.set_enabled(self._report.toggle_action == "enable",
                                 lambda _ok: self.refresh())
+
+    def detach(self) -> None:
+        """Stop watching the extension (the Preferences dialog was closed)."""
+        self._on_destroy()
 
     def _on_destroy(self, *_args) -> None:
         self._unwatch()
