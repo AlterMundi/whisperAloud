@@ -27,6 +27,8 @@ def test_identifiers_match_extension_source():
     assert f"'{se.EXTENSION_BUS_NAME}'" in js
     assert f"'{se.EXTENSION_INFO_PATH}'" in js
     assert f"'{se.EXTENSION_INFO_IFACE}'" in js
+    assert f"'{se.TEXT_INPUT_PATH}'" in js
+    assert f"'{se.TEXT_INPUT_IFACE}'" in js
 
 
 def test_source_version_reads_metadata():
@@ -415,3 +417,63 @@ def test_view_not_gnome_shows_nothing_actionable():
     assert view.disable_command is None
     assert view.toggle_label is None
     assert view.package_missing is False
+
+
+# ── TextInput (WHISP-119): static guarantees of extension.js ───────────────
+
+
+def _extension_js() -> str:
+    return (EXT_DIR / "extension.js").read_text()
+
+
+def test_text_input_interface_declared():
+    js = _extension_js()
+    assert '<interface name="org.fede.whisperaloud.TextInput">' in js
+    assert '<method name="InsertText">' in js
+    assert '<method name="GetCapabilities">' in js
+
+
+def test_text_input_restricted_to_daemon_owner_without_dbus_sender_checker():
+    js = _extension_js()
+    # Own watcher on the daemon's name; DBusSenderChecker leaks watchers in
+    # destroy() and is bypassed in unsafe mode.
+    assert "new DBusSenderChecker" not in js
+    assert "resource:///org/gnome/shell/misc/util.js" not in js
+    assert "invocation.get_sender() !== this._daemonOwner" in js
+    assert "org.freedesktop.DBus.Error.AccessDenied" in js
+
+
+def test_text_input_virtual_keyboard_lifecycle():
+    js = _extension_js()
+    assert "create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE)" in js
+    assert "run_dispose()" in js
+    assert "Gio.bus_unwatch_name(this._watchId)" in js
+
+
+def test_text_input_backend_accessor_is_feature_detected():
+    js = _extension_js()
+    assert "global.stage?.context" in js
+    assert "Clutter.get_default_backend()" in js
+
+
+def test_text_input_gates_lock_and_modals():
+    js = _extension_js()
+    assert "Main.sessionMode.isLocked" in js
+    assert "Main.modalCount" in js
+
+
+def test_text_input_never_logs_the_text():
+    js = _extension_js()
+    for line in js.splitlines():
+        if "console." in line:
+            assert "text" not in line.split("console.", 1)[1].lower().replace(
+                "inserttext", ""), line
+
+
+def test_metadata_declares_clipboard_use_and_text_input_version():
+    """EGO: clipboard access must be declared in the description. Version 5
+    is the first with TextInput (the daemon gates on GetCapabilities, not on
+    this number)."""
+    metadata = json.loads((EXT_DIR / "metadata.json").read_text())
+    assert "clipboard" in metadata["description"].lower()
+    assert metadata["version"] >= 5

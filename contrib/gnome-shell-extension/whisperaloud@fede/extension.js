@@ -9,7 +9,15 @@
 //     a captured window actually regained focus -- WHISP-88 -- used by the
 //     daemon's "gnome-extension" WindowManager backend) and
 //     org.fede.whisperaloud.ShellExtension (version info, used by the
-//     app's Settings) under the bus name EXT_BUS_NAME.
+//     app's Settings) under the bus name EXT_BUS_NAME;
+//   - exports org.fede.whisperaloud.TextInput (WHISP-119): the daemon's
+//     native text insertion. InsertText commits the transcription through
+//     Main.inputMethod (text-input-v3) or, when that is not possible, sets
+//     the clipboard and sends a paste chord through a Clutter virtual
+//     keyboard. No portal, so no "remote access" indicator. Only the
+//     current owner of org.fede.whisperaloud may call it; it refuses while
+//     the session is locked, a Shell modal is open, or a password field has
+//     focus. The decisions live in insertion.js (Node-tested).
 //
 // Event-driven: the daemon's presence is tracked with a bus-name watch and
 // its state with StatusChanged / ModelStateChanged / ConfigChanged /
@@ -17,6 +25,7 @@
 // signal, so this used to re-read GetStatus on a bounded backoff timer --
 // API 1.8.0's HotkeyStateChanged (WHISP-99) replaced that entirely.
 
+import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -35,6 +44,7 @@ import {
     autostartLabel, deriveState, hotkeyLabel, modelLabel, needsFallbackKeybinding,
     statusLabel,
 } from './status.js';
+import {Purpose, Reason, capabilities, chordEvents, decideInsertion} from './insertion.js';
 
 // The daemon (see docs/dbus-api.md).
 const BUS_NAME    = 'org.fede.whisperaloud';
@@ -49,6 +59,8 @@ const WINDOW_PATH      = '/org/fede/whisperaloud/Window';
 const EXT_INFO_PATH    = '/org/fede/whisperaloud/ShellExtension';
 const WINDOW_IFACE     = 'org.fede.whisperaloud.Window';
 const EXT_INFO_IFACE   = 'org.fede.whisperaloud.ShellExtension';
+const TEXT_INPUT_PATH  = '/org/fede/whisperaloud/TextInput';
+const TEXT_INPUT_IFACE = 'org.fede.whisperaloud.TextInput';
 
 const KEYBINDING = 'toggle-recording';
 
@@ -313,13 +325,172 @@ const SERVICE_XML = `
       <arg direction="out" type="a{sv}" name="info"/>
     </method>
   </interface>
+  <interface name="org.fede.whisperaloud.TextInput">
+    <!-- options: window_id u, mode s (auto|commit|paste),
+         paste_shortcut s (auto|shift+insert|ctrl+shift+insert|ctrl+v|ctrl+shift+v).
+         result: method s (commit|paste|none), reason s (see insertion.js Reason). -->
+    <method name="InsertText">
+      <arg direction="in" type="s" name="text"/>
+      <arg direction="in" type="a{sv}" name="options"/>
+      <arg direction="out" type="a{sv}" name="result"/>
+    </method>
+    <method name="GetCapabilities">
+      <arg direction="out" type="a{sv}" name="capabilities"/>
+    </method>
+  </interface>
 </node>`;
+
+// ── Text insertion (WHISP-119) ────────────────────────────────────────────
+
+const DAEMON_NAME = BUS_NAME;
+const ACCESS_DENIED = 'org.freedesktop.DBus.Error.AccessDenied';
+const FAILED = 'org.freedesktop.DBus.Error.Failed';
+
+// Clutter.get_default_backend() is gone in GNOME 51; ClutterActor's
+// `context` property only exists from 47. Feature-detect.
+function clutterBackend() {
+    const context = global.stage?.context;
+    if (context?.get_backend)
+        return context.get_backend();
+    return Clutter.get_default_backend();
+}
+
+function unpackOption(value) {
+    return value instanceof GLib.Variant ? value.recursiveUnpack() : value;
+}
+
+function contentPurpose(im) {
+    const P = Clutter.InputContentPurpose;
+    const purpose = im.contentPurpose;
+    if (purpose === P.PASSWORD || (P.PIN !== undefined && purpose === P.PIN))
+        return Purpose.PASSWORD;
+    const hidden = Clutter.InputContentHintFlags?.HIDDEN_TEXT;
+    if (hidden && (im.contentHints & hidden))
+        return Purpose.PASSWORD;
+    if (purpose === P.TERMINAL)
+        return Purpose.TERMINAL;
+    return Purpose.NORMAL;
+}
+
+class TextInserter {
+    constructor(metadata) {
+        this._version = Number(metadata.version ?? 0);
+        this._keyboard = null;
+        this._daemonOwner = null;
+        this._watchId = 0;
+    }
+
+    enable() {
+        const seat = clutterBackend().get_default_seat();
+        this._keyboard = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
+        // Our own watcher instead of misc/util.js DBusSenderChecker, whose
+        // destroy() leaks its watchers (it iterates array indices) and which
+        // unsafe mode bypasses. The unique name of the current owner of
+        // org.fede.whisperaloud is the only accepted caller.
+        this._watchId = Gio.bus_watch_name(
+            Gio.BusType.SESSION, DAEMON_NAME, Gio.BusNameWatcherFlags.NONE,
+            (_conn, _name, owner) => {
+                this._daemonOwner = owner;
+            },
+            () => {
+                this._daemonOwner = null;
+            });
+    }
+
+    disable() {
+        if (this._watchId) {
+            Gio.bus_unwatch_name(this._watchId);
+            this._watchId = 0;
+        }
+        this._daemonOwner = null;
+        // As keyboard.js does: dispose releases any key still held.
+        this._keyboard?.run_dispose();
+        this._keyboard = null;
+    }
+
+    GetCapabilities() {
+        const caps = capabilities(this._version);
+        return {
+            'insert_text': GLib.Variant.new_boolean(caps.insert_text && this._keyboard !== null),
+            'methods': new GLib.Variant('as', caps.methods),
+            'max_commit_bytes': GLib.Variant.new_uint32(caps.max_commit_bytes),
+            'reasons': new GLib.Variant('as', caps.reasons),
+            'version': GLib.Variant.new_uint32(caps.version),
+        };
+    }
+
+    InsertTextAsync(params, invocation) {
+        if (!this._daemonOwner || invocation.get_sender() !== this._daemonOwner) {
+            invocation.return_dbus_error(ACCESS_DENIED,
+                'Only the WhisperAloud daemon may insert text');
+            return;
+        }
+        let result;
+        try {
+            const [text, options] = params;
+            result = this._insert(text, options ?? {});
+        } catch (e) {
+            // Never include the text in errors or logs.
+            console.warn(`WhisperAloud: InsertText failed: ${e.message}`);
+            invocation.return_dbus_error(FAILED, 'InsertText failed');
+            return;
+        }
+        invocation.return_value(new GLib.Variant('(a{sv})', [{
+            'method': GLib.Variant.new_string(result.method),
+            'reason': GLib.Variant.new_string(result.reason),
+        }]));
+    }
+
+    _insert(text, options) {
+        const im = Main.inputMethod;
+        const win = global.display.get_focus_window();
+        const imFocus = Boolean(im.currentFocus);
+        const windowId = unpackOption(options['window_id']);
+        const decision = decideInsertion({
+            text,
+            locked: Main.sessionMode.isLocked,
+            modalCount: Main.modalCount,
+            focusWindowId: win ? win.get_id() : null,
+            expectedWindowId: windowId === undefined ? undefined : Number(windowId),
+            imFocus,
+            hasPreedit: imFocus && typeof im.hasPreedit === 'function' && im.hasPreedit(),
+            // Without IM focus the purpose is stale (it belongs to the last
+            // focused field), so it is ignored.
+            purpose: imFocus ? contentPurpose(im) : Purpose.NORMAL,
+            mode: unpackOption(options['mode']) ?? 'auto',
+            pasteShortcut: unpackOption(options['paste_shortcut']) ?? 'auto',
+        });
+        if (decision.method === 'commit') {
+            for (const chunk of decision.chunks)
+                im.commit(chunk);
+        } else if (decision.method === 'paste') {
+            if (!this._keyboard)
+                return {method: 'none', reason: Reason.NO_VIRTUAL_KEYBOARD};
+            St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+            this._sendChord(decision.chord);
+        }
+        return {method: decision.method, reason: decision.reason};
+    }
+
+    _sendChord(keys) {
+        // Microseconds, as gnome-shell's keyboard.js keyvalPress() does.
+        // Outside an input event this is CLUTTER_CURRENT_TIME (0), which
+        // Mutter's virtual device replaces with "now".
+        const time = Clutter.get_current_event_time() * 1000;
+        for (const [key, pressed] of chordEvents(keys)) {
+            this._keyboard.notify_keyval(time, Clutter[`KEY_${key}`],
+                pressed ? Clutter.KeyState.PRESSED : Clutter.KeyState.RELEASED);
+        }
+    }
+}
 
 class ExtensionDBusService {
     constructor(metadata) {
         this._metadata = metadata;
         this._windowImpl = null;
         this._infoImpl = null;
+        this._textInputImpl = null;
+        this._inserter = new TextInserter(metadata);
         this._nameId = 0;
         this._focusHandlerId = 0;
     }
@@ -333,6 +504,12 @@ class ExtensionDBusService {
         this._infoImpl = Gio.DBusExportedObject.wrapJSObject(
             node.lookup_interface(EXT_INFO_IFACE), this);
         this._infoImpl.export(Gio.DBus.session, EXT_INFO_PATH);
+        // Virtual keyboard and caller watch first, so InsertText is never
+        // reachable without them.
+        this._inserter.enable();
+        this._textInputImpl = Gio.DBusExportedObject.wrapJSObject(
+            node.lookup_interface(TEXT_INPUT_IFACE), this._inserter);
+        this._textInputImpl.export(Gio.DBus.session, TEXT_INPUT_PATH);
         this._nameId = Gio.bus_own_name(
             Gio.BusType.SESSION, EXT_BUS_NAME, Gio.BusNameOwnerFlags.NONE,
             null, null, null);
@@ -365,6 +542,9 @@ class ExtensionDBusService {
         this._windowImpl = null;
         this._infoImpl?.unexport();
         this._infoImpl = null;
+        this._textInputImpl?.unexport();
+        this._textInputImpl = null;
+        this._inserter.disable();
     }
 
     // org.fede.whisperaloud.ShellExtension

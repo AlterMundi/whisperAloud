@@ -44,6 +44,10 @@ EXTENSION_UUID = "whisperaloud@fede"
 EXTENSION_BUS_NAME = "org.gnome.Shell.Extensions.whisperaloud"
 EXTENSION_INFO_PATH = "/org/fede/whisperaloud/ShellExtension"
 EXTENSION_INFO_IFACE = "org.fede.whisperaloud.ShellExtension"
+# Native text insertion (WHISP-119), on the same bus name: no new Flatpak
+# permission. See extension.js TextInserter and insertion.js.
+TEXT_INPUT_PATH = "/org/fede/whisperaloud/TextInput"
+TEXT_INPUT_IFACE = "org.fede.whisperaloud.TextInput"
 
 # GNOME Shell's own extension-management service.
 SHELL_EXTENSIONS_BUS_NAME = "org.gnome.Shell.Extensions"

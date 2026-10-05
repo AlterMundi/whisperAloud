@@ -24,7 +24,7 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
 
 
 @needs_node
-@pytest.mark.parametrize("name", ["extension.js", "status.js"])
+@pytest.mark.parametrize("name", ["extension.js", "status.js", "insertion.js"])
 def test_js_syntax(name, tmp_path):
     # Copy to .mjs so Node parses it as an ES module regardless of version.
     dst = tmp_path / (Path(name).stem + ".mjs")

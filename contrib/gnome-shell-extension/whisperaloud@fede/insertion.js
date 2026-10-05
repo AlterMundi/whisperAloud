@@ -37,6 +37,9 @@ export const Reason = Object.freeze({
     NO_IM_FOCUS: 'no-im-focus',
     PREEDIT: 'preedit',
     TERMINAL_NEWLINE: 'terminal-newline',
+    // Set by extension.js, not decideInsertion(): the paste path was chosen
+    // but the virtual keyboard is gone (extension being disabled).
+    NO_VIRTUAL_KEYBOARD: 'no-virtual-keyboard',
 });
 
 // Content purposes as decideInsertion() sees them; extension.js maps
