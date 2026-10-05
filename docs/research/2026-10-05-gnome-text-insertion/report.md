@@ -471,3 +471,80 @@ Each claim is tagged **[V]** (I read the doc or source myself) or **[I]** (infer
    - A small companion shell extension like Smile's that sends Ctrl+V or `commit_text` from inside the shell.
    - uinput tools (ydotool, dotool) also avoid the indicator but need host-level permissions that don't fit a Flatpak.
 4. [I] libei `ei_text` (mutter !4996, unmerged) would allow direct UTF-8 typing without the clipboard, but still through a RemoteDesktop session.
+
+
+---
+
+## Appendix B — IBus input-method route (supporting research, 2026-10-05)
+
+**Disclosure of what I touched under ~/.config/ibus.** I did this before the safety boundary arrived. I ran `ls ~/.config/ibus/bus/`, which showed two files: `<machine-id>-unix-0` and `-unix-wayland-0`. I also read the `-unix-wayland-0` file, which contains `IBUS_ADDRESS=unix:path=/home/fede/.cache/ibus/dbus-…` and `IBUS_DAEMON_PID`; I removed the guid from my output. I never connected to the IBus bus or GNOME Shell. I ran no ibus, gsettings or systemctl commands. Everything else was GitHub/GitLab source, web pages, and static files under /usr/share, /usr/lib and /usr/libexec. Source copies are in the session scratchpad.
+
+### Bottom line
+The best model to copy is Canonical's Myna, which ships in Ubuntu 26.10. It is a plain IBus engine with no component XML file:
+1. It connects to the IBus private bus.
+2. It calls `RegisterComponent` while running.
+3. For each dictation it calls `SetGlobalEngine("myna-stt")`, commits text with `CommitText`, then restores the engine it recorded from `GetGlobalEngine`.
+
+The catch for us: **an IBus engine cannot be shipped as a normal Flatpak.** Flatpak and IBus upstream both refuse this. Myna works because snap's `desktop-legacy` plug grants access to the IBus socket.
+
+### 1. How existing dictation engines insert text
+
+- **Myna (Canonical)** [VERIFIED]
+  - Text goes in through an IBus engine. The engine name is `myna-stt` and its layout is `us`. It is registered at runtime with `RegisterComponent`, made active with `SetGlobalEngine`, and the previous engine is restored afterwards. Engine-to-app text uses `CommitText`, and streaming partial results use `UpdatePreeditText`. https://github.com/canonical/myna/blob/main/client/myna-desktop/src/inject/ibus.rs
+  - It finds the bus address from `$IBUS_ADDRESS` or `~/.config/ibus/bus/`. Its snap uses the `desktop-legacy` plug "the IBus daemon's private socket". https://github.com/canonical/myna/blob/main/myna-snap/snap/snapcraft.yaml
+  - Design rules: refuse password fields (content-type purpose PASSWORD/PIN or hint HIDDEN_TEXT). Drop buffered text if focus moves. Hold a per-utterance "lease" tied to `FocusInId`. They also note "IBus offers no way to address a commit to one context". https://github.com/canonical/myna/blob/main/client/.kb/desktop-integration.md
+  - That doc argues for an input method over libei or RemoteDesktop: keycodes depend on the keyboard layout, modifier keys can race, CJK input methods intercept fake keys, and only the IM path supports preedit. It adds: "There is no cross-desktop text-commit portal yet."
+  - Activation is a GNOME custom shortcut. They tried the GlobalShortcuts portal and dropped it in 2026-10. Their UI overlay (HUD) is a GNOME Shell extension. https://github.com/canonical/myna/blob/main/.kb/system-architecture.md
+- **GNOME Shell does the same engine swap itself** [VERIFIED]. `setCompletionEnabled()` saves `_preOskEngine`, switches to `typing-booster`, then restores. https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/misc/ibusManager.js
+- **IBus-Speech-To-Text (PhilippeRo)** uses Vosk, Python and Meson, and installs to `/usr`. You activate it from the IBus menu or Win+Space. https://github.com/PhilippeRo/IBus-Speech-To-Text [VERIFIED from the README]. Forks add whisper.cpp: https://github.com/Manish7093/IBus-Speech-To-Text [VERIFIED title only].
+- **voice-typing-linux** uses `commit_text`, preedit, and `do_process_key_event` returning False, so normal keys pass through. Its README tells users to copy the XML to `~/.local/share/ibus/component`. https://github.com/GitJuhb/voice-typing-linux [VERIFIED from the README]. **That directory is not scanned by ibus** (see the next bullet).
+- **Component directories** [VERIFIED]. `ibus_registry_load` reads `$IBUS_COMPONENT_PATH`, which *replaces* the default, or else only `IBUS_DATA_DIR/component`. The user-directory code sits inside `#if 0 /* FIXME Should we support install some IME in user dir? */`. https://github.com/ibus/ibus/blob/main/src/ibusregistry.c (lines ~262-281; it moved there from bus/registry.c). For us, runtime `RegisterComponent` is the way to avoid installing a file: https://github.com/ibus/ibus/blob/main/bus/ibusimpl.c (`_ibus_register_component`; the component is destroyed along with its factory).
+- **ibus-typing-booster** has supported Google Cloud Speech-to-Text, which is paid and not free software. The maintainer said in 2022 that it was untested and looked at Vosk and Whisper, but I found no Whisper integration shipped. https://github.com/mike-fabian/ibus-typing-booster/discussions/394 [VERIFIED]. Whether the Google code is still there today is [INFERRED].
+- **Speed of Sound** (Flathub) does *not* use IBus. It uses the RemoteDesktop portal through its Stargate library. https://github.com/zugaldia/speedofsound/blob/main/docs/faq.md [VERIFIED]
+- **Flatpak limits** [VERIFIED]
+  - ibus-portal only exposes `CreateInputContext` plus methods on the caller's own InputContext, and it rejects any caller other than that context's owner. It is a client-side API only. https://github.com/ibus/ibus/blob/main/portal/org.freedesktop.IBus.Portal.xml and https://github.com/ibus/ibus/blob/main/portal/portal.c
+  - The "Packaging IBus engines with flatpak" issue was closed as not_planned. fujiwarat (IBus): "There is no reason to run ibus-daemon in host and engines in sandbox." TingPing: "this is just how ibus is designed." https://github.com/flatpak/flatpak/issues/3019
+  - The bus is a private socket under `$XDG_CACHE_HOME/ibus` (`IBUS_SOCKET_DIR` in https://github.com/ibus/ibus/blob/main/configure.ac), and the server checks peer credentials (https://github.com/ibus/ibus/blob/main/bus/server.c).
+  - [INFERRED] A Flatpak could still reach it with `--filesystem=~/.config/ibus/bus:ro` and `--filesystem=~/.cache/ibus`, because Flatpak remaps XDG_CACHE_HOME. Flathub reviewers would likely object. A cleaner split is a small host-side engine helper (deb or system package) that the Flatpak'd daemon talks to over session D-Bus.
+
+### 2. Activation on GNOME and living alongside other engines
+
+- **GNOME always routes Wayland text-input through IBus, even for users with only xkb layouts** [VERIFIED]
+  - Shell's `InputMethod` (a Clutter.InputMethod) creates one IBus context named `'gnome-shell'` for all apps and forwards `commit-text` to `this.commit()`, which reaches clients over text-input-v3. https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/misc/inputMethod.js
+  - A plain xkb input source is mapped to the IBus engine `xkb:<layout>:<variant>:<lang>`. https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/status/keyboard.js (`activateInputSource`)
+- **Temporary engine swap (Myna's approach)** [INFERRED]. It needs no change to the user's input sources. Shell only records an outside `global-engine-changed` (`_engineChanged`). Mozc or Pinyin users get their engine back when dictation ends, though their composition state is interrupted. If the user switches source, or has per-window sources and changes window, during dictation, Shell calls `setEngine` and our engine drops out.
+- **Permanent "voice" input source with layout `default`** [VERIFIED/INFERRED]. `keyboardManager._doApply(id)` returns early when the layout id is unknown (`if (!info) return;`), so the previous keymap stays [VERIFIED]: https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/misc/keyboardManager.js. Typing still works if the engine returns False from process_key_event. However, only one engine is active at a time, so a mozc or pinyin user cannot have both [INFERRED].
+- **Committing regardless of the active engine (panel and extension path)** [VERIFIED in source, untested, a hack]
+  - GNOME starts ibus with `--panel disable` and adds `--xim` only on X11. Sources: `/usr/lib/systemd/user/org.freedesktop.IBus.session.GNOME.service` and the `_spawn` function in ibusManager.js.
+  - `--emoji-extension` defaults to "default", so ibus-extension-gtk3 still runs and owns `org.freedesktop.IBus.Panel.Extension.Emoji` (https://github.com/ibus/ibus/blob/main/bus/main.c).
+  - In `bus_panel_proxy_commit_text`, a `CommitText` signal from the owner of that name, or of `org.freedesktop.IBus.Panel` (GNOME Shell here), goes to `panel->focused_context` with no check on which engine is active (https://github.com/ibus/ibus/blob/main/bus/panelproxy.c, ~L747).
+  - When the name changes owner, the daemon immediately sends `FocusIn` for the current context (ibusimpl.c ~L597).
+  - ibus-extension-gtk3 requests the name with `ALLOW_REPLACEMENT|REPLACE_EXISTING` (https://github.com/ibus/ibus/blob/main/ui/gtk3/extension.vala), so another process *could* take it over with REPLACE_EXISTING and send `IBus.PanelService.commit_text` (that method is in `/usr/share/gir-1.0/IBus-1.0.gir`).
+  - Downsides: on losing the name, the extension destroys its panel, so the emoji picker probably breaks until ibus restarts [INFERRED]. It is a private interface, and it still needs host access to the bus socket. **Not recommended.** It is worth a sandboxed field test (nested `ibus-daemon`, never the live one).
+  - The panel itself is GNOME Shell, so a Shell extension calling `Main.inputMethod.commit(text)` skips IBus altogether [INFERRED from inputMethod.js]. Myna's lease docs also mention a "fake" context when no context has focus.
+
+### 3. Native GNOME dictation and protocols
+- **GNOME has no native dictation API.** The GNOME 51 release notes (2026-09-16) say nothing about dictation, speech or input methods: https://release.gnome.org/51/ [VERIFIED]. GitLab searches for "dictation" and "speech" in gnome-shell and mutter found no dictation feature work [VERIFIED search result, so absence is INFERRED]: https://gitlab.gnome.org/api/v4/projects/GNOME%2Fgnome-shell/issues?search=dictation
+- A community proposal from June 2026 drew replies that pointed to Myna, Speed of Sound and ibus-speech-to-text. I found no maintainer commitment: https://discourse.gnome.org/t/proposal-desktop-wide-offline-speech-to-text-dictation-support/35858 [VERIFIED]
+- **Mutter does not implement input-method-v2.** Mutter main's `src/meson.build` lists only `['text-input','unstable',3]` and `meta-wayland-text-input.c`: https://gitlab.gnome.org/GNOME/mutter/-/blob/main/src/meson.build [VERIFIED]. wayland.app's "Mutter 51" claim for input-method-v2 is wrong.
+- There is no text-commit portal. A vocalinux issue from Aug 2026 notes that RemoteDesktop `NotifyKeyboardKeysym` is the only portal path and does not solve layout mapping: https://github.com/VocaHQ/vocalinux/issues/750 [VERIFIED]. I found nothing that adds speech-to-text to Spiel or speech-dispatcher, both of which are text-to-speech only [INFERRED].
+- I found no GUADEC 2025/2026 talk on dictation [INFERRED].
+
+### 4. Pitfalls by toolkit and app
+- **GTK3 and GTK4** use text-input-v3 natively. **Qt** supports text-input-v3 from 6.7, with fixes from 6.8.2; older Qt needs `QT_IM_MODULE=ibus`, because Mutter has no text-input-v2. https://fcitx-im.org/wiki/Using_Fcitx_5_on_Wayland [VERIFIED]
+- **Chromium/Electron on native Wayland** needs `--enable-wayland-ime --wayland-text-input-version=3` (experimental since M129) or `--gtk-version=4`. https://wiki.archlinux.org/title/Chromium and the fcitx wiki above [VERIFIED as documented]
+- **XWayland apps**: GNOME Wayland starts ibus **without `--xim`** (the systemd unit) [VERIFIED]. GTK and Qt apps under XWayland still reach IBus over D-Bus through IM modules. Pure XIM clients (xterm, old Java) will probably get nothing [INFERRED].
+- **Firefox** goes through GTK3 to text-input-v3 [INFERRED].
+- **VTE terminals** (GNOME Terminal, Console, Ptyxis) go through GTK, so they work [INFERRED].
+- **foot** implemented text-input since Dec 2020: https://codeberg.org/dnkl/foot/issues/134 [VERIFIED].
+- **WezTerm** has Wayland IME on by default since 20220807 and requires `zwp_text_input_v3`: https://wezterm.org/config/lua/config/use_ime.html [VERIFIED].
+- **kitty** ships `glfw/wl_text_input.c` (text-input) and `ibus_glfw.c` (X11): https://github.com/kovidgoyal/kitty/tree/master/glfw [VERIFIED].
+- **Alacritty** uses winit's text-input-v3 [INFERRED].
+- **General caveats** [INFERRED, supported by Myna's lease docs]:
+  - Text committed with no focused text field is dropped.
+  - Password fields must be skipped.
+  - Because GNOME uses one context for all apps, telling apps apart relies on Shell's FocusOut events.
+
+### Other references
+- Myna announcement coverage: https://www.theregister.com/os-platforms/2026/06/18/canonical-unveils-myna-speech-to-text-app-for-ubuntu-2610/5258376 and https://www.omgubuntu.co.uk/2026/06/what-is-myna-ubuntu-ai-dictation
+- Handy's tracker on Flatpak, RemoteDesktop and GlobalShortcuts problems: https://github.com/cjpais/Handy/issues/1555
