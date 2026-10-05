@@ -132,6 +132,7 @@ class SettingsDialog(_PreferencesBase):
         self._syncing = 0
         self._committing_key: Optional[str] = None
         self.last_error: Optional[str] = None
+        self.last_toast = None
 
         self.binding = PrefsBinding(
             client, initial_values(config, client), on_error=self._show_error
@@ -188,6 +189,7 @@ class SettingsDialog(_PreferencesBase):
         self.last_error = message
         logger.warning("Preference not applied: %s", message)
         toast = Adw.Toast.new(GLib.markup_escape_text(message))
+        self.last_toast = toast
         self.add_toast(toast)
 
     @contextmanager

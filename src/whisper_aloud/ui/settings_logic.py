@@ -39,9 +39,8 @@ PASTE_BACKEND_OPTIONS: Tuple[Option, ...] = tuple(
     (value, _PASTE_BACKEND_LABELS.get(value, value)) for value in PASTE_BACKENDS
 )
 PASTE_BACKEND_SUBTITLE = (
-    "Automatic types through the WhisperAloud GNOME Shell extension when it is "
-    "available. Remote Desktop Portal makes GNOME show its screen-sharing "
-    "indicator while it is in use. Clipboard Only never types: paste yourself."
+    "Automatic uses the GNOME Shell extension when available. "
+    "Remote Desktop Portal shows GNOME's screen-sharing indicator."
 )
 
 TERMINAL_PASTE_SHORTCUT = "ctrl+shift+v"
