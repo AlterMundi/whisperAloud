@@ -113,6 +113,23 @@ class NotificationManager:
         notification.set_urgency(Notify.Urgency.NORMAL)
         notification.show()
 
+    def show_clipboard_notice(self, message: str) -> None:
+        """Tell the user the transcription is on the clipboard but was not
+        inserted automatically (WHISP-119: clipboard-only backend, screen
+        locked, password field, insertion failed). ``message`` comes from
+        clipboard.text_insertion.NOTICE_MESSAGES; it never contains the
+        transcription."""
+        if not HAS_NOTIFY or not self._is_enabled("transcription_completed"):
+            return
+
+        notification = Notify.Notification.new(
+            self.app_name,
+            message,
+            "edit-copy-symbolic"
+        )
+        notification.set_urgency(Notify.Urgency.NORMAL)
+        notification.show()
+
     def show_error(self, error_message: str) -> None:
         """Show error notification."""
         if not HAS_NOTIFY or not self._is_enabled("error"):

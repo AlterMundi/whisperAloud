@@ -550,6 +550,17 @@ class WhisperAloudService:
         else:
             logger.info("No DISPLAY/WAYLAND_DISPLAY; skipping tray indicator")
             self.indicator = None
+        # WHISP-119: native text insertion through the GNOME Shell
+        # extension's TextInput interface. Constructing it touches no bus;
+        # its capability probe is driven by the extension watcher below.
+        self._text_inserter = None
+        if not self._test_mode:
+            try:
+                from ..clipboard.text_insertion import ExtensionTextInserter
+
+                self._text_inserter = ExtensionTextInserter()
+            except Exception as e:
+                logger.info(f"Extension text insertion unavailable: {e}")
         self._shell_extension_watcher = self._watch_shell_extension()
 
         # Initialize hotkey manager (skipped entirely in test mode -- no
@@ -922,6 +933,44 @@ class WhisperAloudService:
         except Exception:
             logger.debug("Paste backend prewarm failed", exc_info=True)
         return GLib.SOURCE_REMOVE
+
+    def _select_paste_backend(self) -> str:
+        """WHISP-119: which backend auto-paste uses right now (see
+        clipboard/paste_selection.select_paste_backend)."""
+        from .. import sandbox
+        from ..clipboard.paste_selection import select_paste_backend
+
+        inserter = self._text_inserter
+        return select_paste_backend(
+            self.config.clipboard.paste_backend,
+            is_sandboxed=sandbox.is_flatpak_sandbox(),
+            extension_can_insert=bool(inserter is not None and inserter.can_insert),
+        )
+
+    def _show_paste_notice(self, notice: Optional[str]) -> None:
+        """Tell the user what happened to an auto-paste whose text is on the
+        clipboard but was not inserted (a text_insertion.NOTICE_*)."""
+        if notice is None or not self.notifications:
+            return
+        from ..clipboard.text_insertion import NOTICE_FOCUS_CHANGED, NOTICE_MESSAGES
+
+        try:
+            if notice == NOTICE_FOCUS_CHANGED:
+                self.notifications.show_paste_skipped_focus_changed()
+            else:
+                self.notifications.show_clipboard_notice(NOTICE_MESSAGES[notice])
+        except Exception as e:
+            logger.debug("Paste notice failed: %s", e)
+
+    def _on_text_inserted(self, result) -> None:
+        """InsertText outcome (main loop). Never logs the text."""
+        from ..clipboard.text_insertion import notice_for_result
+
+        if result.inserted:
+            logger.info("Auto-paste: inserted by the GNOME Shell extension (%s)", result.method)
+        else:
+            logger.info("Auto-paste: extension did not insert (%s)", result.reason or "unknown")
+        self._show_paste_notice(notice_for_result(result))
 
     # ─── D-Bus Properties ───────────────────────────────────────────────
 
@@ -1623,6 +1672,17 @@ class WhisperAloudService:
         if self.notifications:
             self.notifications.config = new_config
 
+        # WHISP-119: leaving the RemoteDesktop opt-in closes its session
+        # right away, so GNOME's remote-access indicator goes with it.
+        if (self.config.clipboard.paste_backend == "remote-desktop"
+                and new_config.clipboard.paste_backend != "remote-desktop"):
+            try:
+                from ..clipboard.paste_selection import close_portal_simulator
+
+                close_portal_simulator()
+            except Exception:
+                logger.debug("close_portal_simulator failed on config change", exc_info=True)
+
         self.config = new_config
 
     def _apply_pending_config_reload(self) -> None:
@@ -2143,20 +2203,29 @@ class WhisperAloudService:
 
     def _watch_shell_extension(self):
         """Hide the tray icon while the GNOME Shell extension (which shows its
-        own top-bar indicator) owns its bus name. Event-driven bus-name watch;
-        only when there is a tray icon to hide. Never fatal.
+        own top-bar indicator) owns its bus name. Event-driven bus-name watch.
+        Never fatal; never in test mode.
+
+        WHISP-119: also drives the extension text-insertion capability probe
+        (`clipboard/text_insertion.py`), so it runs even when there is no
+        tray icon to hide.
 
         WHISP-90: also the window-manager backend's re-probe trigger -- the
         GNOME extension also owns the window-capture D-Bus service
         (`clipboard/window_manager.py`'s "gnome-extension" backend), so this
         one watcher drives both instead of opening a second, duplicate
         `Gio.bus_watch_name()` on the same bus name."""
-        if self.indicator is None:
+        if self._test_mode:
             return None
         try:
             from . import shell_extension_watch
 
             def _on_change(present: bool) -> None:
+                if self._text_inserter is not None:
+                    try:
+                        self._text_inserter.on_extension_presence_changed(present)
+                    except Exception as e:
+                        logger.debug("Text inserter presence update failed: %s", e)
                 if self.indicator is not None:
                     self.indicator.set_suppressed(
                         not tray_should_show(extension_present=present)
@@ -2465,21 +2534,55 @@ class WhisperAloudService:
                             return
                         try:
                             from ..clipboard import build_paste_simulator
-                            simulator = build_paste_simulator(
-                                self.clipboard_manager._session_type,
-                                self.config.clipboard,
+                            from ..clipboard.paste_selection import (
+                                CLIPBOARD,
+                                EXTENSION,
+                                KEYSTROKE,
                             )
-                            if simulator is None:
-                                logger.info("Auto-paste: clipboard only (no paste backend)")
+                            from ..clipboard.text_insertion import NOTICE_COPIED
+
+                            # WHISP-119: extension InsertText first, then
+                            # ydotool/xdotool (native) or clipboard only;
+                            # the RemoteDesktop portal only when opted in.
+                            backend = self._select_paste_backend()
+                            simulator = None
+                            if backend not in (EXTENSION, CLIPBOARD):
+                                simulator = build_paste_simulator(
+                                    self.clipboard_manager._session_type,
+                                    self.config.clipboard,
+                                    backend=backend,
+                                )
+                            if backend == CLIPBOARD or (
+                                    backend != EXTENSION and simulator is None):
+                                logger.info("Auto-paste: clipboard only (%s)", backend)
+                                self._show_paste_notice(NOTICE_COPIED)
                                 return
+                            # The extension checks the captured window's
+                            # focus atomically (WHISP-88); only its own
+                            # window ids mean anything to it.
+                            extension_window_id = None
+                            if (_captured is not None
+                                    and self.config.clipboard.paste_to_captured_window
+                                    and getattr(_captured, "backend", "") == "gnome-extension"):
+                                extension_window_id = _captured.window_id
+                            text = result.text
 
                             def _trigger_paste():
                                 # simulate_paste() (portal/ydotool/xdotool)
-                                # mutates state that is otherwise only
-                                # touched from main-loop callbacks -- it
-                                # must run here, on the main loop, never
-                                # from a worker thread.
-                                simulator.simulate_paste()
+                                # and the InsertText call mutate state that
+                                # is otherwise only touched from main-loop
+                                # callbacks -- they must run here, on the
+                                # main loop, never from a worker thread.
+                                if backend == EXTENSION:
+                                    self._text_inserter.insert(
+                                        text,
+                                        window_id=extension_window_id,
+                                        on_done=self._on_text_inserted,
+                                    )
+                                    return
+                                pasted = simulator.simulate_paste()
+                                if backend == KEYSTROKE and pasted is False:
+                                    self._show_paste_notice(NOTICE_COPIED)
 
                             if (_captured and self.config.clipboard.paste_to_captured_window
                                     and self.window_manager):
