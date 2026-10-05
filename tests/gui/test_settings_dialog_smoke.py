@@ -1,6 +1,10 @@
-"""Headless GTK smoke test for SettingsDialog (WHISP-42 audit item #7).
+"""Headless GTK smoke tests for the Preferences dialog (HIG-07; WHISP-42 audit item #7).
 
-settings_dialog.py has zero automated coverage anywhere else in this suite (only its
+Covers the dialog's structure (Adw.PreferencesDialog, pages, Adwaita rows, no
+Save/Cancel) and instant apply against a fake client: every row change is a
+SetConfig, a rejection puts the row back, and ConfigChanged updates rows.
+
+settings_dialog.py had zero automated coverage anywhere else in this suite (only its
 pure *_logic.py helpers are unit-tested) — which is exactly how the WHISP-42 audit's
 BLOCKER #1 (AttributeError on every dialog open) shipped unnoticed. This module
 builds the real dialog under a live Xvfb display so that class of bug fails CI
@@ -64,10 +68,28 @@ pytestmark = [
 ]
 
 
-def _make_dialog(config, monkeypatch, fake_devices=None):
-    """Construct a real SettingsDialog against a disposable config, with
-    DeviceManager/WhisperAloudClient faked out (no real audio hardware, no real
-    daemon/D-Bus call) per the audit's requirement."""
+class FakeClient:
+    """Stands in for WhisperAloudClient: records SetConfig calls (already
+    encoded for D-Bus, e.g. the -1 microphone sentinel) and serves GetConfig."""
+
+    def __init__(self, accept=True, config=None):
+        self.is_connected = True
+        self.accept = accept
+        self.sent = []
+        self.config = dict(config or {})
+
+    def set_config(self, changes):
+        self.sent.append(dict(changes))
+        return self.accept
+
+    def get_config(self):
+        return dict(self.config)
+
+    def get_status(self):
+        return {"hotkey_backend": "none"}
+
+
+def _gtk():
     import gi
 
     gi.require_version("Gtk", "4.0")
@@ -77,6 +99,14 @@ def _make_dialog(config, monkeypatch, fake_devices=None):
     if not Gtk.init_check():
         pytest.skip("GTK4 failed to initialize against the Xvfb display")
     Adw.init()
+    return Gtk
+
+
+def _make_dialog(config, monkeypatch, fake_devices=None, client=None):
+    """A real Preferences dialog against a disposable config, with
+    DeviceManager and the download client faked out (no audio hardware, no
+    real daemon/D-Bus call)."""
+    gtk = _gtk()
 
     from whisper_aloud.audio.device_manager import AudioDevice
     from whisper_aloud.ui.settings_dialog import SettingsDialog
@@ -87,21 +117,26 @@ def _make_dialog(config, monkeypatch, fake_devices=None):
                 id=0, name="Fake Mic", channels=1, sample_rate=16000.0,
                 is_default=True, hostapi="fake",
             ),
+            AudioDevice(
+                id=7, name="Second Mic", channels=1, sample_rate=16000.0,
+                is_default=False, hostapi="fake",
+            ),
         ]
     monkeypatch.setattr(
         "whisper_aloud.audio.DeviceManager.list_input_devices",
         staticmethod(lambda: fake_devices),
     )
 
-    fake_client = MagicMock()
-    fake_client.get_status.return_value = {"hotkey_backend": "none"}
+    download_client = MagicMock()
     monkeypatch.setattr(
         "whisper_aloud.service.client.WhisperAloudClient",
-        lambda *a, **kw: fake_client,
+        lambda *a, **kw: download_client,
     )
 
-    parent = Gtk.Window()
-    dialog = SettingsDialog(parent=parent, config=config)
+    if client is None:
+        client = FakeClient()
+    parent = gtk.Window()
+    dialog = SettingsDialog(parent=parent, config=config, client=client)
     return dialog
 
 
@@ -112,68 +147,351 @@ def config():
     return WhisperAloudConfig()
 
 
-def test_dialog_constructs_without_crashing(config, monkeypatch):
-    """Regression test for audit BLOCKER #1: SettingsDialog() used to raise
-    AttributeError on every construction (notice widgets read before creation)."""
+def _walk(widget):
+    yield widget
+    child = widget.get_first_child()
+    while child is not None:
+        yield from _walk(child)
+        child = child.get_next_sibling()
+
+
+# ─── structure ─────────────────────────────────────────────────────────────
+
+
+def test_dialog_is_an_adw_preferences_dialog_with_search(config, monkeypatch):
+    from gi.repository import Adw
+
+    from whisper_aloud.ui import settings_dialog
+
     dialog = _make_dialog(config, monkeypatch)
-    # The default config must resolve to a real, selected Model-row entry — never
-    # left unselected.
+    if settings_dialog.USE_PREFERENCES_DIALOG:
+        assert isinstance(dialog, Adw.PreferencesDialog)
+    else:
+        assert isinstance(dialog, Adw.PreferencesWindow)
+    assert dialog.get_title() == "Preferences"
+    assert dialog.get_search_enabled() is True
+
+
+def test_pages_are_general_audio_history_with_icons(config, monkeypatch):
+    dialog = _make_dialog(config, monkeypatch)
+    pages = [dialog.general_page, dialog.audio_page, dialog.history_page]
+    assert [p.get_title() for p in pages] == ["General", "Audio", "History"]
+    assert all(p.get_icon_name() for p in pages)
+
+
+def test_no_save_cancel_or_saved_alert_machinery(config, monkeypatch):
+    dialog = _make_dialog(config, monkeypatch)
+    labels = {
+        w.get_label() for w in _walk(dialog) if hasattr(w, "get_label") and w.get_label()
+    }
+    assert "Save" not in labels
+    for gone in ("_on_save_clicked", "_on_cancel_clicked", "_show_discard_confirmation",
+                 "_has_unsaved_changes", "_show_message"):
+        assert not hasattr(dialog, gone)
+
+
+def test_general_page_hosts_startup_and_top_bar_groups(config, monkeypatch):
+    from gi.repository import Adw
+
+    dialog = _make_dialog(config, monkeypatch)
+    startup = dialog._startup_section.widget
+    assert isinstance(startup, Adw.PreferencesGroup)
+    assert startup.get_ancestor(Adw.PreferencesPage) is dialog.general_page
+    shell = dialog._shell_extension_section
+    assert shell is not None
+    assert shell.widget.get_ancestor(Adw.PreferencesPage) is dialog.general_page
+
+
+def test_rows_use_adwaita_row_types(config, monkeypatch):
+    from gi.repository import Adw
+
+    dialog = _make_dialog(config, monkeypatch)
+    assert isinstance(dialog.auto_copy_row, Adw.SwitchRow)
+    assert isinstance(dialog.auto_paste_row, Adw.ExpanderRow)
+    assert dialog.auto_paste_row.get_show_enable_switch() is True
+    assert isinstance(dialog.paste_backend_row, Adw.ComboRow)
+    assert isinstance(dialog.paste_delay_row, Adw.SpinRow)
+    assert isinstance(dialog.notifications_row, Adw.ExpanderRow)
+    assert isinstance(dialog.microphone_row, Adw.ComboRow)
+    assert isinstance(dialog.hotkey_accel_row, Adw.EntryRow)
+    assert isinstance(dialog.cleanup_days_row, Adw.SpinRow)
+
+
+def test_rows_start_from_the_daemon_config(config, monkeypatch):
+    client = FakeClient(config={
+        "clipboard.auto_copy": False,
+        "clipboard.paste_backend": "clipboard",
+        "clipboard.paste_delay_ms": 300,
+        "audio.device_id": 7,
+    })
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    assert dialog.auto_copy_row.get_active() is False
+    model = dialog.paste_backend_row.get_model()
+    assert model.get_string(dialog.paste_backend_row.get_selected()) == "Clipboard Only"
+    assert dialog.paste_delay_row.get_value() == 300
+    assert dialog.microphone_row.get_selected() == 2  # System Default, Fake Mic, Second Mic
+    assert client.sent == []  # building the dialog sends nothing
+
+
+# ─── instant apply ─────────────────────────────────────────────────────────
+
+
+def test_switch_applies_immediately(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.auto_copy_row.set_active(False)
+    assert client.sent == [{"clipboard.auto_copy": False}]
+
+
+def test_expander_enable_switch_applies(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.auto_paste_row.set_enable_expansion(False)
+    dialog.notifications_row.set_enable_expansion(False)
+    assert client.sent == [{"clipboard.auto_paste": False}, {"notifications.enabled": False}]
+
+
+def test_notification_type_switch_applies(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.notification_rows["notifications.error"].set_active(False)
+    assert client.sent == [{"notifications.error": False}]
+
+
+def test_terminal_shortcut_switch_writes_paste_shortcut(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    assert dialog.terminal_paste_row.get_active() is True  # default ctrl+shift+v
+    dialog.terminal_paste_row.set_active(False)
+    assert client.sent == [{"clipboard.paste_shortcut": "ctrl+v"}]
+
+
+def test_paste_backend_combo_applies_every_value(config, monkeypatch):
+    from whisper_aloud.config import PASTE_BACKENDS
+
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    assert "screen-sharing" in dialog.paste_backend_row.get_subtitle()
+    for index, value in enumerate(PASTE_BACKENDS):
+        dialog.paste_backend_row.set_selected(index)
+        if value != "auto":
+            assert client.sent[-1] == {"clipboard.paste_backend": value}
+    assert {"clipboard.paste_backend": "remote-desktop"} in client.sent
+
+
+def test_spin_row_applies_an_int(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.paste_delay_row.set_value(250)
+    assert client.sent == [{"clipboard.paste_delay_ms": 250}]
+    assert isinstance(client.sent[0]["clipboard.paste_delay_ms"], int)
+
+
+def test_spin_row_applies_a_float(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.denoising_strength_row.set_value(0.75)
+    assert client.sent == [{"audio_processing.denoising_strength": 0.75}]
+
+
+def test_microphone_system_default_is_sent_as_the_sentinel(config, monkeypatch):
+    client = FakeClient(config={"audio.device_id": 7})
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.microphone_row.set_selected(0)
+    assert client.sent == [{"audio.device_id": -1}]
+    dialog.microphone_row.set_selected(2)
+    assert client.sent[-1] == {"audio.device_id": 7}
+
+
+def test_history_page_rows_apply(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.edit_history_row.set_active(False)
+    dialog.cleanup_days_row.set_value(30)
+    assert client.sent == [
+        {"persistence.edit_history_enabled": False},
+        {"persistence.auto_cleanup_days": 30},
+    ]
+
+
+def test_entry_row_applies_on_apply_signal(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    row = dialog.hotkey_accel_row
+    row.set_text("<Super><Alt>d")
+    assert client.sent == []  # typing alone sends nothing
+    row.emit("apply")
+    assert client.sent == [{"hotkey.toggle_recording": "<Super><Alt>d"}]
+    assert not row.has_css_class("error")
+
+
+def test_entry_row_invalid_value_is_inline_error_and_not_sent(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    row = dialog.hotkey_accel_row
+    row.set_text("<Bogus>@@")
+    row.emit("apply")
+    assert client.sent == []
+    assert row.has_css_class("error")
+    assert row.get_text() == "<Bogus>@@"  # the user's text is kept
+    assert dialog.last_error
+
+
+def test_rejected_change_reverts_row_and_keeps_other_settings(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.auto_copy_row.set_active(False)  # accepted
+    client.accept = False
+    dialog.notifications_row.set_enable_expansion(False)  # rejected
+    assert dialog.notifications_row.get_enable_expansion() is True
+    assert dialog.auto_copy_row.get_active() is False
+    assert dialog.binding.get("clipboard.auto_copy") is False
+    assert dialog.last_error
+
+
+def test_no_client_refuses_with_a_toast(config, monkeypatch):
+    from whisper_aloud.ui.settings_dialog import SettingsDialog
+
+    _make_dialog(config, monkeypatch)  # installs the device fakes
+    gtk = _gtk()
+    dialog = SettingsDialog(parent=gtk.Window(), config=config, client=None)
+    dialog.auto_copy_row.set_active(False)
+    assert dialog.auto_copy_row.get_active() is True
+    assert "not connected" in dialog.last_error
+
+
+# ─── live updates (ConfigChanged) ──────────────────────────────────────────
+
+
+def test_config_changed_updates_rows_without_sending(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.config_changed({
+        "clipboard.auto_copy": False,
+        "clipboard.paste_backend": "remote-desktop",
+        "clipboard.paste_delay_ms": 900,
+        "hotkey.toggle_recording": "<Ctrl><Alt>h",
+        "audio.device_id": 7,
+        "notifications.enabled": False,
+    })
+    assert dialog.auto_copy_row.get_active() is False
+    model = dialog.paste_backend_row.get_model()
+    assert model.get_string(dialog.paste_backend_row.get_selected()) == "Remote Desktop Portal"
+    assert dialog.paste_delay_row.get_value() == 900
+    assert dialog.hotkey_accel_row.get_text() == "<Ctrl><Alt>h"
+    assert dialog.microphone_row.get_selected() == 2
+    assert dialog.notifications_row.get_enable_expansion() is False
+    assert client.sent == []
+
+
+def test_config_changed_language_refreshes_language_and_model_rows(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.config_changed({"transcription.language": "es"})
+    model = dialog.language_row.get_model()
+    assert model.get_string(dialog.language_row.get_selected()) == "Español"
+    assert client.sent == []
+
+
+def test_reload_config_refetches_everything(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    client.config = {"clipboard.auto_paste": False, "persistence.max_entries": 500}
+    dialog.config_changed({})
+    assert dialog.auto_paste_row.get_enable_expansion() is False
+    assert dialog.max_entries_row.get_value() == 500
+    assert client.sent == []
+
+
+# ─── speech model rows (instant apply) ─────────────────────────────────────
+
+
+def test_dialog_constructs_with_a_selected_model(config, monkeypatch):
+    """Regression for audit BLOCKER #1 (notice widgets read before creation)."""
     from gi.repository import Gtk
 
-    assert dialog.model_row.get_selected() != Gtk.INVALID_LIST_POSITION
-    assert dialog._model_entries, "Model row must be populated on construction"
-
-    # Exercise the hotkey status button too (uses the faked WhisperAloudClient),
-    # since the audit asked for fakes of both DeviceManager and WhisperAloudClient.
-    dialog._on_register_hotkey_clicked(None)
-    assert dialog._hotkey_status_label.get_text()  # didn't crash, got some status text
-
-
-def test_model_and_engine_sync_both_directions(config, monkeypatch):
     dialog = _make_dialog(config, monkeypatch)
+    assert dialog.model_row.get_selected() != Gtk.INVALID_LIST_POSITION
+    assert dialog._model_entries
+    dialog._on_register_hotkey_clicked(None)
+    assert dialog._hotkey_status_label.get_text()
 
-    # Advanced -> Engine: switch to Parakeet, Model row must show Parakeet entries.
-    parakeet_idx = dialog._engine_keys.index("parakeet")
-    dialog.engine_row.set_selected(parakeet_idx)
+
+def test_engine_change_applies_engine_and_model(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.engine_row.set_selected(dialog._engine_keys.index("parakeet"))
     assert dialog._model_entries
     assert all(e.engine == "parakeet" for e in dialog._model_entries)
-    selected = dialog._model_entries[dialog.model_row.get_selected()]
-    assert selected.engine == "parakeet"
+    assert client.sent == [{"model.engine": "parakeet", "model.name": "parakeet-tdt-0.6b-v3"}]
 
-    # Model row -> Advanced->Engine (reverse sync): switch Advanced->Engine back to
-    # faster-whisper (repopulating the Model row with faster-whisper entries), then
-    # pick one explicitly and confirm Engine stays in sync.
-    dialog.engine_row.set_selected(dialog._engine_keys.index("faster-whisper"))
-    assert dialog._model_entries
-    assert all(e.engine == "faster-whisper" for e in dialog._model_entries)
-    dialog.model_row.set_selected(0)
+
+def test_model_row_change_applies_and_syncs_engine(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    current = dialog.model_row.get_selected()
+    other = next(i for i, e in enumerate(dialog._model_entries) if i != current)
+    entry = dialog._model_entries[other]
+    dialog.model_row.set_selected(other)
+    assert client.sent[-1]["model.name"] == entry.name
+    assert dialog._engine_keys[dialog.engine_row.get_selected()] == entry.engine
+
+
+def test_device_and_compute_type_apply(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.device_row.set_selected(1)  # CPU
+    dialog.compute_type_row.set_selected(1)  # float16
+    assert client.sent == [{"model.device": "cpu"}, {"model.compute_type": "float16"}]
+
+
+def test_language_row_applies(config, monkeypatch):
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    from whisper_aloud.ui.settings_logic import LANGUAGE_OPTIONS, option_index
+
+    dialog.language_row.set_selected(option_index(LANGUAGE_OPTIONS, "de"))
+    assert client.sent == [{"transcription.language": "de"}]
+
+
+def test_rejected_model_change_puts_rows_back(config, monkeypatch):
+    client = FakeClient(accept=False)
+    dialog = _make_dialog(config, monkeypatch, client=client)
+    dialog.engine_row.set_selected(dialog._engine_keys.index("parakeet"))
     assert dialog._engine_keys[dialog.engine_row.get_selected()] == "faster-whisper"
+    selected = dialog._model_entries[dialog.model_row.get_selected()]
+    assert (selected.engine, selected.name) == ("faster-whisper", "base")
 
 
 def test_language_fallback_when_engine_has_no_entries_for_language(config, monkeypatch):
-    """Reproduces the WHISP-42 audit HIGH #2 bug: language="ja" + Advanced->Parakeet
-    must show Parakeet's entries (not silently keep faster-whisper) and surface the
-    fallback notice."""
+    """WHISP-42 audit HIGH #2: language="ja" + Advanced->Parakeet shows
+    Parakeet's entries and the fallback notice."""
     config.transcription.language = "ja"
     dialog = _make_dialog(config, monkeypatch)
     assert dialog._language_fallback_notice.get_visible() is False
 
     dialog.engine_row.set_selected(dialog._engine_keys.index("parakeet"))
 
-    assert dialog._model_entries, "must not end up with an empty Model row"
-    assert all(e.engine == "parakeet" for e in dialog._model_entries), (
-        "must show Parakeet's own entries, not silently keep the previous "
-        "engine's (faster-whisper) list"
-    )
+    assert dialog._model_entries
+    assert all(e.engine == "parakeet" for e in dialog._model_entries)
     assert dialog._language_fallback_notice.get_visible() is True
     assert "ja" in dialog._language_fallback_notice.get_text()
 
 
-def test_selecting_from_full_catalog_updates_model_and_engine_rows(config, monkeypatch):
+def test_configured_model_hidden_by_language_filter_is_still_shown(config, monkeypatch):
+    config.transcription.language = "ja"
+    config.model.engine = "parakeet"
+    config.model.name = "parakeet-tdt-0.6b-v3"
+    dialog = _make_dialog(config, monkeypatch)
+    selected = dialog._model_entries[dialog.model_row.get_selected()]
+    assert (selected.engine, selected.name) == ("parakeet", "parakeet-tdt-0.6b-v3")
+
+
+def test_selecting_from_full_catalog_applies_model_and_engine(config, monkeypatch):
     from whisper_aloud.stt import catalog
 
-    dialog = _make_dialog(config, monkeypatch)
-
+    client = FakeClient()
+    dialog = _make_dialog(config, monkeypatch, client=client)
     parakeet_entry = catalog.get("parakeet", "parakeet-tdt-0.6b-v3")
 
     class _FakeWindow:
@@ -185,12 +503,11 @@ def test_selecting_from_full_catalog_updates_model_and_engine_rows(config, monke
     selected = dialog._model_entries[dialog.model_row.get_selected()]
     assert selected.name == "parakeet-tdt-0.6b-v3"
     assert dialog._engine_keys[dialog.engine_row.get_selected()] == "parakeet"
+    assert client.sent == [{"model.engine": "parakeet", "model.name": "parakeet-tdt-0.6b-v3"}]
 
 
 def test_needs_review_entry_from_catalog_does_not_crash_engine_sync(config, monkeypatch):
-    """Audit MEDIUM #3: a needs_review entry (e.g. WHISP-56's nemotron-streaming,
-    engine not in catalog.ENGINES) chosen from the full-catalog view must not raise
-    when _on_model_row_changed tries to sync Advanced->Engine."""
+    """Audit MEDIUM #3: an entry whose engine has no Engine-row option."""
     from whisper_aloud.stt import catalog
 
     dialog = _make_dialog(config, monkeypatch)
@@ -198,59 +515,39 @@ def test_needs_review_entry_from_catalog_does_not_crash_engine_sync(config, monk
     if not needs_review_entries:
         pytest.skip("no needs_review catalog entry present on this branch")
     entry = needs_review_entries[0]
-    assert entry.engine not in dialog._engine_keys  # precondition for the guard
+    assert entry.engine not in dialog._engine_keys
 
     class _FakeWindow:
         def close(self):
             pass
 
-    # Must not raise even though entry.engine has no Advanced->Engine row option.
     dialog._on_catalog_entry_chosen(None, entry, _FakeWindow())
     selected = dialog._model_entries[dialog.model_row.get_selected()]
     assert selected.name == entry.name
 
 
-def test_save_mapping_writes_engine_name_device_and_compute_type(config, monkeypatch):
-    dialog = _make_dialog(config, monkeypatch)
-    monkeypatch.setattr(dialog._config, "save", lambda: None)
-
-    dialog.engine_row.set_selected(dialog._engine_keys.index("parakeet"))
-    dialog.device_row.set_selected(0)  # "Auto"
-    dialog.compute_type_row.set_selected(1)  # "float16"
-
-    dialog._on_save_clicked(None)
-
-    assert dialog._config.model.engine == "parakeet"
-    assert dialog._config.model.name == "parakeet-tdt-0.6b-v3"
-    assert dialog._config.model.device == "auto"
-    assert dialog._config.model.compute_type == "float16"
-
-
-def test_dirty_tracking_flags_a_changed_compute_type(config, monkeypatch):
-    dialog = _make_dialog(config, monkeypatch)
-    assert dialog._has_unsaved_changes() is False
-
-    current = dialog.compute_type_row.get_selected()
-    other = (current + 1) % dialog.compute_type_row.get_model().get_n_items()
-    dialog.compute_type_row.set_selected(other)
-
-    assert dialog._has_unsaved_changes() is True
-
-
 # ─── WHISP-68: in-app model download row ───────────────────────────────────
 
 
-def test_download_button_visible_for_not_downloaded_model(config, monkeypatch):
-    """A selected-but-not-downloaded entry shows the Download button and no
-    progress/cancel/error -- the common "fresh install" case."""
-    from whisper_aloud.stt import catalog
+def _not_downloaded(monkeypatch):
     from whisper_aloud.ui import model_picker_logic
 
-    dialog = _make_dialog(config, monkeypatch)
     monkeypatch.setattr(
         "whisper_aloud.ui.settings_dialog.download_state_for",
         lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
     )
+
+
+def _fake_download_client(dialog, monkeypatch):
+    fake_client = MagicMock()
+    fake_client.download_model.return_value = True
+    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+    return fake_client
+
+
+def test_download_button_visible_for_not_downloaded_model(config, monkeypatch):
+    dialog = _make_dialog(config, monkeypatch)
+    _not_downloaded(monkeypatch)
     dialog._update_download_row()
 
     assert dialog._download_row_box.get_visible() is True
@@ -261,19 +558,9 @@ def test_download_button_visible_for_not_downloaded_model(config, monkeypatch):
 
 
 def test_download_button_click_starts_download_and_shows_progress(config, monkeypatch):
-    from unittest.mock import MagicMock
-
-    from whisper_aloud.ui import model_picker_logic
-
     dialog = _make_dialog(config, monkeypatch)
-    monkeypatch.setattr(
-        "whisper_aloud.ui.settings_dialog.download_state_for",
-        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
-    )
-
-    fake_client = MagicMock()
-    fake_client.download_model.return_value = True
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+    _not_downloaded(monkeypatch)
+    fake_client = _fake_download_client(dialog, monkeypatch)
 
     dialog._update_download_row()
     dialog._on_download_clicked(None)
@@ -281,33 +568,20 @@ def test_download_button_click_starts_download_and_shows_progress(config, monkey
     entry = dialog._selected_entry()
     fake_client.download_model.assert_called_once()
     assert dialog._downloading is True
-    assert dialog._download_row_box.get_visible() is True
     assert dialog._download_button.get_visible() is False
     assert dialog._download_progress.get_visible() is True
     assert dialog._download_cancel_button.get_visible() is True
 
-    # A progress signal for this exact (engine, name) updates the bar.
     dialog._on_download_progress_signal(entry.engine, entry.name, 50, 100)
     assert dialog._download_progress_state == (50, 100)
-
-    # A progress signal for a *different* entry must be ignored.
     dialog._on_download_progress_signal("other-engine", "other-name", 1, 2)
     assert dialog._download_progress_state == (50, 100)
 
 
 def test_download_cancel_button_calls_client_cancel_download(config, monkeypatch):
-    from unittest.mock import MagicMock
-
-    from whisper_aloud.ui import model_picker_logic
-
     dialog = _make_dialog(config, monkeypatch)
-    monkeypatch.setattr(
-        "whisper_aloud.ui.settings_dialog.download_state_for",
-        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
-    )
-    fake_client = MagicMock()
-    fake_client.download_model.return_value = True
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+    _not_downloaded(monkeypatch)
+    fake_client = _fake_download_client(dialog, monkeypatch)
 
     dialog._on_download_clicked(None)
     dialog._on_download_cancel_clicked(None)
@@ -316,50 +590,29 @@ def test_download_cancel_button_calls_client_cancel_download(config, monkeypatch
 
 
 def test_download_finished_failure_shows_error_and_refreshes_row(config, monkeypatch):
-    from unittest.mock import MagicMock
-
-    from whisper_aloud.ui import model_picker_logic
-
     dialog = _make_dialog(config, monkeypatch)
-    monkeypatch.setattr(
-        "whisper_aloud.ui.settings_dialog.download_state_for",
-        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
-    )
-    fake_client = MagicMock()
-    fake_client.download_model.return_value = True
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+    _not_downloaded(monkeypatch)
+    _fake_download_client(dialog, monkeypatch)
 
     dialog._on_download_clicked(None)
     entry = dialog._download_active_entry
-
     dialog._on_download_finished_signal(entry[0], entry[1], False, "network exploded")
 
     assert dialog._downloading is False
     assert dialog._download_error_label.get_visible() is True
     assert "network exploded" in dialog._download_error_label.get_text()
-    # Still not downloaded (the patched download_state_for always says False) --
-    # the Download button must come back so the user can retry.
     assert dialog._download_button.get_visible() is True
 
 
 def test_download_finished_success_hides_row_once_downloaded(config, monkeypatch):
-    from unittest.mock import MagicMock
-
     from whisper_aloud.ui import model_picker_logic
 
     dialog = _make_dialog(config, monkeypatch)
-    monkeypatch.setattr(
-        "whisper_aloud.ui.settings_dialog.download_state_for",
-        lambda entry: model_picker_logic.DownloadState(downloaded=False, detection="unknown"),
-    )
-    fake_client = MagicMock()
-    fake_client.download_model.return_value = True
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
+    _not_downloaded(monkeypatch)
+    _fake_download_client(dialog, monkeypatch)
 
     dialog._on_download_clicked(None)
     entry = dialog._download_active_entry
-
-    # Simulate the model now being present on disk once DownloadFinished fires.
     monkeypatch.setattr(
         "whisper_aloud.ui.settings_dialog.download_state_for",
         lambda e: model_picker_logic.DownloadState(downloaded=True, detection="unknown"),
@@ -374,34 +627,14 @@ def test_download_finished_success_hides_row_once_downloaded(config, monkeypatch
 # ─── WHISP-68 audit BLOCKER #1: explicit license consent dialog ────────────
 
 
-def test_download_click_on_needs_review_entry_opens_consent_dialog_not_download(
-    config, monkeypatch
-):
-    """Clicking Download on a needs_review entry must show the consent
-    dialog instead of calling DownloadModel directly."""
-    from unittest.mock import MagicMock
-
+def test_download_click_on_nonstandard_license_opens_consent_dialog(config, monkeypatch):
     from whisper_aloud.stt import catalog
 
     dialog = _make_dialog(config, monkeypatch)
-    fake_client = MagicMock()
-    fake_client.download_model.return_value = True
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
-
-    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
-    # license review completed), so it's no longer found via `e.needs_review` --
-    # but it's still a non-standard-license entry, so requires_license_consent()
-    # (and this consent-dialog flow) must still apply to it.
+    fake_client = _fake_download_client(dialog, monkeypatch)
     entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
     shown = {}
-    original = dialog._show_license_consent_dialog
-
-    def _capture(entry_arg):
-        shown["entry"] = entry_arg
-        # Don't actually call Adw.MessageDialog.present() -- just prove the
-        # dialog path was taken instead of starting a download.
-
-    monkeypatch.setattr(dialog, "_show_license_consent_dialog", _capture)
+    monkeypatch.setattr(dialog, "_show_license_consent_dialog", lambda e: shown.update(entry=e))
     monkeypatch.setattr(dialog, "_selected_entry", lambda: entry)
 
     dialog._on_download_clicked(None)
@@ -410,184 +643,73 @@ def test_download_click_on_needs_review_entry_opens_consent_dialog_not_download(
     fake_client.download_model.assert_not_called()
 
 
-def test_license_consent_dialog_cancel_sends_nothing(config, monkeypatch):
-    from unittest.mock import MagicMock
-
+def test_license_consent_cancel_sends_nothing_accept_sends_true(config, monkeypatch):
     from whisper_aloud.stt import catalog
 
     dialog = _make_dialog(config, monkeypatch)
-    fake_client = MagicMock()
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
-
-    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
-    # license review completed), so it's no longer found via `e.needs_review` --
-    # but it's still a non-standard-license entry, so requires_license_consent()
-    # (and this consent-dialog flow) must still apply to it.
+    fake_client = _fake_download_client(dialog, monkeypatch)
     entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
-    dialog._on_license_consent_response(None, "cancel", entry)
 
+    dialog._on_license_consent_response(None, "cancel", entry)
     fake_client.download_model.assert_not_called()
 
-
-def test_license_consent_dialog_accept_sends_accept_license_true(config, monkeypatch):
-    from unittest.mock import MagicMock
-
-    from whisper_aloud.stt import catalog
-
-    dialog = _make_dialog(config, monkeypatch)
-    fake_client = MagicMock()
-    fake_client.download_model.return_value = True
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
-
-    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
-    # license review completed), so it's no longer found via `e.needs_review` --
-    # but it's still a non-standard-license entry, so requires_license_consent()
-    # (and this consent-dialog flow) must still apply to it.
-    entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
     dialog._on_license_consent_response(None, "accept", entry)
-
     fake_client.download_model.assert_called_once_with(entry.engine, entry.name, True)
     assert dialog._downloading is True
 
 
-def test_license_consent_dialog_shows_label_license_and_doc_reference(config, monkeypatch):
-    """Real dialog construction (no mocking of the dialog itself): confirms the
-    consent dialog -- Adw.AlertDialog on this libadwaita, or the Adw.MessageDialog
-    fallback on older libadwaita (WHISP-78) -- actually appears with the right
-    heading, and that its Cancel response sends nothing while Accept sends
-    accept_license=True."""
-    from unittest.mock import MagicMock
-
+def test_license_consent_dialog_presents_over_the_preferences(config, monkeypatch):
+    """Real construction: the consent AlertDialog is presented with the
+    Preferences dialog as its parent, without raising."""
     from whisper_aloud.stt import catalog
-    from whisper_aloud.ui import dialogs
 
+    gtk = _gtk()
     dialog = _make_dialog(config, monkeypatch)
-    fake_client = MagicMock()
-    fake_client.download_model.return_value = True
-    monkeypatch.setattr(dialog, "_get_download_client", lambda: fake_client)
-
-    # WHISP-86: nemotron-streaming's needs_review is now False (its OpenMDW-1.1
-    # license review completed), so it's no longer found via `e.needs_review` --
-    # but it's still a non-standard-license entry, so requires_license_consent()
-    # (and this consent-dialog flow) must still apply to it.
+    parent = gtk.Window()
+    parent.present()
+    dialog.present_for(parent)
     entry = catalog.get("nemotron-streaming", "nemotron-3.5-streaming-560ms")
     dialog._show_license_consent_dialog(entry)
+    dialog.close()
 
-    # The dialog was actually presented (no exception) -- now build one the same
-    # way the helper does, to confirm the heading is wired through correctly,
-    # then simulate the user picking "Cancel" and "Accept and download".
-    built = dialogs.confirm(
-        parent=dialog,
-        heading=entry.label,
-        body="x",
-        accept_label="Accept and download",
-        on_accept=lambda: None,
+
+# ─── MainWindow wiring ─────────────────────────────────────────────────────
+
+
+def _pump():
+    from gi.repository import GLib
+
+    context = GLib.MainContext.default()
+    while context.iteration(False):
+        pass
+
+
+def test_main_window_opens_preferences_and_forwards_config_changed(monkeypatch):
+    from tests.gui.test_main_window_partial_smoke import _make_window
+
+    # Only the device list is faked: faking WhisperAloudClient here would let
+    # MainWindow's own pending connect attempt "succeed" with the fake.
+    monkeypatch.setattr(
+        "whisper_aloud.audio.DeviceManager.list_input_devices", staticmethod(lambda: [])
     )
-    assert entry.label == built.get_heading()
+    window, client = _make_window()
+    client.set_config = lambda changes: True
+    window._on_settings_clicked(None)
+    dialog = window._preferences_dialog
+    assert dialog is not None
 
-    dialog._on_license_consent_response(None, "cancel", entry)
-    fake_client.download_model.assert_not_called()
+    # Same dialog on a second Ctrl+, (no duplicate windows).
+    window._on_settings_clicked(None)
+    assert window._preferences_dialog is dialog
 
-    dialog._on_license_consent_response(None, "accept", entry)
-    fake_client.download_model.assert_called_once_with(entry.engine, entry.name, True)
+    # Another client changes settings: the main window's config, its
+    # language selector and the open dialog all follow.
+    client._config_changed_cb({"transcription.language": "es", "clipboard.auto_copy": False})
+    _pump()
+    assert window.config.transcription.language == "es"
+    assert window._language_codes[window.lang_dropdown.get_selected()] == "es"
+    assert dialog.auto_copy_row.get_active() is False
 
-
-# ─── WHISP-78: discard-changes confirmation migrated off Gtk.MessageDialog ──
-
-
-def test_discard_confirmation_shown_sets_child_dialog_open(config, monkeypatch):
-    """Real dialog construction (Adw.AlertDialog on this libadwaita, or the
-    Adw.MessageDialog fallback on older libadwaita per WHISP-78) -- confirms
-    the discard-confirmation dialog actually appears with the right heading."""
-    from whisper_aloud.ui import dialogs
-
-    dialog = _make_dialog(config, monkeypatch)
-    assert dialog._child_dialog_open is False
-
-    dialog._show_discard_confirmation()
-    assert dialog._child_dialog_open is True
-
-    built = dialogs.confirm(
-        parent=dialog,
-        heading="Discard unsaved changes?",
-        body="x",
-        accept_label="Discard",
-        on_accept=lambda: None,
-    )
-    assert built.get_heading() == "Discard unsaved changes?"
-
-
-def test_discard_confirmation_keep_editing_does_not_close(config, monkeypatch):
-    """'Keep Editing' (cancel response) must not close the dialog or mark it
-    allowed to close -- only clears the child-dialog-open bookkeeping flag."""
-    dialog = _make_dialog(config, monkeypatch)
-    dialog._child_dialog_open = True
-
-    dialog._on_discard_confirmation_response("cancel")
-
-    assert dialog._child_dialog_open is False
-    assert dialog._allow_close is False
-
-
-def test_discard_confirmation_discard_sets_allow_close(config, monkeypatch):
-    """Only the 'Discard' (accept) response triggers allow_close+close."""
-    dialog = _make_dialog(config, monkeypatch)
-    assert dialog._allow_close is False
-
-    dialog._on_discard_confirmed()
-
-    assert dialog._allow_close is True
-
-
-# ─── WHISP-80: _show_message migrated off Gtk.MessageDialog ───────────────
-
-
-def test_show_message_dialog_appears_with_message_as_heading(config, monkeypatch):
-    """Real dialog construction (Adw.AlertDialog on this libadwaita, or the
-    Adw.MessageDialog fallback on older libadwaita, per WHISP-78/80) --
-    confirms the single-OK message dialog actually appears with the message
-    as its heading and a single "OK" response."""
-    from gi.repository import Gtk
-
-    dialog = _make_dialog(config, monkeypatch)
-    assert dialog._child_dialog_open is False
-
-    built = dialog._show_message("Settings saved successfully", Gtk.MessageType.INFO)
-
-    assert built.get_heading() == "Settings saved successfully"
-    assert dialog._child_dialog_open is True
-
-
-def test_show_message_ok_response_clears_child_dialog_flag_and_calls_on_close(
-    config, monkeypatch
-):
-    """The single "ok" response must clear _child_dialog_open and run
-    on_close -- the same bookkeeping the old Gtk.MessageDialog version did in
-    its "response" handler, regardless of which response ends up firing."""
-    from gi.repository import Gtk
-
-    dialog = _make_dialog(config, monkeypatch)
-    on_close_calls = []
-
-    built = dialog._show_message(
-        "Error saving settings: boom", Gtk.MessageType.ERROR, on_close=lambda: on_close_calls.append(True)
-    )
-    assert dialog._child_dialog_open is True
-
-    built.emit("response", "ok")
-
-    assert dialog._child_dialog_open is False
-    assert on_close_calls == [True]
-
-
-def test_show_message_without_on_close_does_not_raise_on_response(config, monkeypatch):
-    """_show_message's on_close is optional -- firing the "ok" response with
-    none given (the common validation-error path) must not raise."""
-    from gi.repository import Gtk
-
-    dialog = _make_dialog(config, monkeypatch)
-
-    built = dialog._show_message("Invalid input: bad value", Gtk.MessageType.ERROR)
-    built.emit("response", "ok")  # must not raise
-
-    assert dialog._child_dialog_open is False
+    dialog.close()
+    _pump()
+    assert window._preferences_dialog is None

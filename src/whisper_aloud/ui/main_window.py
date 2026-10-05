@@ -39,7 +39,9 @@ from .main_window_logic import (
     transcribing_status_text,
 )
 from .partial_view_logic import PartialViewState, tentative_rgba
+from .prefs_binding import apply_flat_changes, initial_values
 from .settings_dialog import SettingsDialog
+from .settings_logic import LANGUAGE_OPTIONS
 from .shortcuts_window import ShortcutsWindow
 from .sound_feedback import SoundFeedback
 from .status_bar import StatusBar
@@ -118,6 +120,9 @@ class MainWindow(Adw.ApplicationWindow):
         # arrive after the dialog was closed. Created on first use.
         self._autostart_controller = None
 
+        # The open Preferences dialog (HIG-07), forwarded ConfigChanged.
+        self._preferences_dialog = None
+
         # Sound feedback (initialized early as it's lightweight)
         self.sound_feedback = SoundFeedback(enabled=True)
 
@@ -176,15 +181,14 @@ class MainWindow(Adw.ApplicationWindow):
         # Settings button
         self.settings_button = Gtk.Button()
         self.settings_button.set_icon_name("preferences-system-symbolic")
-        self.settings_button.set_tooltip_text("Settings (Ctrl+,)")
+        self.settings_button.set_tooltip_text("Preferences (Ctrl+,)")
         self.settings_button.set_sensitive(False)
         self.settings_button.connect("clicked", self._on_settings_clicked)
         self.header_bar.pack_end(self.settings_button)
 
         # Language selector dropdown
-        self._language_codes = ["auto", "en", "es", "fr", "de", "it", "pt", "ja", "zh", "ko", "ru", "ar", "hi"]
-        self._language_labels = ["Auto", "English", "Espa\u00f1ol", "Fran\u00e7ais", "Deutsch",
-                                  "Italiano", "Portugu\u00eas", "\u65e5\u672c\u8a9e", "\u4e2d\u6587", "\ud55c\uad6d\uc5b4", "\u0420\u0443\u0441\u0441\u043a\u0438\u0439", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "\u0939\u093f\u0928\u094d\u0926\u0940"]
+        self._language_codes = [code for code, _label in LANGUAGE_OPTIONS]
+        self._language_labels = [label for _code, label in LANGUAGE_OPTIONS]
         self.lang_dropdown = Gtk.DropDown.new_from_strings(self._language_labels)
         self.lang_dropdown.set_tooltip_text("Select transcription language")
         self.lang_dropdown.set_selected(0)  # Default to Auto, will be updated when config loads
@@ -493,6 +497,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.client.on_transcription_ready(self._on_daemon_transcription_ready)
         self.client.on_level_update(self._on_daemon_level_update)
         self.client.on_error(self._on_daemon_error)
+        # Keep the GUI's config copy (language selector, Preferences) live
+        # when the CLI or another window changes a setting.
+        self.client.on_config_changed(self._on_daemon_config_changed)
         self.client.on_partial_transcript(self._on_daemon_partial_transcript)
         # Subscribe before reading GetStatus so no transition is missed.
         self.client.on_model_state_changed(self._on_daemon_model_state_changed)
@@ -1545,14 +1552,56 @@ class MainWindow(Adw.ApplicationWindow):
             self.status_bar.set_status("Settings unavailable until daemon connects")
             return
 
-        # Create and show settings dialog
+        if self._preferences_dialog is not None:
+            self._preferences_dialog.present_for(self)
+            return
+
         dialog = SettingsDialog(
             self,
             self.config,
-            on_save_callback=self._on_settings_saved,
+            client=self.client if self.client and self.client.is_connected else None,
             autostart_controller=self._get_autostart_controller(),
         )
-        dialog.present()
+        dialog.connect_closed(self._on_preferences_closed)
+        self._preferences_dialog = dialog
+        dialog.present_for(self)
+
+    def _on_preferences_closed(self) -> None:
+        self._preferences_dialog = None
+
+    def _on_daemon_config_changed(self, changes) -> None:
+        """ConfigChanged from the daemon (any client, including Preferences)."""
+        GLib.idle_add(self._handle_config_changed, dict(changes or {}))
+
+    def _handle_config_changed(self, changes: dict) -> bool:
+        """Apply a ConfigChanged payload to the GUI's config copy, the
+        language selector and an open Preferences dialog (main thread)."""
+        try:
+            if self.config is None:
+                self.config = WhisperAloudConfig()
+            if changes:
+                self.config = apply_flat_changes(self.config, changes)
+            elif self.client is not None:
+                # ReloadConfig: re-read everything.
+                self.config = apply_flat_changes(
+                    self.config, initial_values(self.config, self.client)
+                )
+            self._sync_language_dropdown()
+            self._update_model_info()
+            self._set_current_entry(self._current_entry_id)
+        except Exception as e:
+            logger.error(f"Error applying ConfigChanged: {e}", exc_info=True)
+        if self._preferences_dialog is not None:
+            self._preferences_dialog.config_changed(changes)
+        return False
+
+    def _sync_language_dropdown(self) -> None:
+        lang = self.config.transcription.language if self.config else None
+        if lang in self._language_codes:
+            index = self._language_codes.index(lang)
+            if self.lang_dropdown.get_selected() != index:
+                # self.config already holds lang, so the handler sees no change.
+                self.lang_dropdown.set_selected(index)
 
     def _get_autostart_controller(self):
         """The process-wide AutostartController (WHISP-87), or None if it
@@ -1585,36 +1634,6 @@ class MainWindow(Adw.ApplicationWindow):
         )
         where = persist_autostart_setting(enabled, client, load_config=WhisperAloudConfig.load)
         logger.info("startup.autostart_background=%s stored via %s", enabled, where)
-
-    def _on_settings_saved(self) -> None:
-        """Handle settings saved event.
-
-        The SettingsDialog writes the config file directly (multi-field batch).
-        We tell the daemon to reload so it picks up the changes and
-        re-initializes any affected components.
-        """
-        logger.info("Settings saved, notifying daemon to reload config")
-
-        try:
-            # Reload local config reference from disk
-            self.config = WhisperAloudConfig.load()
-
-            # Tell daemon to reload from disk (triggers _apply_config_changes)
-            if self.client and self.client.is_connected and self._daemon_available:
-                self.client.reload_config()
-            else:
-                self.status_bar.set_status("Saved locally; reconnect daemon to apply")
-
-            # Update model info display
-            self._update_model_info()
-
-            # Re-evaluate text_view editability with fresh config
-            self._set_current_entry(self._current_entry_id)
-
-        except Exception as e:
-            logger.error(f"Error in _on_settings_saved: {e}", exc_info=True)
-            self.status_bar.set_status("Error updating settings")
-            self.set_state(AppState.ERROR)
 
     def _on_history_toggled(self, button: Gtk.ToggleButton) -> None:
         """Handle history toggle button."""
