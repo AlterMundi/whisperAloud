@@ -8,7 +8,8 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gdk, Gio, GLib, Gtk
+gi.require_version('Adw', '1')
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from ..config import WhisperAloudConfig
 from ..daemon_hints import gui_daemon_unavailable_hint
@@ -47,8 +48,13 @@ from .utils import AppState, format_duration
 logger = logging.getLogger(__name__)
 
 
-class MainWindow(Gtk.ApplicationWindow):
-    """Main application window with recording and transcription controls."""
+class MainWindow(Adw.ApplicationWindow):
+    """Main application window with recording and transcription controls.
+
+    Layout (HIG-01): an Adw.ToolbarView whose top bar is an Adw.HeaderBar and
+    whose bottom bar is the status bar; the history/transcription Gtk.Paned
+    is the toolbar view's content.
+    """
 
     def __init__(self, application: Gtk.Application) -> None:
         """
@@ -121,8 +127,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Set window properties
         self.set_title("WhisperAloud")
         self.set_default_size(900, 600)
-        self.add_css_class("wa-app-window")
-        self.set_titlebar(self.header_bar)  # Use custom header bar
+        # HIG minimum window size; the content's own size requests still win
+        # until the adaptive layout lands (HIG-12).
+        self.set_size_request(360, 294)
 
         # Set up keyboard shortcuts
         self._setup_keyboard_shortcuts()
@@ -134,14 +141,15 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _build_ui(self) -> None:
         """Build the user interface."""
-        # Create main vertical box
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.set_child(main_box)
+        # Adw.ApplicationWindow has no titlebar slot: the header bar is the
+        # toolbar view's top bar and the status bar its bottom bar.
+        self.toolbar_view = Adw.ToolbarView()
+        self.set_content(self.toolbar_view)
 
         # Create header bar
-        self.header_bar = Gtk.HeaderBar()
-        self.header_bar.set_show_title_buttons(True)
-        self.header_bar.add_css_class("wa-headerbar")
+        self.header_bar = Adw.HeaderBar()
+        self.header_bar.set_title_widget(Adw.WindowTitle(title="WhisperAloud", subtitle=""))
+        self.toolbar_view.add_top_bar(self.header_bar)
 
         # History toggle button
         self.history_toggle = Gtk.ToggleButton()
@@ -197,7 +205,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.paned.set_shrink_end_child(False)
         self.paned.set_resize_start_child(True)   # history grows proportionally
         self.paned.set_resize_end_child(True)     # controls grow proportionally
-        main_box.append(self.paned)
+        self.toolbar_view.set_content(self.paned)
 
         # Left side: Recording and Transcription
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -316,7 +324,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # "Model missing — Download": the download itself (with license
         # consent and progress) lives in Settings' model row.
         self.status_bar.model_download_button.connect("clicked", self._on_settings_clicked)
-        main_box.append(self.status_bar)
+        self.toolbar_view.add_bottom_bar(self.status_bar)
 
         # Drag-and-drop a file anywhere on the window to transcribe it
         # (WHISP-96). Gdk.FileList covers both plain local drops and

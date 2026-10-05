@@ -6,7 +6,8 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gio, GLib, Gtk
+gi.require_version('Adw', '1')
+from gi.repository import Adw, Gio, GLib
 
 from .file_transcription_logic import pick_first_supported_path
 from .main_window import MainWindow
@@ -15,8 +16,14 @@ from .styles import install_app_css
 logger = logging.getLogger(__name__)
 
 
-class WhisperAloudApp(Gtk.Application):
-    """Main application class managing lifecycle and window."""
+class WhisperAloudApp(Adw.Application):
+    """Main application class managing lifecycle and window.
+
+    An Adw.Application (HIG-01): its startup initializes libadwaita, which
+    loads the Adwaita stylesheet and lets Adw.StyleManager follow the
+    desktop's light/dark preference. The colour scheme is left at its
+    default (follow the system) on purpose.
+    """
 
     def __init__(self) -> None:
         """Initialize the application."""
@@ -38,7 +45,7 @@ class WhisperAloudApp(Gtk.Application):
 
         Sets up actions, keyboard shortcuts, and other one-time initialization.
         """
-        Gtk.Application.do_startup(self)
+        Adw.Application.do_startup(self)
         logger.info("Application startup")
         install_app_css()
 
@@ -99,7 +106,7 @@ class WhisperAloudApp(Gtk.Application):
         if self.window:
             self.window.cleanup()
 
-        Gtk.Application.do_shutdown(self)
+        Adw.Application.do_shutdown(self)
         logger.info("Application shutdown complete")
 
     def _create_actions(self) -> None:
