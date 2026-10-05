@@ -155,7 +155,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.history_toggle = Gtk.ToggleButton()
         self.history_toggle.set_icon_name("sidebar-show-symbolic")
         self.history_toggle.set_tooltip_text("Toggle History")
-        self.history_toggle.add_css_class("wa-toolbar-btn")
         self.history_toggle.set_active(True)
         self.history_toggle.connect("toggled", self._on_history_toggled)
         self.header_bar.pack_start(self.history_toggle)
@@ -164,7 +163,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.transcribe_file_button = Gtk.Button()
         self.transcribe_file_button.set_icon_name("document-open-symbolic")
         self.transcribe_file_button.set_tooltip_text("Transcribe file… (Ctrl+O)")
-        self.transcribe_file_button.add_css_class("wa-toolbar-btn")
         self.transcribe_file_button.connect("clicked", self._on_transcribe_file_clicked)
         self.header_bar.pack_start(self.transcribe_file_button)
 
@@ -172,7 +170,6 @@ class MainWindow(Adw.ApplicationWindow):
         help_button = Gtk.Button()
         help_button.set_icon_name("help-about-symbolic")
         help_button.set_tooltip_text("Keyboard Shortcuts (F1)")
-        help_button.add_css_class("wa-toolbar-btn")
         help_button.connect("clicked", self._on_help_clicked)
         self.header_bar.pack_end(help_button)
 
@@ -180,7 +177,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.settings_button = Gtk.Button()
         self.settings_button.set_icon_name("preferences-system-symbolic")
         self.settings_button.set_tooltip_text("Settings (Ctrl+,)")
-        self.settings_button.add_css_class("wa-toolbar-btn")
         self.settings_button.set_sensitive(False)
         self.settings_button.connect("clicked", self._on_settings_clicked)
         self.header_bar.pack_end(self.settings_button)
@@ -191,7 +187,6 @@ class MainWindow(Adw.ApplicationWindow):
                                   "Italiano", "Portugu\u00eas", "\u65e5\u672c\u8a9e", "\u4e2d\u6587", "\ud55c\uad6d\uc5b4", "\u0420\u0443\u0441\u0441\u043a\u0438\u0439", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "\u0939\u093f\u0928\u094d\u0926\u0940"]
         self.lang_dropdown = Gtk.DropDown.new_from_strings(self._language_labels)
         self.lang_dropdown.set_tooltip_text("Select transcription language")
-        self.lang_dropdown.add_css_class("wa-language")
         self.lang_dropdown.set_selected(0)  # Default to Auto, will be updated when config loads
 
         self.lang_dropdown.connect("notify::selected", self._on_language_changed)
@@ -212,7 +207,6 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Recording panel
         recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        recording_panel_box.add_css_class("wa-surface")
         recording_panel_box.set_margin_start(24)
         recording_panel_box.set_margin_end(24)
         recording_panel_box.set_margin_top(10)
@@ -223,7 +217,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.record_button = Gtk.Button(label="Start Recording")
         self.record_button.add_css_class("suggested-action")
         self.record_button.add_css_class("pill")
-        self.record_button.add_css_class("wa-primary-action")
         self.record_button.set_size_request(200, 44)  # Fixed width for consistent look
         self.record_button.set_sensitive(False)  # Disabled until daemon connects
         self.record_button.set_tooltip_text("Start/stop recording (Space)")
@@ -234,7 +227,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.cancel_button = Gtk.Button(label="Cancel")
         self.cancel_button.add_css_class("destructive-action")
         self.cancel_button.add_css_class("pill")
-        self.cancel_button.add_css_class("wa-primary-action")
         self.cancel_button.set_size_request(200, 44)  # Same size as record button
         self.cancel_button.set_visible(False)  # Hidden by default
         self.cancel_button.set_tooltip_text("Cancel transcription (Ctrl+X)")
@@ -260,7 +252,6 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Transcription view
         transcription_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        transcription_box.add_css_class("wa-surface")
         transcription_box.set_margin_start(16)
         transcription_box.set_margin_end(16)
         transcription_box.set_margin_top(12)
@@ -269,13 +260,15 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Scrolled window with text view
         scrolled = Gtk.ScrolledWindow()
-        scrolled.add_css_class("wa-output-wrap")
+        scrolled.add_css_class("card")
         scrolled.set_vexpand(True)
         scrolled.set_hexpand(True)
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
         self.text_view = Gtk.TextView()
-        self.text_view.add_css_class("wa-output")
+        # "inline": transparent background, so the text sits on the card
+        # (otherwise the view background shows as an inset in dark style).
+        self.text_view.add_css_class("inline")
         self.text_view.set_editable(False)
         self.text_view.set_wrap_mode(Gtk.WrapMode.WORD)
         self.text_view.set_margin_start(12)
@@ -294,14 +287,12 @@ class MainWindow(Adw.ApplicationWindow):
         button_box.set_halign(Gtk.Align.END)
 
         self.copy_button = Gtk.Button(label="Copy to Clipboard")
-        self.copy_button.add_css_class("wa-ghost")
         self.copy_button.set_sensitive(False)
         self.copy_button.set_tooltip_text("Copy transcription to clipboard (Ctrl+C)")
         self.copy_button.connect("clicked", self._on_copy_clicked)
         button_box.append(self.copy_button)
 
         self.clear_button = Gtk.Button(label="Clear")
-        self.clear_button.add_css_class("wa-ghost")
         self.clear_button.set_sensitive(False)
         self.clear_button.set_tooltip_text("Clear transcription text (Escape)")
         self.clear_button.connect("clicked", self._on_clear_clicked)

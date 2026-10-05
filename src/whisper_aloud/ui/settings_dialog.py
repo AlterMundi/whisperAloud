@@ -87,7 +87,6 @@ class SettingsDialog(Gtk.Window):
         self.set_modal(False)
         self.set_resizable(True)
         self.set_transient_for(parent)
-        self.add_css_class("wa-dialog-window")
 
         # Store configuration
         self._config = config
@@ -148,12 +147,13 @@ class SettingsDialog(Gtk.Window):
 
         # Header bar
         header_bar = Gtk.HeaderBar()
-        header_bar.add_css_class("wa-headerbar")
-        header_bar.set_title_widget(Gtk.Label(label="Settings"))
+        # "title" gives the header-bar title weight under Adwaita.
+        title_label = Gtk.Label(label="Settings")
+        title_label.add_css_class("title")
+        header_bar.set_title_widget(title_label)
 
         # Cancel button
         cancel_button = Gtk.Button(label="Cancel")
-        cancel_button.add_css_class("wa-ghost")
         cancel_button.set_tooltip_text("Discard and close (Esc)")
         cancel_button.connect("clicked", self._on_cancel_clicked)
         header_bar.pack_start(cancel_button)
@@ -161,7 +161,6 @@ class SettingsDialog(Gtk.Window):
         # Save button
         save_button = Gtk.Button(label="Save")
         save_button.add_css_class("suggested-action")
-        save_button.add_css_class("wa-primary-action")
         save_button.set_tooltip_text("Save settings (Ctrl+S)")
         save_button.connect("clicked", self._on_save_clicked)
         header_bar.pack_end(save_button)
@@ -173,7 +172,6 @@ class SettingsDialog(Gtk.Window):
 
         # Stack switcher
         stack_switcher = Gtk.StackSwitcher()
-        stack_switcher.add_css_class("wa-tabs")
         stack_switcher.set_stack(self.stack)
         stack_switcher.set_halign(Gtk.Align.CENTER)
         stack_switcher.set_margin_top(12)
@@ -256,7 +254,6 @@ class SettingsDialog(Gtk.Window):
         model_section = Gtk.Label(label="Transcription")
         model_section.set_halign(Gtk.Align.START)
         model_section.add_css_class("heading")
-        model_section.add_css_class("wa-section-title")
         page.append(model_section)
 
         # Model selector — catalog-driven boxed-list (WHISP-42)
@@ -392,7 +389,6 @@ class SettingsDialog(Gtk.Window):
         audio_section = Gtk.Label(label="Audio Input")
         audio_section.set_halign(Gtk.Align.START)
         audio_section.add_css_class("heading")
-        audio_section.add_css_class("wa-section-title")
         audio_section.set_margin_top(12)
         page.append(audio_section)
 
@@ -431,7 +427,6 @@ class SettingsDialog(Gtk.Window):
         clipboard_section = Gtk.Label(label="Clipboard")
         clipboard_section.set_halign(Gtk.Align.START)
         clipboard_section.add_css_class("heading")
-        clipboard_section.add_css_class("wa-section-title")
         clipboard_section.set_margin_top(12)
         page.append(clipboard_section)
 
@@ -498,7 +493,6 @@ class SettingsDialog(Gtk.Window):
         notifications_section = Gtk.Label(label="OSD Notifications")
         notifications_section.set_halign(Gtk.Align.START)
         notifications_section.add_css_class("heading")
-        notifications_section.add_css_class("wa-section-title")
         notifications_section.set_margin_top(12)
         page.append(notifications_section)
 
@@ -506,7 +500,7 @@ class SettingsDialog(Gtk.Window):
             label="Choose which desktop popups are shown while using WhisperAloud."
         )
         notifications_help.set_halign(Gtk.Align.START)
-        notifications_help.add_css_class("wa-help")
+        notifications_help.add_css_class("dim-label")
         page.append(notifications_help)
 
         self.notifications_enabled_switch = Gtk.Switch()
@@ -576,7 +570,6 @@ class SettingsDialog(Gtk.Window):
         hotkey_section = Gtk.Label(label="Global Shortcut")
         hotkey_section.set_halign(Gtk.Align.START)
         hotkey_section.add_css_class("heading")
-        hotkey_section.add_css_class("wa-section-title")
         hotkey_section.set_margin_top(12)
         page.append(hotkey_section)
 
@@ -620,7 +613,6 @@ class SettingsDialog(Gtk.Window):
 
         # Help box (fallback for when portal is not available)
         hotkey_help_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        hotkey_help_box.add_css_class("wa-help")
 
         hotkey_help_label = Gtk.Label()
         hotkey_help_label.set_markup(
@@ -630,6 +622,7 @@ class SettingsDialog(Gtk.Window):
         hotkey_help_label.set_halign(Gtk.Align.START)
         hotkey_help_label.set_wrap(True)
         hotkey_help_label.set_xalign(0.0)
+        hotkey_help_label.add_css_class("dim-label")
 
         copy_cmd_button = Gtk.Button(label="Copy command")
         copy_cmd_button.set_halign(Gtk.Align.START)
@@ -649,7 +642,6 @@ class SettingsDialog(Gtk.Window):
         self._startup_section = StartupSection(self._autostart_controller)
         page.append(self._startup_section.widget)
 
-        self._style_setting_rows_in_page(page)
 
         self.stack.add_titled(page, "general", "General")
 
@@ -1005,14 +997,6 @@ class SettingsDialog(Gtk.Window):
         self._update_notices()
         self._mark_dirty()
 
-    def _style_setting_rows_in_page(self, page: Gtk.Box) -> None:
-        """Apply a shared style class to horizontal setting rows."""
-        child = page.get_first_child()
-        while child is not None:
-            if isinstance(child, Gtk.Box) and child.get_orientation() == Gtk.Orientation.HORIZONTAL:
-                child.add_css_class("wa-setting-row")
-            child = child.get_next_sibling()
-
     def _set_notification_type_switches_sensitive(self, enabled: bool) -> None:
         """Enable/disable per-type notification switches from master toggle."""
         self.notification_recording_started_switch.set_sensitive(enabled)
@@ -1135,7 +1119,6 @@ class SettingsDialog(Gtk.Window):
         behaviour_section = Gtk.Label(label="History Behaviour")
         behaviour_section.set_halign(Gtk.Align.START)
         behaviour_section.add_css_class("heading")
-        behaviour_section.add_css_class("wa-section-title")
         page.append(behaviour_section)
 
         # Allow editing transcriptions
@@ -1196,7 +1179,6 @@ class SettingsDialog(Gtk.Window):
         audio_section = Gtk.Label(label="Audio Archive")
         audio_section.set_halign(Gtk.Align.START)
         audio_section.add_css_class("heading")
-        audio_section.add_css_class("wa-section-title")
         audio_section.set_margin_top(12)
         page.append(audio_section)
 
@@ -1230,7 +1212,6 @@ class SettingsDialog(Gtk.Window):
         paths_section = Gtk.Label(label="Storage Paths")
         paths_section.set_halign(Gtk.Align.START)
         paths_section.add_css_class("heading")
-        paths_section.add_css_class("wa-section-title")
         paths_section.set_margin_top(12)
         page.append(paths_section)
 
@@ -1268,7 +1249,6 @@ class SettingsDialog(Gtk.Window):
         audio_path_box.append(self.audio_archive_entry)
         page.append(audio_path_box)
 
-        self._style_setting_rows_in_page(page)
         self.stack.add_titled(scrolled, "history", "History")
 
     def _add_advanced_page(self) -> None:
@@ -1290,7 +1270,6 @@ class SettingsDialog(Gtk.Window):
         audio_section = Gtk.Label(label="Audio Processing")
         audio_section.set_halign(Gtk.Align.START)
         audio_section.add_css_class("heading")
-        audio_section.add_css_class("wa-section-title")
         page.append(audio_section)
 
         # Sample rate
@@ -1362,7 +1341,6 @@ class SettingsDialog(Gtk.Window):
         pipeline_section = Gtk.Label(label="Audio Pipeline")
         pipeline_section.set_halign(Gtk.Align.START)
         pipeline_section.add_css_class("heading")
-        pipeline_section.add_css_class("wa-section-title")
         pipeline_section.set_margin_top(12)
         page.append(pipeline_section)
 
@@ -1462,7 +1440,6 @@ class SettingsDialog(Gtk.Window):
         recording_section = Gtk.Label(label="Recording")
         recording_section.set_halign(Gtk.Align.START)
         recording_section.add_css_class("heading")
-        recording_section.add_css_class("wa-section-title")
         recording_section.set_margin_top(12)
         page.append(recording_section)
 
@@ -1507,7 +1484,6 @@ class SettingsDialog(Gtk.Window):
         if self._shell_extension_section is not None:
             page.append(self._shell_extension_section.widget)
 
-        self._style_setting_rows_in_page(page)
         self.stack.add_titled(scrolled, "advanced", "Advanced")
 
     def _on_save_clicked(self, button: Optional[Gtk.Button]) -> None:

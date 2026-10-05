@@ -95,13 +95,11 @@ class ShellExtensionSection:
         title = Gtk.Label(label=SECTION_TITLE)
         title.set_halign(Gtk.Align.START)
         title.add_css_class("heading")
-        title.add_css_class("wa-section-title")
         box.append(title)
 
         box.append(self._wrapped_label(SECTION_DESCRIPTION, dim=True))
 
         status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        status_row.add_css_class("wa-setting-row")
         label = Gtk.Label(label="Status:")
         label.set_halign(Gtk.Align.START)
         label.set_hexpand(True)
@@ -150,8 +148,7 @@ class ShellExtensionSection:
 
     def _command_box(self, caption: str):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.add_css_class("wa-help")
-        box.append(self._wrapped_label(caption))
+        box.append(self._wrapped_label(caption, dim=True))
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         cmd = Gtk.Label(label="")
         cmd.set_selectable(True)

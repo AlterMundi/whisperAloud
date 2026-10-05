@@ -187,13 +187,11 @@ class LevelMeterPanel(Gtk.Box):
     def __init__(self) -> None:
         """Initialize the level meter panel."""
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.add_css_class("wa-level-panel")
 
         # Label
         label = Gtk.Label(label="Input Level")
         label.set_halign(Gtk.Align.START)
         label.add_css_class("caption")
-        label.add_css_class("wa-level-caption")
         self.append(label)
 
         # Level meter widget
@@ -204,7 +202,7 @@ class LevelMeterPanel(Gtk.Box):
         self.db_label = Gtk.Label(label="-∞ dB")
         self.db_label.set_halign(Gtk.Align.END)
         self.db_label.add_css_class("caption")
-        self.db_label.add_css_class("wa-level-caption")
+        self.db_label.add_css_class("numeric")
         self.append(self.db_label)
 
         logger.debug("Level meter panel initialized")
