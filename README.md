@@ -149,8 +149,8 @@ dialog:
   remembers it from then on.
 
 To have the transcript typed into the app you are using, enable the
-optional GNOME Shell extension (**Settings → Advanced → Top bar
-indicator**, which shows the install command). GNOME Shell then inserts
+optional GNOME Shell extension (**Preferences → General → Top Bar
+Indicator**, which shows the install command). GNOME Shell then inserts
 the text itself: no extra dialog and no "remote access" indicator. Without
 the extension, the Flatpak build copies each transcript to the clipboard
 and tells you to press <kbd>Ctrl</kbd>+<kbd>V</kbd>; a native install
@@ -169,7 +169,7 @@ so the dialogs reappear next time. See
 Flatpak build specifically.
 
 To have dictation ready right after login without opening the window, turn
-on **Settings → General → Startup → Start in background at login**. Only
+on **Preferences → General → Startup → Run in Background at Login**. Only
 the background service starts: the model loads, the shortcut is bound, and
 the top-bar indicator shows when everything is ready. In the Flatpak, GNOME
 asks once for permission to run in the background (see
