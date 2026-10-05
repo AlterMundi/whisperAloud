@@ -291,6 +291,20 @@ class TestDaemonMethods:
         (changes,), _ = daemon.ConfigChanged.call_args
         assert changes == {"transcription.language": ("s", "en")}
 
+    def test_set_config_negative_device_id_selects_system_default(self, daemon):
+        """a{sv} cannot carry None, so audio.device_id = -1 means "System
+        Default" (None in the config), used by the Preferences microphone row."""
+        daemon.config.audio.device_id = 3
+        with patch.object(daemon, "_apply_config_changes") as apply:
+            assert daemon.SetConfig({"audio.device_id": -1}) is True
+        new_config = apply.call_args[0][0]
+        assert new_config.audio.device_id is None
+
+    def test_set_config_positive_device_id_is_kept(self, daemon):
+        with patch.object(daemon, "_apply_config_changes") as apply:
+            assert daemon.SetConfig({"audio.device_id": 2}) is True
+        assert apply.call_args[0][0].audio.device_id == 2
+
     def test_reload_config_emits_config_changed_with_wrapped_empty_dict(self, daemon):
         """ReloadConfig's ConfigChanged({}) must go through the same
         wrapping helper as SetConfig, not a bare literal {} -- harmless for

@@ -412,6 +412,10 @@ mid-transcription.
 - Returns `false` and emits `Error("config_invalid", <message>)` if the
   resulting config fails validation (e.g. unknown field, bad value) or an
   unexpected key/value shape is passed.
+- `a{sv}` cannot carry a null value, so `audio.device_id` set to a negative
+  integer (by convention `-1`) selects the system default input device
+  (`device_id = null` in the config file). `ConfigChanged` echoes the `-1`,
+  and `GetConfig` omits `audio.device_id` while it is the default.
 
 Re-initializing the *components themselves* is not always immediate, though:
 

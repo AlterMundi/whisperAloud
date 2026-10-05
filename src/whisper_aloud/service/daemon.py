@@ -1567,6 +1567,10 @@ class WhisperAloudService:
                 # Unpack GLib.Variant to native Python value
                 value = variant.unpack() if hasattr(variant, 'unpack') else variant
                 unpacked_changes[key] = value
+                if key == "audio.device_id" and isinstance(value, int) and value < 0:
+                    # a{sv} cannot carry None: a negative id means "System
+                    # Default" (device_id = None). ConfigChanged echoes the -1.
+                    value = None
                 section, field = key.split(".", 1)
                 if section in config_dict and field in config_dict[section]:
                     config_dict[section][field] = value
