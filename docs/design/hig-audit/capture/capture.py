@@ -5,8 +5,12 @@ repo's servicedir-free config + private Xvfb + temp HOME). Refuses to run
 otherwise. The daemon (fake engine, WHISPER_ALOUD_TEST_MODE=1) is spawned
 directly as a child and stopped only through its own Popen object.
 
-Modes (argv[1]): shipped (full set, exactly what app.py does: plain
-Gtk.Application, no Adw.init), shipped-dark, adw, adw-dark (subsets).
+Modes (argv[1]): shipped (full set, exactly what app.py does), shipped-dark,
+adw, adw-dark (subsets). Before HIG-01 app.py was a plain Gtk.Application (no
+Adw.init) and the "adw" modes added Adw.init() to preview libadwaita; since
+HIG-01 app.py is an Adw.Application, so "shipped" already is the libadwaita look.
+Dark: GtkSettings prefer-dark for a plain Gtk app, Adw.StyleManager FORCE_DARK
+for an Adw.Application (libadwaita ignores the GtkSettings property).
 """
 from __future__ import annotations
 
@@ -220,13 +224,19 @@ def main() -> None:
         Adw.init()
         if DARK:
             Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
-    elif DARK:
-        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
 
     from whisper_aloud.ui.app import WhisperAloudApp
 
+    IS_ADW_APP = issubclass(WhisperAloudApp, Adw.Application)
+    METRICS["app_class_base"] = "Adw.Application" if IS_ADW_APP else "Gtk.Application"
+    if DARK and not ADW and not IS_ADW_APP:
+        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
+
     app = WhisperAloudApp()
     app.register(None)  # runs do_startup: app CSS + actions, exactly like app.run()
+    if DARK and not ADW and IS_ADW_APP:
+        # libadwaita is initialized by the app's startup; force dark after it.
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
     app.activate()      # do_activate: creates + presents MainWindow
     win = app.window
     pump(0.15)
@@ -322,7 +332,7 @@ def main() -> None:
 
         # daemon error signal -> ERROR state ("Try Again")
         win._handle_daemon_error("NO_INPUT_DEVICE", "No input device available")
-        snap(win, "17-error-state", settle=0.1)
+        snap(win, "17-error-state", settle=0.4)
         win.set_state(win._state.__class__.IDLE)
 
         # live partial transcript rendering (synthetic signal payloads through the real handler)
@@ -330,7 +340,7 @@ def main() -> None:
         win._partial_view.reset()
         win._handle_partial_transcript("s-demo", "Meeting notes: the release candidate is ready,",
                                        " translations are pend", 1)
-        snap(win, "18-live-partial-transcript", settle=0.1)
+        snap(win, "18-live-partial-transcript", settle=0.4)  # past the 200ms button transition
         win._partial_view.reset()
         win.set_state(win._state.__class__.IDLE)
         pump(0.3)
@@ -404,7 +414,7 @@ def main() -> None:
         pump(0.3)
 
     # narrow width (metainfo promises display_length >= 360)
-    if FULL or ADW:
+    if FULL or ADW or DARK:
         win.set_default_size(360, 640)
         pump(0.6)
         METRICS["narrow_request_360_actual_width"] = win.get_width()
