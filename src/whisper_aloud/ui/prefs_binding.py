@@ -186,6 +186,10 @@ class PrefsBinding:
         candidate = dict(self._values)
         candidate.update(delta)
         error = self._validate(candidate)
+        if error is not None and error == self._validate(self._values):
+            # Not caused by this change (the daemon may know values this
+            # process doesn't, e.g. another engine): the daemon decides.
+            error = None
         if error is None:
             error = self._send(delta)
         if error is not None:

@@ -189,6 +189,17 @@ def test_invalid_value_keeps_other_settings():
     assert binding.get("clipboard.auto_copy") is False
 
 
+def test_unrelated_local_validation_error_leaves_the_decision_to_the_daemon():
+    """The daemon may know values this process doesn't (e.g. a test-only
+    engine): an error the stored config already has must not block an
+    unrelated change."""
+    client = FakeClient()
+    binding, errors = _binding(client, **{"model.engine": "fake"})
+    assert binding.apply({"clipboard.auto_copy": False}).ok is True
+    assert client.sent == [{"clipboard.auto_copy": False}]
+    assert errors == []
+
+
 def test_daemon_rejection_reverts_and_reports():
     client = FakeClient(accept=False)
     binding, errors = _binding(client)
