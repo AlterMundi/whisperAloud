@@ -866,6 +866,12 @@ class WhisperAloudService:
                 except Exception as e:
                     logger.warning(f"WHISPER_ALOUD_TEST_MODE: failed to hook bus-closed shutdown: {e}")
 
+            # WHISP-119: only when the RemoteDesktop portal was explicitly
+            # opted in (clipboard.paste_backend == "remote-desktop"); the
+            # default never opens a RemoteDesktop session, so GNOME never
+            # shows its remote-access indicator because of us. See
+            # _paste_backend_needs_prewarm().
+            #
             # Field bug fix (0.3.0 Flatpak, first auto-paste of every daemon
             # run lost): kick off RemoteDesktop portal session setup now,
             # once the main loop is actually running, instead of only ever
@@ -880,12 +886,7 @@ class WhisperAloudService:
             # worse). Skipped under _test_mode: tests exercise the portal
             # paste path directly against their own fake/mocked portal,
             # never through this daemon-startup hook.
-            if (
-                not self._test_mode
-                and self.config.clipboard.auto_copy
-                and self.config.clipboard.auto_paste
-                and self.clipboard_manager
-            ):
+            if self._paste_backend_needs_prewarm():
                 GLib.idle_add(self._prewarm_paste_backend)
 
             loop.run()
@@ -898,13 +899,26 @@ class WhisperAloudService:
         finally:
             self._cleanup()
 
+    def _paste_backend_needs_prewarm(self) -> bool:
+        """Whether run() should prewarm the RemoteDesktop portal session:
+        only for the explicit "remote-desktop" opt-in (WHISP-119), with
+        auto-copy and auto-paste on, outside test mode."""
+        clipboard = self.config.clipboard
+        return bool(
+            not self._test_mode
+            and clipboard.auto_copy
+            and clipboard.auto_paste
+            and clipboard.paste_backend == "remote-desktop"
+            and self.clipboard_manager
+        )
+
     def _prewarm_paste_backend(self) -> bool:
         """GLib.idle_add callback (see run()): best-effort, never raises,
         always removes itself (runs at most once)."""
         try:
             from ..clipboard.paste_selection import prewarm_portal_paste_backend
 
-            prewarm_portal_paste_backend()
+            prewarm_portal_paste_backend(self.config.clipboard)
         except Exception:
             logger.debug("Paste backend prewarm failed", exc_info=True)
         return GLib.SOURCE_REMOVE
@@ -2455,6 +2469,9 @@ class WhisperAloudService:
                                 self.clipboard_manager._session_type,
                                 self.config.clipboard,
                             )
+                            if simulator is None:
+                                logger.info("Auto-paste: clipboard only (no paste backend)")
+                                return
 
                             def _trigger_paste():
                                 # simulate_paste() (portal/ydotool/xdotool)

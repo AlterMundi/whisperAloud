@@ -328,6 +328,13 @@ class ClipboardManager:
         """
         from .paste_selection import build_paste_simulator
         simulator = build_paste_simulator(self._session_type, self.config)
+        if simulator is None:
+            return {
+                "available": False,
+                "reason": "No keystroke paste backend is configured for this environment",
+                "fix": "Enable the WhisperAloud GNOME Shell extension, or set "
+                       "clipboard.paste_backend",
+            }
         return simulator.check_availability()
 
 
