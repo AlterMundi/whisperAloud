@@ -16,10 +16,18 @@ Flathub-specific requirements and blockers are covered in
 
 ## First run
 
-Two GNOME permission dialogs are part of normal first-run behavior for the
-Flatpak build. Both are asked once and then remembered by GNOME (not by
-WhisperAloud) — you won't see either again on a later start unless you
-explicitly revoke the permission.
+One GNOME permission dialog is part of normal first-run behavior for the
+Flatpak build: "Add keyboard shortcuts". It is asked once and then
+remembered by GNOME (not by WhisperAloud) — you won't see it again on a
+later start unless you explicitly revoke the permission.
+
+Since WHISP-119 the "Remote Desktop" dialog of the 0.3.0 build is **no
+longer needed by default**: auto-paste goes through the optional GNOME
+Shell extension, which needs no portal and shows no "remote access"
+indicator. Without the extension, the text is copied and a notification
+says "Text copied — press Ctrl+V to paste". The RemoteDesktop portal is
+still available as an opt-in rollback (`clipboard.paste_backend =
+"remote-desktop"`, see below).
 
 ### "Add keyboard shortcuts" (GlobalShortcuts portal)
 
@@ -37,12 +45,30 @@ pick the key combination you want (or accept the default) and confirm.
   shortcut won't trigger it until you grant this permission (see below for
   how to retry).
 
-### Remote Desktop ("Share your screen") — Flatpak paste only
+### Auto-paste without a dialog: the GNOME Shell extension
 
-Outside Flatpak, WhisperAloud pastes transcribed text into the focused
-window using `ydotool`/`xdotool`. Neither is available inside the sandbox,
-so the Flatpak build instead asks the `RemoteDesktop` portal for permission
-to synthesize a paste keystroke. This dialog appears the first time
+Outside Flatpak, WhisperAloud can paste with `ydotool`/`xdotool`. Neither
+is available inside the sandbox. The default (`clipboard.paste_backend =
+"auto"`) therefore uses the `whisperaloud@fede` extension's
+`org.fede.whisperaloud.TextInput.InsertText` when the extension is enabled
+(version 5 or newer): GNOME Shell itself types the text into the focused
+field, or pastes it with Shift+Insert where typing is not possible. It
+reuses the talk-name the manifest already grants (see "GNOME Shell
+extension" below): no new permission, no dialog, no orange indicator.
+Install it from **Settings → Advanced → Top bar indicator**. See
+[`configuration.md`](configuration.md#auto-paste-clipboard) for every
+backend.
+
+### Remote Desktop ("Share your screen") — opt-in rollback only
+
+With `clipboard.paste_backend = "remote-desktop"` (the 0.3.0 method, kept
+as the rollback switch of
+[ADR 0001](decisions/0001-baseline-before-native-text-insertion.md)), the
+Flatpak build instead asks the `RemoteDesktop` portal for permission
+to synthesize a paste keystroke. While that session is open GNOME shows its
+orange "remote access" indicator; this is by design in GNOME Shell and
+cannot be turned off from the app. With any other setting no RemoteDesktop
+session is ever opened. This dialog appears the first time
 WhisperAloud actually tries to auto-paste (not at daemon startup) — GNOME's
 "Share your screen" style picker, asking you to choose what the app can
 interact with.
@@ -85,8 +111,9 @@ interact with.
 
 Settings → General → **Startup** → **Start in background at login** makes
 the daemon start at every login *without* the window: the model preloads,
-the global shortcut binds (no dialog after the first time), and auto-paste
-is prewarmed, so the shortcut dictates right away and the top-bar indicator
+the global shortcut binds (no dialog after the first time), and (only with
+the opt-in `remote-desktop` paste backend) the RemoteDesktop session is
+prewarmed, so the shortcut dictates right away and the top-bar indicator
 shows that all is ready. Closing the window never stops the daemon.
 
 - **Turning it on** asks GNOME for permission to run in the background. The
@@ -314,7 +341,9 @@ Two ways to feed a host file to the sandboxed CLI:
     inside the sandbox and lost;
   - `GainController` (wpctl) is disabled;
   - the indicator skips its gsettings/notify-send GNOME nudge;
-  - paste and the hotkey are portal-only (WHISP-59 and WHISP-64);
+  - the hotkey is portal-only (WHISP-64); auto-paste goes through the GNOME
+    Shell extension's `TextInput` (WHISP-119), or the RemoteDesktop portal
+    only when opted in (WHISP-59);
   - the model cache already follows `XDG_CACHE_HOME`, which is
     `~/.var/app/org.fede.whisperaloud/cache/`. That holds both
     `huggingface/` and `whisper_aloud/models/`.
@@ -335,7 +364,11 @@ exactly `org.gnome.Shell.Extensions.whisperaloud` (`EXT_BUS_NAME` in
 - `org.fede.whisperaloud.Window`: `GetFocusedWindow`/`ActivateWindow`, used
   by `clipboard/window_manager.py`'s "gnome-extension" backend;
 - `org.fede.whisperaloud.ShellExtension.GetInfo`, which Settings uses to
-  read the extension's version.
+  read the extension's version;
+- `org.fede.whisperaloud.TextInput` (extension version 5+):
+  `GetCapabilities` and `InsertText`, the default auto-paste method
+  (`clipboard/text_insertion.py`). The extension accepts `InsertText` only
+  from the current owner of `org.fede.whisperaloud`.
 
 Without a talk-name, the bus proxy hides the name from the sandbox. The
 daemon's `WindowManager` then falls back to backend `none`, and

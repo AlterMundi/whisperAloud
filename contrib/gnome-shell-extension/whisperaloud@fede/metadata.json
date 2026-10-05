@@ -1,9 +1,9 @@
 {
   "uuid": "whisperaloud@fede",
   "name": "WhisperAloud",
-  "description": "Top-bar indicator for WhisperAloud offline dictation: shows whether the daemon, speech model and global hotkey are ready, and toggles recording without opening the window. Requires the WhisperAloud app (native or Flatpak).",
+  "description": "Top-bar indicator for WhisperAloud offline dictation: shows whether the daemon, speech model and global hotkey are ready, and toggles recording without opening the window. Types the dictated text into the focused app; when an app cannot take typed input it puts the text on the clipboard and pastes it (only text sent by the WhisperAloud daemon; the clipboard is never read). Requires the WhisperAloud app (native or Flatpak).",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
   "settings-schema": "org.gnome.shell.extensions.whisperaloud",
   "url": "https://github.com/AlterMundi/whisperAloud",
-  "version": 4
+  "version": 5
 }

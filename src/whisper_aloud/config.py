@@ -198,6 +198,18 @@ class AudioConfig:
 AUDIO_REINIT_FIELDS: Set[str] = {"device_id", "sample_rate", "channels"}
 
 
+# How auto-paste puts the text into the focused app (WHISP-119, ADR 0001):
+# - "auto": the GNOME Shell extension's TextInput.InsertText when the
+#   extension is present and reports the capability; otherwise ydotool/
+#   xdotool on native installs (as before) and clipboard only inside Flatpak.
+#   Never the RemoteDesktop portal.
+# - "extension": the extension only; clipboard only when it is missing.
+# - "remote-desktop": the xdg RemoteDesktop portal (the 0.3.0 method, kept as
+#   the opt-in rollback path; GNOME shows the orange remote-access indicator).
+# - "clipboard": never paste; the text stays on the clipboard.
+PASTE_BACKENDS = ("auto", "extension", "remote-desktop", "clipboard")
+
+
 @dataclass
 class ClipboardConfig:
     """Configuration for clipboard integration."""
@@ -223,6 +235,7 @@ class ClipboardConfig:
     fallback_to_file: bool = True
     fallback_path: str = "/tmp/whisper_aloud_clipboard.txt"
     paste_to_captured_window: bool = True
+    paste_backend: str = "auto"  # one of PASTE_BACKENDS
 
 
 @dataclass
@@ -401,6 +414,7 @@ ENV_OVERRIDE_VARS: Dict[str, str] = {
     "clipboard.fallback_to_file": "WHISPER_ALOUD_CLIPBOARD_FALLBACK_TO_FILE",
     "clipboard.fallback_path": "WHISPER_ALOUD_CLIPBOARD_FALLBACK_PATH",
     "clipboard.paste_to_captured_window": "WHISPER_ALOUD_CLIPBOARD_PASTE_TO_CAPTURED_WINDOW",
+    "clipboard.paste_backend": "WHISPER_ALOUD_CLIPBOARD_PASTE_BACKEND",
     "notifications.enabled": "WHISPER_ALOUD_NOTIFICATIONS_ENABLED",
     "notifications.recording_started": "WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STARTED",
     "notifications.recording_stopped": "WHISPER_ALOUD_NOTIFICATIONS_RECORDING_STOPPED",
@@ -504,6 +518,7 @@ class WhisperAloudConfig:
                 "fallback_to_file": self.clipboard.fallback_to_file,
                 "fallback_path": self.clipboard.fallback_path,
                 "paste_to_captured_window": self.clipboard.paste_to_captured_window,
+                "paste_backend": self.clipboard.paste_backend,
             },
             "notifications": {
                 "enabled": self.notifications.enabled,
@@ -746,6 +761,9 @@ class WhisperAloudConfig:
             'WHISPER_ALOUD_CLIPBOARD_PASTE_TO_CAPTURED_WINDOW',
             self.clipboard.paste_to_captured_window
         )
+        self.clipboard.paste_backend = os.getenv(
+            'WHISPER_ALOUD_CLIPBOARD_PASTE_BACKEND', self.clipboard.paste_backend
+        )
 
         # Notifications
         self.notifications.enabled = parse_bool_env('WHISPER_ALOUD_NOTIFICATIONS_ENABLED', self.notifications.enabled)
@@ -924,6 +942,12 @@ class WhisperAloudConfig:
         if self.clipboard.paste_delay_ms < 0:
             raise ConfigurationError(f"Invalid paste delay {self.clipboard.paste_delay_ms}. Must be >= 0")
 
+        if self.clipboard.paste_backend not in PASTE_BACKENDS:
+            raise ConfigurationError(
+                f"Invalid clipboard paste_backend {self.clipboard.paste_backend!r}. "
+                f"Valid: {', '.join(PASTE_BACKENDS)}"
+            )
+
     def _validate_startup(self) -> None:
         """startup section: a real bool, never a truthy string from a hand-edited file."""
         if not isinstance(self.startup.autostart_background, bool):
@@ -1075,6 +1099,8 @@ def detect_config_changes(old: WhisperAloudConfig, new: WhisperAloudConfig) -> C
         clipboard_changes.add("auto_copy")
     if old.clipboard.auto_paste != new.clipboard.auto_paste:
         clipboard_changes.add("auto_paste")
+    if old.clipboard.paste_backend != new.clipboard.paste_backend:
+        clipboard_changes.add("paste_backend")
 
     if clipboard_changes:
         changes.changed_sections.add("clipboard")

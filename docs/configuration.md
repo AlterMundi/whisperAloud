@@ -40,6 +40,43 @@ export WHISPER_ALOUD_MODEL_NAME=small
 export WHISPER_ALOUD_MODEL_DEVICE=cpu
 ```
 
+## Auto-paste (`clipboard`)
+
+After a transcription the daemon copies the text to the clipboard
+(`auto_copy`) and then, with `auto_paste`, puts it into the app you were
+typing in. `paste_backend` chooses how:
+
+| `clipboard.paste_backend` | What happens |
+|---|---|
+| `auto` (default) | The GNOME Shell extension's `InsertText` when the extension is enabled and reports the capability (extension version 5 or newer). Otherwise, on a native install, `ydotool` (Wayland) or `xdotool` (X11) sends the paste shortcut, as in earlier releases. Inside Flatpak, without the extension, the text stays on the clipboard and a notification says "Text copied — press Ctrl+V to paste". `auto` **never** uses the RemoteDesktop portal. |
+| `extension` | The extension only. Without it, clipboard only, with the same notification. |
+| `remote-desktop` | The xdg RemoteDesktop portal: the 0.3.0 method, kept as the rollback switch ([ADR 0001](decisions/0001-baseline-before-native-text-insertion.md)). One consent dialog the first time; GNOME then shows the orange "remote access" indicator while the session is open. The session is prewarmed at daemon start only with this setting, and closed as soon as you switch away from it. |
+| `clipboard` | Never paste. The text stays on the clipboard, with the "press Ctrl+V" notification. |
+
+The extension inserts the text from inside GNOME Shell: it commits it as
+typed input when a text field has input-method focus, and otherwise pastes
+it with Shift+Insert (Ctrl+Shift+Insert in terminals). It refuses, and the
+daemon tells you the text is on the clipboard, when the screen is locked, a
+system dialog is open, a password field has focus, or the window you
+dictated into is no longer focused. Details:
+[`contrib/gnome-shell-extension/README.md`](../contrib/gnome-shell-extension/README.md#text-insertion-orgfedewhisperaloudtextinput).
+
+| key | default | env override |
+|---|---|---|
+| `clipboard.auto_copy` | `true` | `WHISPER_ALOUD_CLIPBOARD_AUTO_COPY` |
+| `clipboard.auto_paste` | `true` | `WHISPER_ALOUD_CLIPBOARD_AUTO_PASTE` |
+| `clipboard.paste_backend` | `"auto"` | `WHISPER_ALOUD_CLIPBOARD_PASTE_BACKEND` |
+| `clipboard.paste_to_captured_window` | `true` | `WHISPER_ALOUD_CLIPBOARD_PASTE_TO_CAPTURED_WINDOW` |
+| `clipboard.paste_shortcut` | `"ctrl+shift+v"` | `WHISPER_ALOUD_CLIPBOARD_PASTE_SHORTCUT` |
+| `clipboard.paste_delay_ms` | `100` | `WHISPER_ALOUD_CLIPBOARD_PASTE_DELAY_MS` |
+
+`paste_shortcut` applies to `ydotool`/`xdotool` and `remote-desktop` only;
+the extension picks its own layout-independent chord. To roll back to the
+0.3.0 behavior without reinstalling, set `"paste_backend":
+"remote-desktop"` in `config.json` (or run the daemon with
+`WHISPER_ALOUD_CLIPBOARD_PASTE_BACKEND=remote-desktop`) and reload the
+config.
+
 ## Input normalization (`input_gain`)
 
 Before anything else in the live chain (trim, high-pass, gate, AGC,

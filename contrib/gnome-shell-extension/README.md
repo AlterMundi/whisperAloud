@@ -66,12 +66,13 @@ other out. While the fallback is active, the menu says
 ## What it exports
 
 The extension owns the bus name **`org.gnome.Shell.Extensions.whisperaloud`**
-and exports two interfaces on it:
+and exports three interfaces on it:
 
 | Object | Interface | Used by |
 |---|---|---|
 | `/org/fede/whisperaloud/Window` | `org.fede.whisperaloud.Window`: `GetFocusedWindow() → a{sv}`, `ActivateWindow(u) → b`, `FocusChanged(s window_id)` signal | The daemon's `WindowManager` "gnome-extension" backend (`paste_to_captured_window`) |
 | `/org/fede/whisperaloud/ShellExtension` | `org.fede.whisperaloud.ShellExtension`: `GetInfo() → a{sv}` (`uuid`, `version`, `shell_version`) | Settings → Top bar indicator (status and version) |
+| `/org/fede/whisperaloud/TextInput` | `org.fede.whisperaloud.TextInput`: `InsertText(s text, a{sv} options) → a{sv}`, `GetCapabilities() → a{sv}` (since extension version 5) | The daemon's auto-paste (`clipboard.paste_backend` `auto` or `extension`) |
 
 `FocusChanged` fires on every real `global.display` `notify::focus-window`
 change (no polling) and carries the newly-focused window's id as a string
@@ -82,6 +83,58 @@ own return value only ever meant "the call was issued", never "focus
 landed"; if no matching `FocusChanged` arrives (extension too old, or focus
 genuinely went elsewhere), the daemon skips the paste rather than risk
 typing into the wrong window, and the text stays on the clipboard.
+
+## Text insertion (`org.fede.whisperaloud.TextInput`)
+
+Since extension version 5 the extension puts the transcription where you are
+typing, from inside GNOME Shell. It replaces the RemoteDesktop portal as the
+default auto-paste method, so there is no consent dialog and no orange
+"remote access" indicator. The design and its sources are in
+`docs/research/2026-10-05-gnome-text-insertion/report.md` (appendix C).
+
+`InsertText(text, options)`:
+
+1. **Caller check.** Only the current owner of `org.fede.whisperaloud` (the
+   daemon) may call it; anyone else gets
+   `org.freedesktop.DBus.Error.AccessDenied`. The extension tracks that owner
+   with its own `Gio.bus_watch_name`, not GNOME's `DBusSenderChecker` (which
+   leaks its watchers on destroy and is bypassed in unsafe mode).
+2. **Refusals** (`method: "none"`, with a `reason`): `locked` (lock screen),
+   `modal` (a Shell modal such as a polkit dialog or the run dialog is open),
+   `no-focus`, `window-mismatch` (the `window_id` option no longer has focus:
+   the WHISP-88 check, done atomically at insertion time),
+   `password-field` (password/PIN purpose or hidden-text hint), `empty`.
+3. **Commit** (`method: "commit"`): when a Wayland text field has input-method
+   focus and no preedit is in progress, `Main.inputMethod.commit()` sends the
+   text through text-input-v3, in pieces of at most 4000 UTF-8 bytes (the
+   Wayland protocol caps a message at 4096 bytes and disconnects the app on
+   overflow).
+4. **Paste** (`method: "paste"`): otherwise (XWayland apps, apps without
+   text-input, a CJK preedit in progress) the text goes to the clipboard
+   with `St.Clipboard` and a Clutter virtual keyboard sends **Shift+Insert**.
+   Insert, Shift and Control exist in every keyboard layout, unlike the `v`
+   of Ctrl+V.
+5. **Terminals** (input purpose `TERMINAL`, set by VTE): text containing a
+   newline or another control character is never committed, because a
+   committed newline is a typed Enter and runs the command line. It is pasted
+   with **Ctrl+Shift+Insert** instead (VTE's clipboard paste, which goes
+   through bracketed paste when the shell enables it). Text without control
+   characters is committed as usual.
+
+Options: `window_id` (`u`), `mode` (`s`: `auto`, `commit` or `paste`),
+`paste_shortcut` (`s`: `auto`, `shift+insert`, `ctrl+shift+insert`,
+`ctrl+v`, `ctrl+shift+v`). The result is `{method: s, reason: s}`.
+
+`GetCapabilities()` returns `insert_text` (`b`), `methods` (`as`),
+`max_commit_bytes` (`u`), `reasons` (`as`) and `version` (`u`). The daemon
+uses it, not the version number, to decide whether the extension can insert
+text. The extension never logs the text. The virtual keyboard is created in
+`enable()` and disposed in `disable()`; the extension has no `session-modes`,
+so GNOME disables it (and its D-Bus objects) while the screen is locked.
+
+The pure decisions (gating, chunking, chord choice) are in `insertion.js`,
+which has no GNOME Shell imports and is unit-tested with Node
+(`tests/test_shell_extension_insertion_js.py`).
 
 While that name has an owner, the daemon hides its own AppIndicator tray
 icon, so you do not get two WhisperAloud icons. The tray icon comes back as
@@ -142,8 +195,13 @@ The APIs used are `PanelMenu.Button`, `PopupMenuItem`,
 `PopupSeparatorMenuItem`, `Main.panel.addToStatusArea`,
 `Main.wm.addKeybinding`/`removeKeybinding`, `Main.activateWindow`,
 `Main.notify`, `Shell.AppSystem`, `Gio.bus_watch_name`,
-`Gio.DBusExportedObject` and `Config.PACKAGE_VERSION`. Runtime behaviour on
-49–51 is still untested.
+`Gio.DBusExportedObject` and `Config.PACKAGE_VERSION`. Text insertion adds
+`Main.inputMethod` (`commit`, `currentFocus`, `contentPurpose`,
+`contentHints`, `hasPreedit`), `Main.sessionMode.isLocked`, `Main.modalCount`,
+`St.Clipboard` and `Clutter.Seat.create_virtual_device`. The Clutter backend
+is feature-detected (`global.stage.context.get_backend()` from 47,
+`Clutter.get_default_backend()` before; the latter is gone in 51). Runtime
+behaviour on 49–51 is still untested.
 
 ## Limits
 

@@ -152,12 +152,24 @@ class TestDaemonWiring:
         on_change(True)  # must not raise
         daemon.indicator.set_suppressed.assert_called_with(True)
 
-    def test_no_watcher_without_indicator(self):
+    def test_watcher_without_indicator(self):
+        """WHISP-119: the watcher also drives the extension text-insertion
+        probe, so it exists even with no tray icon to hide."""
         from tests.test_daemon import _make_daemon
 
         with patch("whisper_aloud.service.shell_extension_watch.ShellExtensionWatcher") as cls:
             daemon = _make_daemon(indicator_fails=True)
         assert daemon.indicator is None
+        cls.assert_called_once()
+
+    def test_no_watcher_in_test_mode(self):
+        from tests.test_daemon import _make_daemon
+
+        with patch.dict("os.environ", {"WHISPER_ALOUD_TEST_MODE": "1"}), \
+                patch("whisper_aloud.service.shell_extension_watch.ShellExtensionWatcher") as cls:
+            daemon = _make_daemon()
+        assert daemon._shell_extension_watcher is None
+        assert daemon._text_inserter is None
         cls.assert_not_called()
 
 
