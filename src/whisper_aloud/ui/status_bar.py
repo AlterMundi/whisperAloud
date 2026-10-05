@@ -21,7 +21,6 @@ class StatusBar(Gtk.Box):
     def __init__(self):
         """Initialize the status bar."""
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        self.add_css_class("wa-status-bar")
         self.set_margin_start(12)
         self.set_margin_end(12)
         self.set_margin_top(4)
@@ -30,13 +29,13 @@ class StatusBar(Gtk.Box):
         # Model info
         self.model_label = Gtk.Label(label="Model: --")
         self.model_label.add_css_class("dim-label")
-        self.model_label.add_css_class("wa-status-text")
+        self.model_label.add_css_class("numeric")
         self.append(self.model_label)
 
         # Model readiness (daemon API 1.6.0): persistent, unlike the
         # transient status message below. Hidden until the daemon reports it.
         self.model_state_label = Gtk.Label(label="")
-        self.model_state_label.add_css_class("wa-status-text")
+        self.model_state_label.add_css_class("numeric")
         self.model_state_label.set_visible(False)
         self.append(self.model_state_label)
 
@@ -54,7 +53,7 @@ class StatusBar(Gtk.Box):
         # Language info
         self.language_label = Gtk.Label(label="Lang: --")
         self.language_label.add_css_class("dim-label")
-        self.language_label.add_css_class("wa-status-text")
+        self.language_label.add_css_class("numeric")
         self.append(self.language_label)
 
         # Separator
@@ -63,7 +62,7 @@ class StatusBar(Gtk.Box):
         # Memory usage
         self.memory_label = Gtk.Label(label="Mem: --")
         self.memory_label.add_css_class("dim-label")
-        self.memory_label.add_css_class("wa-status-text")
+        self.memory_label.add_css_class("numeric")
         self.append(self.memory_label)
 
         # Separator
@@ -72,7 +71,7 @@ class StatusBar(Gtk.Box):
         # CPU usage
         self.cpu_label = Gtk.Label(label="CPU: --")
         self.cpu_label.add_css_class("dim-label")
-        self.cpu_label.add_css_class("wa-status-text")
+        self.cpu_label.add_css_class("numeric")
         self.append(self.cpu_label)
 
         # Spacer — pushes status message to the right
@@ -83,7 +82,7 @@ class StatusBar(Gtk.Box):
         # Transient status message
         self.status_msg_label = Gtk.Label(label="")
         self.status_msg_label.add_css_class("dim-label")
-        self.status_msg_label.add_css_class("wa-status-text")
+        self.status_msg_label.add_css_class("numeric")
         self.status_msg_label.set_halign(Gtk.Align.END)
         self.append(self.status_msg_label)
 

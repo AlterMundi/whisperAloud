@@ -45,7 +45,6 @@ class ShortcutsWindow(Gtk.Window):
         self.set_modal(False)
         self.set_default_size(420, 580)
         self.set_resizable(False)
-        self.add_css_class("wa-dialog-window")
 
         self._build_ui()
         self._setup_keyboard_shortcuts()
@@ -65,10 +64,11 @@ class ShortcutsWindow(Gtk.Window):
 
         # Header bar
         header = Gtk.HeaderBar()
-        header.add_css_class("wa-headerbar")
-        header.set_title_widget(Gtk.Label(label="Keyboard Shortcuts"))
+        # "title" gives the header-bar title weight under Adwaita.
+        title_label = Gtk.Label(label="Keyboard Shortcuts")
+        title_label.add_css_class("title")
+        header.set_title_widget(title_label)
         close_button = Gtk.Button(label="Close")
-        close_button.add_css_class("wa-ghost")
         close_button.set_tooltip_text("Close shortcuts (Esc)")
         close_button.connect("clicked", lambda _btn: self.close())
         header.pack_end(close_button)
@@ -76,7 +76,6 @@ class ShortcutsWindow(Gtk.Window):
 
         # Scrolled window for content
         scrolled = Gtk.ScrolledWindow()
-        scrolled.add_css_class("wa-output-wrap")
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scrolled.set_vexpand(True)
         main_box.append(scrolled)
@@ -140,7 +139,6 @@ class ShortcutsWindow(Gtk.Window):
         list_box = Gtk.ListBox()
         list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         list_box.add_css_class("boxed-list")
-        list_box.add_css_class("wa-shortcuts-list")
         group.append(list_box)
 
         for key, description in shortcuts:

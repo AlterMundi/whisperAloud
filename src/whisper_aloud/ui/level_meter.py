@@ -11,6 +11,7 @@ from gi.repository import Gtk
 from .level_meter_logic import (
     format_db_label,
     level_color_zone,
+    meter_neutral_colors,
     normalize_meter_levels,
 )
 
@@ -86,8 +87,13 @@ class LevelMeterWidget(Gtk.DrawingArea):
         x = self._padding
         y = self._padding
 
+        # Neutral parts follow the theme foreground (light and dark style);
+        # only the signal-level zones below keep their semantic colours.
+        fg = self.get_color()
+        neutral = meter_neutral_colors((fg.red, fg.green, fg.blue, fg.alpha))
+
         # Draw background
-        ctx.set_source_rgb(0.2, 0.2, 0.2)
+        ctx.set_source_rgba(*neutral["track"])
         ctx.rectangle(x, y, bar_width, bar_height)
         ctx.fill()
 
@@ -112,17 +118,17 @@ class LevelMeterWidget(Gtk.DrawingArea):
         # Draw peak indicator (thin vertical line)
         if self._peak > 0.01:
             peak_x = x + bar_width * self._peak
-            ctx.set_source_rgb(1.0, 1.0, 1.0)
+            ctx.set_source_rgba(*neutral["peak"])
             ctx.set_line_width(2.0)
             ctx.move_to(peak_x, y)
             ctx.line_to(peak_x, y + bar_height)
             ctx.stroke()
 
         # Draw dB markers
-        self._draw_db_markers(ctx, x, y, bar_width, bar_height)
+        self._draw_db_markers(ctx, x, y, bar_width, bar_height, neutral["tick"])
 
         # Draw border
-        ctx.set_source_rgb(0.5, 0.5, 0.5)
+        ctx.set_source_rgba(*neutral["border"])
         ctx.set_line_width(1.0)
         ctx.rectangle(x, y, bar_width, bar_height)
         ctx.stroke()
@@ -133,7 +139,8 @@ class LevelMeterWidget(Gtk.DrawingArea):
         x: float,
         y: float,
         width: float,
-        height: float
+        height: float,
+        tick_color: tuple[float, float, float, float],
     ) -> None:
         """
         Draw decibel scale markers.
@@ -144,6 +151,7 @@ class LevelMeterWidget(Gtk.DrawingArea):
             y: Bar y position
             width: Bar width
             height: Bar height
+            tick_color: RGBA for the tick marks (theme-derived)
         """
         # dB markers: -60, -40, -20, -10, -6, -3, 0
         db_marks = [
@@ -156,7 +164,7 @@ class LevelMeterWidget(Gtk.DrawingArea):
             (0, 1.0),
         ]
 
-        ctx.set_source_rgba(0.7, 0.7, 0.7, 0.5)
+        ctx.set_source_rgba(*tick_color)
         ctx.set_line_width(1.0)
 
         for db, position in db_marks:
@@ -179,13 +187,11 @@ class LevelMeterPanel(Gtk.Box):
     def __init__(self) -> None:
         """Initialize the level meter panel."""
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.add_css_class("wa-level-panel")
 
         # Label
         label = Gtk.Label(label="Input Level")
         label.set_halign(Gtk.Align.START)
         label.add_css_class("caption")
-        label.add_css_class("wa-level-caption")
         self.append(label)
 
         # Level meter widget
@@ -196,7 +202,7 @@ class LevelMeterPanel(Gtk.Box):
         self.db_label = Gtk.Label(label="-∞ dB")
         self.db_label.set_halign(Gtk.Align.END)
         self.db_label.add_css_class("caption")
-        self.db_label.add_css_class("wa-level-caption")
+        self.db_label.add_css_class("numeric")
         self.append(self.db_label)
 
         logger.debug("Level meter panel initialized")

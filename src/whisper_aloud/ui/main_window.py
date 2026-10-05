@@ -8,7 +8,8 @@ from typing import Optional
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gdk, Gio, GLib, Gtk
+gi.require_version('Adw', '1')
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from ..config import WhisperAloudConfig
 from ..daemon_hints import gui_daemon_unavailable_hint
@@ -37,7 +38,7 @@ from .main_window_logic import (
     should_restore_transcribing_after_cancel,
     transcribing_status_text,
 )
-from .partial_view_logic import PartialViewState
+from .partial_view_logic import PartialViewState, tentative_rgba
 from .settings_dialog import SettingsDialog
 from .shortcuts_window import ShortcutsWindow
 from .sound_feedback import SoundFeedback
@@ -47,8 +48,13 @@ from .utils import AppState, format_duration
 logger = logging.getLogger(__name__)
 
 
-class MainWindow(Gtk.ApplicationWindow):
-    """Main application window with recording and transcription controls."""
+class MainWindow(Adw.ApplicationWindow):
+    """Main application window with recording and transcription controls.
+
+    Layout (HIG-01): an Adw.ToolbarView whose top bar is an Adw.HeaderBar and
+    whose bottom bar is the status bar; the history/transcription Gtk.Paned
+    is the toolbar view's content.
+    """
 
     def __init__(self, application: Gtk.Application) -> None:
         """
@@ -121,8 +127,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Set window properties
         self.set_title("WhisperAloud")
         self.set_default_size(900, 600)
-        self.add_css_class("wa-app-window")
-        self.set_titlebar(self.header_bar)  # Use custom header bar
+        # HIG minimum window size; the content's own size requests still win
+        # until the adaptive layout lands (HIG-12).
+        self.set_size_request(360, 294)
 
         # Set up keyboard shortcuts
         self._setup_keyboard_shortcuts()
@@ -134,20 +141,20 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _build_ui(self) -> None:
         """Build the user interface."""
-        # Create main vertical box
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.set_child(main_box)
+        # Adw.ApplicationWindow has no titlebar slot: the header bar is the
+        # toolbar view's top bar and the status bar its bottom bar.
+        self.toolbar_view = Adw.ToolbarView()
+        self.set_content(self.toolbar_view)
 
         # Create header bar
-        self.header_bar = Gtk.HeaderBar()
-        self.header_bar.set_show_title_buttons(True)
-        self.header_bar.add_css_class("wa-headerbar")
+        self.header_bar = Adw.HeaderBar()
+        self.header_bar.set_title_widget(Adw.WindowTitle(title="WhisperAloud", subtitle=""))
+        self.toolbar_view.add_top_bar(self.header_bar)
 
         # History toggle button
         self.history_toggle = Gtk.ToggleButton()
         self.history_toggle.set_icon_name("sidebar-show-symbolic")
         self.history_toggle.set_tooltip_text("Toggle History")
-        self.history_toggle.add_css_class("wa-toolbar-btn")
         self.history_toggle.set_active(True)
         self.history_toggle.connect("toggled", self._on_history_toggled)
         self.header_bar.pack_start(self.history_toggle)
@@ -156,7 +163,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.transcribe_file_button = Gtk.Button()
         self.transcribe_file_button.set_icon_name("document-open-symbolic")
         self.transcribe_file_button.set_tooltip_text("Transcribe file… (Ctrl+O)")
-        self.transcribe_file_button.add_css_class("wa-toolbar-btn")
         self.transcribe_file_button.connect("clicked", self._on_transcribe_file_clicked)
         self.header_bar.pack_start(self.transcribe_file_button)
 
@@ -164,7 +170,6 @@ class MainWindow(Gtk.ApplicationWindow):
         help_button = Gtk.Button()
         help_button.set_icon_name("help-about-symbolic")
         help_button.set_tooltip_text("Keyboard Shortcuts (F1)")
-        help_button.add_css_class("wa-toolbar-btn")
         help_button.connect("clicked", self._on_help_clicked)
         self.header_bar.pack_end(help_button)
 
@@ -172,7 +177,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.settings_button = Gtk.Button()
         self.settings_button.set_icon_name("preferences-system-symbolic")
         self.settings_button.set_tooltip_text("Settings (Ctrl+,)")
-        self.settings_button.add_css_class("wa-toolbar-btn")
         self.settings_button.set_sensitive(False)
         self.settings_button.connect("clicked", self._on_settings_clicked)
         self.header_bar.pack_end(self.settings_button)
@@ -183,7 +187,6 @@ class MainWindow(Gtk.ApplicationWindow):
                                   "Italiano", "Portugu\u00eas", "\u65e5\u672c\u8a9e", "\u4e2d\u6587", "\ud55c\uad6d\uc5b4", "\u0420\u0443\u0441\u0441\u043a\u0438\u0439", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "\u0939\u093f\u0928\u094d\u0926\u0940"]
         self.lang_dropdown = Gtk.DropDown.new_from_strings(self._language_labels)
         self.lang_dropdown.set_tooltip_text("Select transcription language")
-        self.lang_dropdown.add_css_class("wa-language")
         self.lang_dropdown.set_selected(0)  # Default to Auto, will be updated when config loads
 
         self.lang_dropdown.connect("notify::selected", self._on_language_changed)
@@ -197,14 +200,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self.paned.set_shrink_end_child(False)
         self.paned.set_resize_start_child(True)   # history grows proportionally
         self.paned.set_resize_end_child(True)     # controls grow proportionally
-        main_box.append(self.paned)
+        self.toolbar_view.set_content(self.paned)
 
         # Left side: Recording and Transcription
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         # Recording panel
         recording_panel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        recording_panel_box.add_css_class("wa-surface")
         recording_panel_box.set_margin_start(24)
         recording_panel_box.set_margin_end(24)
         recording_panel_box.set_margin_top(10)
@@ -215,7 +217,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.record_button = Gtk.Button(label="Start Recording")
         self.record_button.add_css_class("suggested-action")
         self.record_button.add_css_class("pill")
-        self.record_button.add_css_class("wa-primary-action")
         self.record_button.set_size_request(200, 44)  # Fixed width for consistent look
         self.record_button.set_sensitive(False)  # Disabled until daemon connects
         self.record_button.set_tooltip_text("Start/stop recording (Space)")
@@ -226,7 +227,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.cancel_button = Gtk.Button(label="Cancel")
         self.cancel_button.add_css_class("destructive-action")
         self.cancel_button.add_css_class("pill")
-        self.cancel_button.add_css_class("wa-primary-action")
         self.cancel_button.set_size_request(200, 44)  # Same size as record button
         self.cancel_button.set_visible(False)  # Hidden by default
         self.cancel_button.set_tooltip_text("Cancel transcription (Ctrl+X)")
@@ -252,7 +252,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Transcription view
         transcription_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        transcription_box.add_css_class("wa-surface")
         transcription_box.set_margin_start(16)
         transcription_box.set_margin_end(16)
         transcription_box.set_margin_top(12)
@@ -261,13 +260,15 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Scrolled window with text view
         scrolled = Gtk.ScrolledWindow()
-        scrolled.add_css_class("wa-output-wrap")
+        scrolled.add_css_class("card")
         scrolled.set_vexpand(True)
         scrolled.set_hexpand(True)
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
         self.text_view = Gtk.TextView()
-        self.text_view.add_css_class("wa-output")
+        # "inline": transparent background, so the text sits on the card
+        # (otherwise the view background shows as an inset in dark style).
+        self.text_view.add_css_class("inline")
         self.text_view.set_editable(False)
         self.text_view.set_wrap_mode(Gtk.WrapMode.WORD)
         self.text_view.set_margin_start(12)
@@ -286,14 +287,12 @@ class MainWindow(Gtk.ApplicationWindow):
         button_box.set_halign(Gtk.Align.END)
 
         self.copy_button = Gtk.Button(label="Copy to Clipboard")
-        self.copy_button.add_css_class("wa-ghost")
         self.copy_button.set_sensitive(False)
         self.copy_button.set_tooltip_text("Copy transcription to clipboard (Ctrl+C)")
         self.copy_button.connect("clicked", self._on_copy_clicked)
         button_box.append(self.copy_button)
 
         self.clear_button = Gtk.Button(label="Clear")
-        self.clear_button.add_css_class("wa-ghost")
         self.clear_button.set_sensitive(False)
         self.clear_button.set_tooltip_text("Clear transcription text (Escape)")
         self.clear_button.connect("clicked", self._on_clear_clicked)
@@ -316,7 +315,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # "Model missing — Download": the download itself (with license
         # consent and progress) lives in Settings' model row.
         self.status_bar.model_download_button.connect("clicked", self._on_settings_clicked)
-        main_box.append(self.status_bar)
+        self.toolbar_view.add_bottom_bar(self.status_bar)
 
         # Drag-and-drop a file anywhere on the window to transcribe it
         # (WHISP-96). Gdk.FileList covers both plain local drops and
@@ -911,26 +910,36 @@ class MainWindow(Gtk.ApplicationWindow):
         """Render the tracked (committed, tentative) partial text into the
         transcription view: committed text normal, tentative text dimmed.
 
-        Uses Gtk.TextBuffer.insert_markup with GLib.markup_escape_text on both
-        pieces of text first, so engine output is never interpreted as markup.
+        Both pieces are inserted as plain text (the tentative tail through a
+        GtkTextTag), so engine output is never interpreted as markup.
         """
         committed, tentative = self._partial_view.render()
         buffer = self.text_view.get_buffer()
 
-        markup = GLib.markup_escape_text(committed)
-        if tentative:
-            # GTK's TextBuffer.insert_markup only converts a handful of Pango
-            # attributes into GtkTextTags; "alpha" alone is dropped, so dim via a
-            # muted foreground color (GNOME's standard "dim-label" gray) instead.
-            markup += (
-                '<span foreground="#9a9996">'
-                f"{GLib.markup_escape_text(tentative)}</span>"
-            )
-
         buffer.handler_block(self._buffer_changed_handler_id)
-        buffer.set_text("")
-        buffer.insert_markup(buffer.get_end_iter(), markup, -1)
+        buffer.set_text(committed)
+        if tentative:
+            # Plain-text insertion with a tag (never markup), dimmed from the
+            # view's own foreground so it follows light/dark style (HIG-01).
+            buffer.insert_with_tags(
+                buffer.get_end_iter(), tentative, self._tentative_text_tag()
+            )
         buffer.handler_unblock(self._buffer_changed_handler_id)
+
+    def _tentative_text_tag(self) -> Gtk.TextTag:
+        """Return the buffer's "tentative" tag, recoloured from the text
+        view's current foreground (so a light/dark switch is picked up on
+        the next partial)."""
+        buffer = self.text_view.get_buffer()
+        tag = buffer.get_tag_table().lookup("tentative")
+        if tag is None:
+            tag = buffer.create_tag("tentative")
+        fg = self.text_view.get_color()
+        r, g, b, a = tentative_rgba((fg.red, fg.green, fg.blue, fg.alpha))
+        rgba = Gdk.RGBA()
+        rgba.red, rgba.green, rgba.blue, rgba.alpha = r, g, b, a
+        tag.set_property("foreground-rgba", rgba)
+        return tag
 
     def _on_daemon_level_update(self, level: float) -> None:
         """Handle LevelUpdate signal from daemon."""

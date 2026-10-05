@@ -1,9 +1,21 @@
-"""Application-wide GTK style provider."""
+"""Application-wide GTK style provider.
+
+Since HIG-01 the look comes from libadwaita (loaded by Adw.Application): header
+bars, buttons, lists, entries, window backgrounds and light/dark colours are
+Adwaita's, selected with its style classes (``suggested-action``, ``pill``,
+``flat``, ``card``, ``heading``, ``caption``, ``dim-label``, ``numeric``,
+``monospace``...). This stylesheet only keeps rules for app-specific widgets with
+no libadwaita equivalent on the supported floor (libadwaita 1.5). Every rule is
+scoped to a ``wa-*`` class and uses ``currentColor`` instead of literal or
+GTK3-era ``@theme_*`` colours, so it follows Adw.StyleManager
+(tests/test_app_styles.py enforces this).
+"""
 
 import logging
 
 import gi
 
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, Gtk
 
@@ -11,186 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 APP_CSS = b"""
-headerbar.wa-headerbar {
-  padding: 6px 10px;
-  border-bottom: 1px solid alpha(@theme_fg_color, 0.08);
-  background: linear-gradient(
-    to bottom,
-    alpha(@theme_base_color, 0.94),
-    alpha(@theme_base_color, 0.80)
-  );
-}
-
-window.wa-app-window,
-window.wa-dialog-window {
-  background: @theme_bg_color;
-}
-
-box.wa-surface {
-  background: alpha(@theme_base_color, 0.72);
-  border: 1px solid alpha(@theme_fg_color, 0.08);
-  border-radius: 16px;
-  padding: 14px;
-  box-shadow: 0 10px 20px alpha(black, 0.04);
-}
-
-label.wa-status-chip {
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  margin-left: 8px;
-  margin-right: 8px;
-}
-
-stackswitcher.wa-tabs button {
-  border-radius: 999px;
-  padding: 6px 14px;
-  font-weight: 600;
-  min-height: 32px;
-}
-
-label.wa-section-title {
-  font-weight: 700;
-  letter-spacing: 0.2px;
-}
-
-box.wa-setting-row {
-  min-height: 38px;
-  padding-top: 3px;
-  padding-bottom: 3px;
-}
-
-listbox.wa-shortcuts-list row {
-  padding-top: 2px;
-  padding-bottom: 2px;
-}
-
-label.wa-help {
-  color: alpha(@theme_fg_color, 0.72);
-}
-
-scrolledwindow.wa-output-wrap {
-  border-radius: 16px;
-  border: 1px solid alpha(@theme_fg_color, 0.08);
-  background: alpha(@theme_base_color, 0.7);
-}
-
-textview.wa-output {
-  font-size: 1.02em;
-  line-height: 1.45;
-}
-
-button.wa-ghost {
-  border-radius: 10px;
-}
-
-box.wa-history-panel {
-  background: alpha(@theme_base_color, 0.6);
-  border: 1px solid alpha(@theme_fg_color, 0.08);
-  border-radius: 14px;
-  padding: 8px;
-}
-
-box.wa-history-header {
-  margin-bottom: 2px;
-}
-
-box.wa-history-search {
-  margin-bottom: 4px;
-}
-
-entry.wa-search-entry {
-  border-radius: 10px;
-  padding-top: 4px;
-  padding-bottom: 4px;
-}
-
-scrolledwindow.wa-history-list-wrap {
-  border-radius: 12px;
-  border: 1px solid alpha(@theme_fg_color, 0.08);
-  background: alpha(@theme_base_color, 0.82);
-}
-
-listbox.wa-history-list row {
-  border-radius: 10px;
-  margin: 1px 3px;
-}
-
-listboxrow.wa-history-item {
-  transition: all 120ms ease-out;
-  min-height: 52px;
-}
-
-label.wa-history-date {
-  font-weight: 700;
-}
-
-label.wa-history-time {
-  font-variant-numeric: tabular-nums;
-}
-
-label.wa-history-title {
-  font-weight: 600;
-  letter-spacing: 0.1px;
-}
-
-label.wa-history-meta {
-  opacity: 0.86;
-}
-
-box.wa-status-bar {
-  border-top: 1px solid alpha(@theme_fg_color, 0.08);
-  background: alpha(@theme_base_color, 0.75);
-  min-height: 30px;
-}
-
-label.wa-status-text {
-  font-variant-numeric: tabular-nums;
-}
-
-box.wa-level-panel {
-  margin-top: 4px;
-}
-
-label.wa-level-caption {
-  color: alpha(@theme_fg_color, 0.82);
-}
-
+/* Key caps in the keyboard shortcuts window (ui/shortcuts_window.py). Mirrors
+   libadwaita's "shortcut > .keycap", which only applies inside GtkShortcutLabel;
+   Adw.ShortcutLabel needs libadwaita 1.8 (HIG-11 replaces this window). */
 label.wa-keycap {
-  background: alpha(@accent_bg_color, 0.18);
-  border: 1px solid alpha(@accent_bg_color, 0.44);
-  border-radius: 9px;
-  padding: 3px 8px;
-  font-weight: 700;
-}
-
-button.wa-toolbar-btn,
-dropdown.wa-language {
-  border-radius: 10px;
-  min-height: 34px;
-}
-
-button.wa-primary-action {
-  min-height: 38px;
-  padding-left: 14px;
-  padding-right: 14px;
-  font-weight: 650;
-  letter-spacing: 0.15px;
-}
-
-popover.wa-preview-popover {
-  border-radius: 12px;
-}
-
-label.wa-preview-label {
-  padding: 8px 12px;
-  font-size: 0.9em;
-  line-height: 1.6;
-}
-
-/* Wider grab area for the history/content pane divider */
-paned > separator {
-  min-width: 8px;
-  min-height: 8px;
+  min-width: 20px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background-color: alpha(currentColor, 0.08);
+  box-shadow: inset 0 -1px alpha(currentColor, 0.15);
+  font-size: smaller;
 }
 """
 
@@ -199,7 +41,10 @@ def install_app_css() -> None:
     """Install application CSS provider for all displays."""
     try:
         provider = Gtk.CssProvider()
-        provider.load_from_data(APP_CSS)
+        if hasattr(provider, "load_from_string"):  # GTK >= 4.12
+            provider.load_from_string(APP_CSS.decode())
+        else:
+            provider.load_from_data(APP_CSS)
         display = Gdk.Display.get_default()
         if display is None:
             logger.debug("No GDK display available, skipping CSS installation")

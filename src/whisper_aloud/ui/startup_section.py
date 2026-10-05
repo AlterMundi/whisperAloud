@@ -38,12 +38,10 @@ class StartupSection:
         heading = Gtk.Label(label="Startup")
         heading.set_halign(Gtk.Align.START)
         heading.add_css_class("heading")
-        heading.add_css_class("wa-section-title")
         heading.set_margin_top(12)
         box.append(heading)
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        row.add_css_class("wa-setting-row")
         label = Gtk.Label(label=TITLE)
         label.set_halign(Gtk.Align.START)
         label.set_hexpand(True)

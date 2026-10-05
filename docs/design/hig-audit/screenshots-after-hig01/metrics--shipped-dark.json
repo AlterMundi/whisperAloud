@@ -1,0 +1,10 @@
+{
+  "mode": "shipped-dark",
+  "adw_version": "1.7",
+  "gtk_version": "4.18",
+  "app_class_base": "Adw.Application",
+  "main_window_min_width": 721,
+  "main_window_min_height": 391,
+  "narrow_request_360_actual_width": 711,
+  "min_width_history_hidden": 570
+}

@@ -34,7 +34,6 @@ class HistoryItem(Gtk.ListBoxRow):
         """
         super().__init__()
         self.entry = entry
-        self.add_css_class("wa-history-item")
 
         # Build layout
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -51,7 +50,7 @@ class HistoryItem(Gtk.ListBoxRow):
         time_label = Gtk.Label(label=time_str)
         time_label.set_width_chars(5)
         time_label.add_css_class("dim-label")
-        time_label.add_css_class("wa-history-time")
+        time_label.add_css_class("numeric")
 
         self._select_check = Gtk.CheckButton()
         self._select_check.set_valign(Gtk.Align.CENTER)
@@ -71,7 +70,6 @@ class HistoryItem(Gtk.ListBoxRow):
         text_label = Gtk.Label(label=text_preview)
         text_label.set_ellipsize(Pango.EllipsizeMode.END)
         text_label.set_xalign(0)
-        text_label.add_css_class("wa-history-title")
         content_box.append(text_label)
 
         # Metadata: language • confidence% • duration
@@ -83,7 +81,6 @@ class HistoryItem(Gtk.ListBoxRow):
         meta_label = Gtk.Label(label=meta_text)
         meta_label.add_css_class("dim-label")
         meta_label.add_css_class("caption")
-        meta_label.add_css_class("wa-history-meta")
         meta_label.set_xalign(0)
         content_box.append(meta_label)
 
@@ -95,7 +92,6 @@ class HistoryItem(Gtk.ListBoxRow):
         fav_button.set_active(entry.favorite)
         fav_button.set_valign(Gtk.Align.CENTER)
         fav_button.add_css_class("flat")
-        fav_button.add_css_class("wa-ghost")
         fav_button.set_tooltip_text("Toggle favorite")
         fav_button.connect("toggled", self._on_favorite_toggled)
         box.append(fav_button)
@@ -121,7 +117,6 @@ class HistoryItem(Gtk.ListBoxRow):
         self._preview_popover.set_parent(self)
         self._preview_popover.set_position(Gtk.PositionType.TOP)
         self._preview_popover.set_size_request(360, -1)
-        self._preview_popover.add_css_class("wa-preview-popover")
 
         preview_label = Gtk.Label(label=self._preview_text)
         preview_label.set_xalign(0.0)
@@ -130,7 +125,10 @@ class HistoryItem(Gtk.ListBoxRow):
         preview_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
         preview_label.set_max_width_chars(65)
         preview_label.add_css_class("monospace")
-        preview_label.add_css_class("wa-preview-label")
+        preview_label.set_margin_start(12)
+        preview_label.set_margin_end(12)
+        preview_label.set_margin_top(8)
+        preview_label.set_margin_bottom(8)
         self._preview_popover.set_child(preview_label)
 
         hover_controller = Gtk.EventControllerMotion()
