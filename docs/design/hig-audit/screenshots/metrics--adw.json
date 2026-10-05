@@ -1,0 +1,9 @@
+{
+  "mode": "adw",
+  "adw_version": "1.7",
+  "gtk_version": "4.18",
+  "main_window_min_width": 774,
+  "main_window_min_height": 506,
+  "narrow_request_360_actual_width": 764,
+  "min_width_history_hidden": 570
+}
