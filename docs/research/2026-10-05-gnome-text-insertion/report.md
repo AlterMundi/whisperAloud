@@ -548,3 +548,113 @@ The catch for us: **an IBus engine cannot be shipped as a normal Flatpak.** Flat
 ### Other references
 - Myna announcement coverage: https://www.theregister.com/os-platforms/2026/06/18/canonical-unveils-myna-speech-to-text-app-for-ubuntu-2610/5258376 and https://www.omgubuntu.co.uk/2026/06/what-is-myna-ubuntu-ai-dictation
 - Handy's tracker on Flatpak, RemoteDesktop and GlobalShortcuts problems: https://github.com/cjpais/Handy/issues/1555
+
+
+---
+
+## Appendix C — Extension-side insertion details, GNOME 45–51 (supporting research, 2026-10-05)
+
+**Bottom line:** For native Wayland apps that have an editable field focused, use `Main.inputMethod.commit()` (it goes through text-input-v3). For anything else, set the clipboard and send a paste chord through a Clutter virtual keyboard: Shift+Insert, or Ctrl+Shift+Insert in terminals. Neither path shows an indicator, and neither reaches XWayland windows the way the IM path does. Six things to handle:
+- **Backend accessor:** feature-detect it. `Clutter.get_default_backend` is gone in 51, and `actor.context` only exists from 47.
+- **Lock screen and modals:** gate on `Main.sessionMode.isLocked` and on modal state.
+- **Caller check:** check who is calling.
+- **Chunking:** split commits into pieces under 4000 bytes.
+- **Newlines:** strip or flag them for terminals.
+- **Paste key:** don't use Ctrl+**v**. It breaks on non-Latin layouts.
+
+### 1. How Mutter delivers the text
+
+**IM commit path (VERIFIED by tracing the source):**
+1. `clutter_input_method_commit()` queues a `CLUTTER_IM_COMMIT` event and doesn't check focus ([clutter-input-method.c @48.4](https://gitlab.gnome.org/GNOME/mutter/-/raw/48.4/clutter/clutter/clutter-input-method.c)).
+2. `meta-wayland-seat.c` sends `CLUTTER_IM_COMMIT` to `meta_wayland_text_input_handle_event` ([seat.c](https://gitlab.gnome.org/GNOME/mutter/-/raw/48.4/src/wayland/meta-wayland-seat.c), line ~530).
+3. `clutter-input-focus.c` turns it into `clutter_input_focus_commit` ([source](https://gitlab.gnome.org/GNOME/mutter/-/raw/48.4/clutter/clutter/clutter-input-focus.c)).
+4. `meta_wayland_text_input_focus_commit_text` calls `zwp_text_input_v3_send_commit_string(resource, text)` for each resource in `focus_resource_list` ([text-input.c 48.4](https://gitlab.gnome.org/GNOME/mutter/-/raw/48.4/src/wayland/meta-wayland-text-input.c), same in [51.0](https://gitlab.gnome.org/GNOME/mutter/-/raw/51.0/src/wayland/meta-wayland-text-input.c)).
+
+**When it works:**
+- **The client must have enabled text-input (VERIFIED).** IM focus is only set in `text_input_commit_state` when `text_input->enabled`, meaning the client sent enable followed by commit. Only v3 is implemented.
+- **Check for a focused field (VERIFIED).** Look at `Main.inputMethod.currentFocus` before committing. Shell 48's `InputMethod.vfunc_focus_in/out` keeps it updated (local `misc/inputMethod.js`). If there's no focus, the commit is silently dropped (INFERRED).
+- **X11/XWayland: no (VERIFIED and field-reported).** The shell's own comment in `KeyboardController.commit` reads "If there is no IM focus (e.g. with X11 clients)… send raw key events" ([keyboard.js @51.0](https://gitlab.gnome.org/GNOME/gnome-shell/-/raw/51.0/js/ui/keyboard.js), line ~1951). The nextalk extension also reports that XWayland windows silently don't receive the commit and that some Electron apps have no text-input ([nextalk extension.js](https://github.com/gonewx/nextalk/blob/HEAD/addons/gnome/nextalk@gonewx.com/extension.js)).
+- **Size limit (VERIFIED limit, INFERRED effect).** libwayland caps a message at `WL_MAX_MESSAGE_SIZE 4096` ([wayland-server.c](https://gitlab.freedesktop.org/wayland/wayland/-/raw/main/src/wayland-server.c)), and a failed send sets `client->error`, which then runs `destroy_client_with_error`. So an oversized `commit_string` could disconnect the target app. Related crashes: [GTK #1783](https://gitlab.gnome.org/GNOME/gtk/-/work_items/1783), [Mozilla 1539773](https://bugzilla.mozilla.org/show_bug.cgi?id=1539773). Color Picker caps commits at 1234 chars ("Wayland msg / UTF-8 char"). **Chunk to ≤ ~4000 UTF-8 bytes.**
+
+**Virtual keyboard `notify_keyval` (VERIFIED, [native device @48.4](https://gitlab.gnome.org/GNOME/mutter/-/raw/48.4/src/backends/native/meta-virtual-input-device-native.c) and [main](https://gitlab.gnome.org/GNOME/mutter/-/raw/main/src/backends/native/meta-virtual-input-device-native.c)):**
+- It only searches the **current layout group**. There's no reserved or spare keycode remapping. If the keyval isn't found it logs `"No keycode found for keyval %x in current group"` and drops the key.
+- It adds Shift or ISO_Level3_Shift itself when the keyval sits on level 1 or 2.
+- `notify_key` exists and takes raw **evdev** keycodes.
+- **Consequence:** `KEY_v` fails on a Cyrillic or Greek layout, and typing text character by character fails for any character not in the layout. `Control_L`, `Shift_L` and `Insert` are present in every layout.
+- Modifier chords do work (Clipboard Indicator, Color Picker and the shell all use them). Physically held modifiers share the seat's xkb state, so a held dictation hotkey could change the chord (INFERRED).
+- Timestamps are in microseconds: `Clutter.get_current_event_time() * 1000`, as the shell's `keyvalPress` does (local keyboard.js line 2134).
+
+### 2. API stability, 45–51
+
+| API | Status |
+|---|---|
+| `Clutter.get_default_backend()` | **Removed in 51** (VERIFIED, [port guide 51](https://gjs.guide/extensions/upgrading/gnome-shell-51.html)). Field reports: [gjs-osk #171](https://github.com/Vishram1123/gjs-osk/issues/171), [bing-wallpaper #298](https://github.com/neffo/bing-wallpaper-gnome-extension/issues/298). |
+| `global.stage.context.get_backend()` | `ClutterActor` gets `PROP_CONTEXT` in **mutter 47.0, absent in 46.0** (VERIFIED by grepping [47.0](https://gitlab.gnome.org/GNOME/mutter/-/raw/47.0/clutter/clutter/clutter-actor.c) and [46.0](https://gitlab.gnome.org/GNOME/mutter/-/raw/46.0/clutter/clutter/clutter-actor.c) `clutter-actor.c`). Shell 45–47 `keyboard.js` still used `get_default_backend`; 48+ uses `context`. |
+| `Main.inputMethod` | `.commit` / `.currentFocus` / `.contentPurpose` are present in 48 (local) and 51 (`Main.inputMethod.commit(str)` at keyboard.js line 1980) (VERIFIED). |
+| `St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, t)` | Unchanged in 51 ([st-clipboard.h](https://gitlab.gnome.org/GNOME/gnome-shell/-/raw/51.0/src/st/st-clipboard.h)) (VERIFIED). |
+
+None of the port guides for [46](https://gjs.guide/extensions/upgrading/gnome-shell-46.html), [47](https://gjs.guide/extensions/upgrading/gnome-shell-47.html), [48](https://gjs.guide/extensions/upgrading/gnome-shell-48.html), [49](https://gjs.guide/extensions/upgrading/gnome-shell-49.html) or [50](https://gjs.guide/extensions/upgrading/gnome-shell-50.html) mention InputMethod, virtual devices or St.Clipboard. Two side notes: 51 makes `makeProxyWrapper` require `new`, and 50 drops X11 sessions.
+
+Feature-detected accessor:
+```js
+const backend = global.stage.context?.get_backend?.() ?? Clutter.get_default_backend();
+```
+
+### 3. Existing extensions
+
+- **Clipboard Indicator** ([EGO 779](https://extensions.gnome.org/extension/779/clipboard-indicator/), metadata lists 46–50) (VERIFIED):
+  - [keyboard.js](https://github.com/Tudmotu/gnome-shell-extension-clipboard-indicator/blob/master/keyboard.js) uses `Clutter.get_default_backend().get_default_seat().create_virtual_device(KEYBOARD_DEVICE)` and tracks `Main.inputMethod` `notify::content-purpose`.
+  - [extension.js `#pasteItem`](https://github.com/Tudmotu/gnome-shell-extension-clipboard-indicator/blob/master/extension.js) (~line 1628) sends **Shift+Insert**, or **Ctrl+Shift+Insert** when the purpose is `TERMINAL`, after a 50 ms delay. It then restores the previous clipboard.
+- **Color Picker** by tuberry ([src/fubar.js](https://github.com/tuberry/color-picker/blob/main/src/fubar.js), lines 170–188). EGO [3396](https://extensions.gnome.org/extension/3396/color-picker/) supports 51; that this listing is tuberry's is INFERRED.
+  - Uses `global.stage.context.get_backend()…create_virtual_device`.
+  - If `text.length < 1234 && Main.inputMethod.currentFocus`, it calls `Main.inputMethod.commit(terminal ? '\x1b[200~'+text+'\x1b[201~' : text)`.
+  - Otherwise it copies and strokes Shift+Insert (or Shift+Ctrl+v for terminals).
+- **Pano** ([src/utils/ui.ts](https://github.com/oae/gnome-shell-pano), [EGO 5278](https://extensions.gnome.org/extension/5278/pano/), unmaintained) and **Copyous** (`src/lib/misc/keyboard.ts`) also use `create_virtual_device` (VERIFIED via code search).
+- **Close analogues of our design (not on EGO, INFERRED):**
+  - [nextalk](https://github.com/gonewx/nextalk) exports a D-Bus method `CommitText(s)` on the Shell connection that calls `Main.inputMethod.commit` after checking `focus_window.get_client_type() !== X11` and `currentFocus`. It returns `ERR` so the client can fall back to the clipboard. It does **no caller check**.
+  - [gnome-wayland-autotyper](https://github.com/maxxxbond/gnome-wayland-autotyper/blob/HEAD/extension.js) tries commit first, then clipboard plus Ctrl+V.
+  - [timcharper/dictation](https://github.com/timcharper/dictation/blob/HEAD/gnome-extension/extension.ts) checks the caller with `GetNameOwner` (synchronously) and types character by character. It imports Gdk, which EGO forbids.
+- **Dictation extensions on EGO:**
+  - [Speech2Text](https://extensions.gnome.org/extension/8238/gnome-speech2text/) has its service run `xdotool type` (X11 only), otherwise clipboard ([service.py](https://github.com/kavehtehrani/gnome-speech2text)) (VERIFIED).
+  - [Blurt](https://extensions.gnome.org/extension/6742/blurt/) and [Speech2Text whisper.cpp](https://extensions.gnome.org/extension/8706/speech2text-with-whispercpp/) exist; I didn't read their insertion code.
+
+### 4. EGO review rules ([guidelines](https://gjs.guide/extensions/review-guidelines/review-guidelines.html))
+
+- **What the guidelines say (VERIFIED):**
+  - No rule mentions exporting D-Bus or simulating input.
+  - Clipboard access MUST be declared in the description.
+  - Clipboard data MUST NOT go to a third party without explicit user interaction.
+  - No default keyboard shortcuts for clipboard data.
+  - No binaries; spawn processes carefully; no telemetry.
+  - No Gdk/Gtk/Adw imports in the shell process; destroy and disconnect everything in `disable()`.
+  - `unlock-dialog` is allowed only if it's required.
+  - There's an anti-AI-generated-code rule.
+- **Approvability (INFERRED):** a sender-checked insertion method looks acceptable, given approved precedent (Clipboard Indicator and Color Picker inject keys). Expect reviewers to ask about the caller restriction and the clipboard declaration.
+- **`DBusSenderChecker`** exists in [`misc/util.js` @45](https://gitlab.gnome.org/GNOME/gnome-shell/-/raw/45.0/js/misc/util.js) and [@51](https://gitlab.gnome.org/GNOME/gnome-shell/-/raw/51.0/js/misc/util.js) and can be imported from `resource:///org/gnome/shell/misc/util.js` (VERIFIED; `shellDBus.js` uses it with `async XxxAsync(params, invocation)` plus `await checker.checkInvocation(invocation)`).
+- **Caveats on `DBusSenderChecker`:**
+  - It's bypassed when `global.context.unsafe_mode` is on (VERIFIED).
+  - Its allowlist is by well-known name, so any process that grabs `org.fede.whisperaloud` first passes the check (INFERRED).
+  - `destroy()` loops with `for (const id in this._watchList)`, which yields array indices rather than watcher IDs. Watchers leak, so unwatch them yourself (VERIFIED in 48 and 51).
+- **Alternative design (INFERRED):** have the extension subscribe to a daemon signal and filter on the owner of `org.fede.whisperaloud`. Then the Flatpak needs no talk-name to the Shell. GLib ≥ 2.80.1 / 2.78.5 fixed well-known-name signal spoofing ([CVE-2024-34397](https://www.openwall.com/lists/oss-security/2024/05/07/5)).
+- **Flatpak note (INFERRED):** with xdg-dbus-proxy, talk permission to a name owned by gnome-shell's connection effectively reaches the whole Shell connection. Prefer the signal design or a dedicated name.
+
+### 5. Security and UX
+
+- **No indicator (INFERRED, high confidence).** The remote-access indicator only tracks `RemoteAccessController` `new-handle` handles from RemoteDesktop/ScreenCast sessions (local `ui/status/remoteAccess.js` lines 20–60). In-process Clutter virtual devices and IM commits don't create handles.
+- **Lock screen (VERIFIED):**
+  - Extensions without `unlock-dialog` in their session modes are disabled on lock (guidelines), so the D-Bus export goes away.
+  - Still gate on `Main.sessionMode.isLocked` (`'unlock-dialog': {isLocked: true}` in local `sessionMode.js`).
+  - Also gate on `Main.modalCount > 0` (local `main.js` line 82).
+  - Reason (INFERRED): `currentFocus` is also set for Shell entries, such as overview search and the polkit password dialog, so commit or key injection would land there.
+  - Combine this with the WHISP-88 check that `global.display.focus_window` is the captured window.
+- **Terminals (VERIFIED in [VTE](https://gitlab.gnome.org/GNOME/vte/-/raw/master/src/vte.cc)):**
+  - VTE sets `input-purpose = GTK_INPUT_PURPOSE_TERMINAL` (`widget.cc` line 2002), so `Main.inputMethod.contentPurpose === Clutter.InputContentPurpose.TERMINAL` can be detected.
+  - `Terminal::im_commit` → `send_child(str)` sends the text as **raw typed input**. It is not a paste: there's no bracketed-paste wrapping and **a `\n` will execute the command line**.
+  - VTE key handling: **Shift+Insert pastes PRIMARY**, **Ctrl+Shift+Insert pastes CLIPBOARD**. Ctrl+V is passed to the program as ^V. Ctrl+Shift+V is an app-level accelerator in Console/Ptyxis.
+  - **Recommendation for terminals:** use clipboard plus **Ctrl+Shift+Insert**, which goes through VTE's paste path with bracketed-paste handling (INFERRED). Otherwise strip newlines before committing. Color Picker's manual `\e[200~` wrap is risky when the shell hasn't enabled bracketed paste (INFERRED).
+- **Proposed field tests (not run, per the boundary rules):**
+  - Commit into gedit/GTK4, Firefox, Chromium/Electron (with and without `--enable-wayland-ime`), Qt6, an XWayland app, and Console/Ptyxis.
+  - Ctrl+v vs Shift+Insert with a `ru` layout active.
+  - A commit of more than 4096 bytes into a throwaway GTK app, to confirm whether it disconnects.
+
+All GNOME Shell 48 source I extracted is in `/tmp/claude-1000/-home-fede-REPOS-whisperAloud/3d99887f-800a-4fe2-a97c-b2a9f7b63754/scratchpad/ext-research/` (`inputMethod.js`, `keyboard.js`, `util.js`, `sessionMode.js`, `remoteAccess.js`, `shellDBus.js`), along with downloaded copies of upstream and third-party files. I followed the coordinator's safety boundary: no IBus or Shell D-Bus calls, nothing run live.
