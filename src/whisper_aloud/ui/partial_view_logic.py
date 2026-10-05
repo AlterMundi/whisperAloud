@@ -90,3 +90,17 @@ class PartialViewState:
         self._committed = text
         self._tentative = ""
         return True
+
+
+# Tentative (unstable) partial text is drawn in the text view's own foreground
+# at this alpha (HIG-01 / audit F-3), so it stays readable in light and dark
+# style instead of using a literal grey.
+TENTATIVE_ALPHA = 0.55
+
+
+def tentative_rgba(
+    foreground: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Return the colour for tentative text given the view's foreground RGBA."""
+    r, g, b, a = foreground
+    return (r, g, b, a * TENTATIVE_ALPHA)

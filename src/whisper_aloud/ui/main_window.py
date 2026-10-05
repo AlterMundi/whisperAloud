@@ -37,7 +37,7 @@ from .main_window_logic import (
     should_restore_transcribing_after_cancel,
     transcribing_status_text,
 )
-from .partial_view_logic import PartialViewState
+from .partial_view_logic import PartialViewState, tentative_rgba
 from .settings_dialog import SettingsDialog
 from .shortcuts_window import ShortcutsWindow
 from .sound_feedback import SoundFeedback
@@ -911,26 +911,36 @@ class MainWindow(Gtk.ApplicationWindow):
         """Render the tracked (committed, tentative) partial text into the
         transcription view: committed text normal, tentative text dimmed.
 
-        Uses Gtk.TextBuffer.insert_markup with GLib.markup_escape_text on both
-        pieces of text first, so engine output is never interpreted as markup.
+        Both pieces are inserted as plain text (the tentative tail through a
+        GtkTextTag), so engine output is never interpreted as markup.
         """
         committed, tentative = self._partial_view.render()
         buffer = self.text_view.get_buffer()
 
-        markup = GLib.markup_escape_text(committed)
-        if tentative:
-            # GTK's TextBuffer.insert_markup only converts a handful of Pango
-            # attributes into GtkTextTags; "alpha" alone is dropped, so dim via a
-            # muted foreground color (GNOME's standard "dim-label" gray) instead.
-            markup += (
-                '<span foreground="#9a9996">'
-                f"{GLib.markup_escape_text(tentative)}</span>"
-            )
-
         buffer.handler_block(self._buffer_changed_handler_id)
-        buffer.set_text("")
-        buffer.insert_markup(buffer.get_end_iter(), markup, -1)
+        buffer.set_text(committed)
+        if tentative:
+            # Plain-text insertion with a tag (never markup), dimmed from the
+            # view's own foreground so it follows light/dark style (HIG-01).
+            buffer.insert_with_tags(
+                buffer.get_end_iter(), tentative, self._tentative_text_tag()
+            )
         buffer.handler_unblock(self._buffer_changed_handler_id)
+
+    def _tentative_text_tag(self) -> Gtk.TextTag:
+        """Return the buffer's "tentative" tag, recoloured from the text
+        view's current foreground (so a light/dark switch is picked up on
+        the next partial)."""
+        buffer = self.text_view.get_buffer()
+        tag = buffer.get_tag_table().lookup("tentative")
+        if tag is None:
+            tag = buffer.create_tag("tentative")
+        fg = self.text_view.get_color()
+        r, g, b, a = tentative_rgba((fg.red, fg.green, fg.blue, fg.alpha))
+        rgba = Gdk.RGBA()
+        rgba.red, rgba.green, rgba.blue, rgba.alpha = r, g, b, a
+        tag.set_property("foreground-rgba", rgba)
+        return tag
 
     def _on_daemon_level_update(self, level: float) -> None:
         """Handle LevelUpdate signal from daemon."""

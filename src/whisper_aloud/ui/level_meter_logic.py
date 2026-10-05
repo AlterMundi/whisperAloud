@@ -26,3 +26,22 @@ def level_color_zone(rms: float) -> str:
     if value < 0.8:
         return "yellow"
     return "red"
+
+
+RGBA = tuple[float, float, float, float]
+
+# Alpha applied to the widget's foreground colour for each neutral part of the
+# meter (HIG-01 / audit F-3): the meter follows light and dark style instead of
+# drawing a hard-coded dark bar.
+_NEUTRAL_ALPHAS = {
+    "track": 0.10,
+    "border": 0.25,
+    "tick": 0.35,
+    "peak": 0.90,
+}
+
+
+def meter_neutral_colors(foreground: RGBA) -> dict[str, RGBA]:
+    """Return track/border/tick/peak colours derived from the foreground RGBA."""
+    r, g, b, a = foreground
+    return {name: (r, g, b, a * alpha) for name, alpha in _NEUTRAL_ALPHAS.items()}
