@@ -349,3 +349,125 @@ class TextInserter {
 - `src/whisper_aloud/service/daemon.py`
 - `flatpak/org.fede.whisperaloud.yml`
 - `docs/flatpak.md`
+
+
+---
+
+## Appendix A — Portals and comparable apps (supporting research, 2026-10-05)
+
+Each claim is tagged **[V]** (I read the doc or source myself) or **[I]** (inferred).
+
+### 1. Portals
+
+**Does RemoteDesktop show the indicator for a keyboard-only session? Yes, on every GNOME version I checked, including main.**
+- [V] In mutter, `meta_remote_desktop_session_start()` always calls `init_remote_access_handle()` and notifies the RemoteAccessController. It does this whether or not a screencast is attached. https://gitlab.gnome.org/GNOME/mutter/-/raw/main/src/backends/meta-remote-desktop-session.c
+- [V] In gnome-shell `remoteAccess.js`, `ScreenSharingIndicator` adds every handle that is not `isRecording` and shows itself while any handle exists. The handle carries no device-type or "input-only" property, so the shell has no way to tell a keyboard-only session apart. The indicator also stays up for at least 5 s (`MIN_SHARED_INDICATOR_VISIBLE_TIME_US`) after the session ends. https://gitlab.gnome.org/GNOME/gnome-shell/-/raw/main/js/ui/status/remoteAccess.js
+- [V] I found no MR that hides or softens the indicator for input-only sessions. I searched the gnome-shell and mutter MRs and issues. The closest is issue #8821, "RDP: Screen sharing indicator always present" (Nov 2025, open, no developer reply). https://gitlab.gnome.org/GNOME/gnome-shell/-/work_items/8821
+- [V] The Handy portal PR documents the same behaviour: "The GNOME screen-sharing indicator appears during injection and may linger briefly after completion." https://github.com/cjpais/Handy/pull/689
+- [V] The KeePassXC PR also notes that GNOME shows the orange remote-desktop icon while a session is active. https://github.com/keepassxreboot/keepassxc/pull/13359
+
+**RemoteDesktop portal v2 basics** [V] https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html
+- Device types are KEYBOARD=1, POINTER=2, TOUCHSCREEN=4.
+- `persist_mode` can be 0, 1 or 2 (2 = until revoked). A `restore_token` is single-use, so you must save the new one each time.
+- The docs recommend EIS via `ConnectToEIS`. Once EIS is connected, the `Notify*` methods must not be used.
+- [V] xdg-desktop-portal-gnome 48 implements `persist_mode`/restore data and a "remote clipboard" switch in the dialog. https://gitlab.gnome.org/GNOME/xdg-desktop-portal-gnome/-/raw/gnome-48/src/remotedesktop.c
+- [I] A valid token restores the session without showing the dialog again. Emote and KeePassXC both rely on this.
+
+**libei text events (new)**
+- [V] libei 1.6 (May 2026) added an `ei_text` capability with keysym and UTF-8 events. A client can send the string "Hello World" and the compositor maps it to keysyms. http://who-t.blogspot.com/2026/07/libei-and-keysymtext-events.html
+- [V] Mutter support is MR !4996, "eis: Handle libei keysym and utf8 text events" by Peter Hutterer. It is still open: it was a draft waiting on the libei release, and Garnacho and Ådahl were asked to review. https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/4996
+- [I] This would let text be typed directly instead of via Ctrl+V, but it still runs through a RemoteDesktop session, so it does not remove the indicator.
+
+**InputCapture is capture-only** [V]
+- The docs say it "allows capturing input events from connected physical or logical devices"; events go to the app. It cannot inject input. https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html
+
+**The Clipboard portal is tied to a session** [V]
+- It "extends sessions created by other portals". `RequestClipboard` must be called before the session starts, and "Currently, the Remote Desktop and Input Capture portals support clipboard integration." https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Clipboard.html
+- So using it to avoid wl-copy still means opening a RemoteDesktop session, which shows the indicator.
+
+**Is a text-insertion or dictation portal proposed? No.**
+- [V] I searched the flatpak/xdg-desktop-portal issues for "virtual keyboard", "type text", "input method", "dictation", "autotype", "auto-type", "text input", "speech" and "keepassxc". The only related items are:
+  - #1690, "Introduce Speech portal" (open since April 2025). It covers text-to-speech only; recognition is "in the future". Reviews from swick and jadahl ask for explicit user action to enable a speech provider. https://github.com/flatpak/xdg-desktop-portal/pull/1690
+  - #2112, "Add local model portals" (Language/Speech/Vision). It was a draft and was closed unmerged with no maintainer review. https://github.com/flatpak/xdg-desktop-portal/pull/2112
+  - #565, "Add UI automation portal" (open since 2021, no maintainer guidance). https://github.com/flatpak/xdg-desktop-portal/issues/565
+  - #2009/#2010, a keyboard-layout option for RemoteDesktop (closed May 2026). https://github.com/flatpak/xdg-desktop-portal/pull/2010
+- [V] A GNOME Discourse thread, "Proposal: desktop-wide offline speech-to-text / dictation support" (June 2026), pointed at ibus-speech-to-text, Speed of Sound and Myna. No GNOME core developers replied. https://discourse.gnome.org/t/proposal-desktop-wide-offline-speech-to-text-dictation-support/35858
+
+**What GNOME and portal developers recommend**
+- [V] I found no explicit statement from Ådahl, Garnacho, Stavracas or Wick recommending a mechanism for "typing into other apps". What the record does show:
+  - Hutterer's libei text work is meant to make "a bunch of utilities a lot simpler to write". http://who-t.blogspot.com/2026/07/libei-and-keysymtext-events.html
+  - The portal docs steer clients to EIS (link above).
+  - Fedora 42 shipped ibus-speech-to-text, a dictation engine built as an input method. https://fedoraproject.org/wiki/Changes/ibus-speech-to-text
+- [I] The sanctioned paths are therefore (a) RemoteDesktop + libei, which brings the indicator, or (b) an IBus input-method engine. Mutter implements `text-input-v3` and gnome-shell bridges it to IBus, so committed text reaches GTK, Qt and Electron apps with no remote-control indicator.
+- [V] Mutter's Wayland protocol list includes `text-input` v3 but neither `virtual-keyboard-unstable-v1` nor `input-method-v2`. https://gitlab.gnome.org/GNOME/mutter/-/raw/main/src/meson.build
+
+### 2. How comparable apps do it
+
+- **KeePassXC 2.8** [V]
+  - Uses the RemoteDesktop portal with `NotifyKeyboardKeysym`, plus GlobalShortcuts. It has restore-token persistence (never / until exit / until revoked), an optional "keep remote desktop connection open", and an experimental "use remote desktop for clipboard" option.
+  - It has no focus tracking on Wayland. Their docs list "GNOME 51+, supported since 48".
+  - Merged in PR #13359 on 2026-06-20. They earlier tried libei but hit invalid-keymap-fd problems (PR #10905).
+  - https://raw.githubusercontent.com/keepassxreboot/keepassxc/develop/docs/topics/AutoType.adoc, https://github.com/keepassxreboot/keepassxc/pull/13359, https://github.com/keepassxreboot/keepassxc/pull/10905
+- **Emote** — this is the most relevant pattern for us. [V]
+  - Uses RemoteDesktop (KEYBOARD only) + libei (`ConnectToEIS` through python libei) with `persist_mode=UNTIL_REVOKED`. It saves the new restore token on every session.
+  - On GNOME it opens a fresh restored session for each paste and closes it afterwards, so the indicator flashes rather than staying on. Only on KDE does it keep the session open, because KDE notifies on every new session.
+  - Its README says it releases control after each paste on non-KDE desktops, and tells GNOME users to allow "Remote Interaction".
+  - https://github.com/tom-james-watson/Emote (README; `emote/wayland_paste.py`)
+- **Speed of Sound** (Flathub)
+  - [V] Uses the RemoteDesktop portal (through the author's "Stargate" library), with clipboard output as a fallback. https://www.speedofsound.io/faq/, https://github.com/zugaldia/speedofsound
+  - [I] Session lifetime and how the indicator behaves are not documented.
+- **Handy (cjpais)** [V]
+  - Uses wtype, dotool (needs the `input` group) or ydotool, falling back to enigo. Its README says wtype does not work on Ubuntu 26.04/GNOME. https://github.com/cjpais/Handy
+  - A RemoteDesktop-portal PR (#689) is still unmerged. https://github.com/cjpais/Handy/pull/689
+- **Speech Note / dsnote** [V]
+  - "Insert into active window" on Wayland requires an external `ydotoold` daemon. Under Flatpak the user must grant access to its socket.
+  - There are open problems with root-owned sockets under Flatpak.
+  - https://github.com/mkiol/dsnote (README), https://github.com/mkiol/dsnote/issues/313
+- **Numen** [V] Uses dotool, which writes to `/dev/uinput`. dotool ships a udev rule `KERNEL=="uinput", GROUP="input", MODE="0620"`. https://git.sr.ht/~geb/dotool
+- **nerd-dictation** [V] Options are XDOTOOL (default, X11), DOTOOL, DOTOOLC, YDOTOOL and WTYPE. https://github.com/ideasman42/nerd-dictation
+- **voxtype** [V] Tries wtype, then dotool, then ydotool, then clipboard. A "paste" mode copies and sends Ctrl+V. https://github.com/peteonrails/voxtype
+- **hyprwhspr** [V]
+  - Its docs say "Mutter blocks wtype". On GNOME it runs a private `ydotoold` on its own socket, rootless through the `uaccess` ACL on `/dev/uinput`, with the `input` group as a fallback.
+  - It uses notifications instead of an overlay to avoid stealing focus.
+  - https://github.com/goodroot/hyprwhspr/blob/main/docs/CONFIGURATION.md
+- **Blurt** (GNOME extension) [V] Only writes to PRIMARY/clipboard; the user pastes with middle-click or Ctrl+V. Auto-paste uses xdotool, so it is X11 only. https://github.com/QuantiusBenignus/blurt
+- **gnome-speech2text** [V] Auto-insert works on X11 only; on Wayland it is clipboard only. https://github.com/kavehtehrani/gnome-speech2text
+- **Speech Panel extension** [V] Uses dotool. https://github.com/TheSkyNet/speech-to-text
+- **ibus-speech-to-text** [V] An IBus engine using VOSK. Works on Wayland in any IBus-aware app. https://github.com/PhilippeRo/IBus-Speech-To-Text
+- **Smile** — you were right about the companion extension. [V]
+  - The app emits a D-Bus signal, `it.mijorus.smile.CopiedEmoji`.
+  - The extension, running inside gnome-shell, creates a Clutter virtual keyboard (`seat.create_virtual_device(KEYBOARD_DEVICE)`) and sends Ctrl+V with `notify_keyval`.
+  - Because it is in-shell, there is no portal and no remote-access handle, so no indicator. It needs the user to install the extension.
+  - https://github.com/mijorus/smile-gnome-extension (`extension.js`), https://extensions.gnome.org/extension/6096/smile-complementary-extension/
+- **espanso** [V] Needs `/dev/input/event*` and `/dev/uinput`. It recommends `setcap cap_dac_override+p` and drops the capability after opening the devices. Wayland support is "experimental", and GNOME shows a clipboard "flicker". https://espanso.org/docs/install/linux/
+- **Talon** [V] Announced in May 2026 that it is dropping Linux/X11 and will not support Wayland, because it lacks compositor integration. https://www.osnews.com/story/145162/accessibility-input-tool-removes-x11-support-doesnt-want-to-support-wayland-users-caught-in-the-middle/
+- **ydotool** [V] `ydotoold` has been mandatory since v1.0 and needs `/dev/uinput`, which "usually requires root". https://github.com/ReimuNotMoe/ydotool
+- **wtype** [V] Uses `zwp_virtual_keyboard_v1`, which mutter does not implement (see the mutter protocol list above). https://github.com/atx/wtype
+
+### Summary table
+
+| App | Mechanism | Works on GNOME Wayland? | Permission needed |
+|---|---|---|---|
+| KeePassXC 2.8 | RemoteDesktop `NotifyKeyboardKeysym` + GlobalShortcuts | Yes (indicator shows) | Portal dialog, restore token |
+| Emote | RemoteDesktop + libei; Ctrl+V; new session per paste | Yes (indicator flashes about 5 s) | "Remote Interaction" once, restore token |
+| Speed of Sound | RemoteDesktop portal; clipboard fallback | Yes (indicator shows) [I on lifetime] | Portal dialog |
+| Smile | In-shell Clutter virtual keyboard sends Ctrl+V | Yes, no indicator | User installs a shell extension |
+| ibus-speech-to-text | IBus engine `commit_text` via text-input-v3 | Yes, no indicator | IBus engine installed on the host and selected as an input source |
+| Speech Note | clipboard + ydotool | Yes, with setup | ydotoold with root/uinput; Flatpak socket access |
+| Numen / dotool | uinput | Yes | `input` group + udev rule |
+| nerd-dictation | xdotool/ydotool/dotool/wtype | Yes with dotool or ydotool; no with wtype | uinput access |
+| Handy | wtype/dotool/ydotool/enigo | Partial (wtype fails) | `input` group or ydotoold |
+| voxtype / hyprwhspr | wtype, falling back to ydotool/dotool or clipboard | Yes via ydotool | uinput (uaccess ACL or `input` group) |
+| espanso | evdev + uinput | Yes, experimental | `cap_dac_override` |
+| Blurt / speech2text extensions | clipboard only (xdotool on X11) | Copy only | None |
+| wtype | `zwp_virtual_keyboard_v1` | No | n/a |
+| Talon | X11 only | No | n/a |
+
+### What this means for WhisperAloud
+1. [V] The permanent indicator comes from keeping one RemoteDesktop session open. No version of GNOME distinguishes keyboard-only sessions, and no upstream change is pending.
+2. [I] Emote's approach is the quickest mitigation: `persist_mode=2`, save the restore token every time, open a session for each paste and close it immediately. The indicator then only flashes for about 5 s, with no dialog after the first grant.
+3. [I] For no indicator at all there are two options:
+   - An IBus engine (the GNOME-native input-method path).
+   - A small companion shell extension like Smile's that sends Ctrl+V or `commit_text` from inside the shell.
+   - uinput tools (ydotool, dotool) also avoid the indicator but need host-level permissions that don't fit a Flatpak.
+4. [I] libei `ei_text` (mutter !4996, unmerged) would allow direct UTF-8 typing without the clipboard, but still through a RemoteDesktop session.
