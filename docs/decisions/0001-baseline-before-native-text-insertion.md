@@ -1,6 +1,14 @@
 # 0001 — Baseline before replacing the auto-paste method
 
 - **Status:** accepted, 2026-10-05
+- **Follow-up (WHISP-119):** the new method has landed. Auto-paste uses the
+  GNOME Shell extension's `org.fede.whisperaloud.TextInput.InsertText`
+  (extension version 5; `contrib/gnome-shell-extension/README.md`), and the
+  default `clipboard.paste_backend = "auto"` never opens a RemoteDesktop
+  session. The baseline method is the opt-in switch
+  `clipboard.paste_backend = "remote-desktop"` (see "Rollback" below and
+  `docs/configuration.md`). Field validation: section 21 of
+  `docs/validation/0.3.0-field-checklist.md`.
 - **Baseline tag:** `baseline/0.3.0-remotedesktop-paste`
 - **Baseline bundle:** `~/REPOS/scripts/flatpak-build/whisper-aloud-0.3.0-baseline-remotedesktop.flatpak`
   (built from `ae548e7`; later commits up to the tag are documentation only)
@@ -52,3 +60,14 @@ flatpak install --user -y --reinstall --bundle \
 The RemoteDesktop path will stay in the code as an opt-in backend, so a
 configuration switch is the first, lightest rollback step once the new method
 lands.
+
+That switch now exists (WHISP-119). First, lightest rollback step, with no
+reinstall: set it in `~/.var/app/org.fede.whisperaloud/config/whisper_aloud/config.json`
+(Flatpak) or `~/.config/whisper_aloud/config.json` (native),
+
+```json
+{"clipboard": {"paste_backend": "remote-desktop"}}
+```
+
+then `whisper-aloud reload` (or restart the daemon). Setting it back to
+`"auto"` closes the RemoteDesktop session, and its indicator, right away.

@@ -5,6 +5,25 @@ All notable user-facing changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Auto-paste without the "remote access" indicator: the GNOME Shell
+  extension (`whisperaloud@fede`, version 5) now inserts the transcription
+  itself through a new `org.fede.whisperaloud.TextInput` interface on its
+  existing bus name (no new Flatpak permission, no consent dialog). It
+  types the text through GNOME's input method when a text field has focus
+  (in chunks under the Wayland message limit), and otherwise puts it on the
+  clipboard and presses Shift+Insert (Ctrl+Shift+Insert in terminals; text
+  with a newline is never typed into a terminal). It only accepts the
+  WhisperAloud daemon as caller, and refuses while the screen is locked, a
+  system dialog is open, a password field has focus, or the dictated-into
+  window lost focus. The daemon uses it first whenever the extension
+  reports the capability (WHISP-119).
+- `clipboard.paste_backend` (`auto`, `extension`, `remote-desktop`,
+  `clipboard`; env `WHISPER_ALOUD_CLIPBOARD_PASTE_BACKEND`). `auto` uses the
+  extension, then `ydotool`/`xdotool` on native installs (unchanged), and
+  otherwise leaves the text on the clipboard with a "Text copied — press
+  Ctrl+V to paste" notification. `remote-desktop` brings back the 0.3.0
+  RemoteDesktop-portal paste as an explicit rollback switch
+  (ADR 0001).
 - Input normalization is now the first stage of live audio processing. A
   digital, speech-level-driven gain lifts quiet microphones to a known
   level (speech toward -20 dBFS by default, less when background noise would be lifted above -50 dBFS) before trimming, the noise gate and the
@@ -61,6 +80,13 @@ All notable user-facing changes to this project are documented here.
   was not yet bound; that timer is gone.
 
 ### Changed
+- The RemoteDesktop portal is no longer used for auto-paste by default, so
+  the Flatpak build no longer asks "Share your screen" on first paste and
+  GNOME no longer shows a permanent orange "remote access" indicator. The
+  portal session is only opened (and prewarmed at start) with
+  `clipboard.paste_backend = "remote-desktop"`, and is closed as soon as
+  the setting changes away from it. Without the extension, Flatpak auto-paste
+  becomes clipboard-only with a notification.
 - Recording is now refused up front when the configured model is missing or
   failed to load (D-Bus API 1.7.1), for every engine, not only streaming
   ones: starting a recording that could never be transcribed used to waste

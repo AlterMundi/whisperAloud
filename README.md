@@ -56,8 +56,9 @@ flatpak install --user whisper-aloud-0.3.0.flatpak
 The `org.gnome.Platform//51` runtime is fetched from Flathub automatically
 if it isn't already installed. To build the bundle yourself instead, run
 `scripts/build_flatpak.sh`; see [`docs/flatpak.md`](docs/flatpak.md) for the
-manifest and sandbox/portal details (global hotkey and auto-paste both go
-through XDG portals; no input-injection tools inside the sandbox).
+manifest and sandbox/portal details (the global hotkey goes through an XDG
+portal, auto-paste through the optional GNOME Shell extension; no
+input-injection tools inside the sandbox).
 
 Migrating from an existing source/systemd install? Follow
 ["Install and validate"](docs/flatpak.md#install-and-validate-field-test-with-fede)
@@ -140,26 +141,30 @@ capped at 5000). Full semantics:
 
 ## First run
 
-The first time the daemon starts, GNOME shows two one-time permission
-dialogs:
+The first time the daemon starts, GNOME shows one one-time permission
+dialog:
 
 - **"Add keyboard shortcuts"** — lets you pick the toggle-recording
   shortcut (default `<Super><Alt>r`). Pick a key combo and accept; WhisperAloud
   remembers it from then on.
-- **Remote Desktop ("Share your screen")** — only in the Flatpak build, and
-  only the first time WhisperAloud tries to auto-paste into another window.
-  Choose **Allow Remote Interaction**, check **Remember This Selection**,
-  and select **Share**. If you decline or close the dialog, WhisperAloud
-  still copies each transcript to the clipboard — you'll just need to paste
-  it yourself (<kbd>Ctrl</kbd>+<kbd>V</kbd>) instead of it appearing
-  automatically.
 
-Both choices are remembered by GNOME, not asked again on every start. To
-change or revoke them later: **Settings → Keyboard → View and Customize
-Shortcuts** for the hotkey, and **Settings → Apps → WhisperAloud →
-Permissions** for Remote Desktop access (Flatpak only). From a terminal,
-`flatpak permission-reset org.fede.whisperaloud` clears every permission
-WhisperAloud was granted, so both dialogs reappear next time. See
+To have the transcript typed into the app you are using, enable the
+optional GNOME Shell extension (**Settings → Advanced → Top bar
+indicator**, which shows the install command). GNOME Shell then inserts
+the text itself: no extra dialog and no "remote access" indicator. Without
+the extension, the Flatpak build copies each transcript to the clipboard
+and tells you to press <kbd>Ctrl</kbd>+<kbd>V</kbd>; a native install
+pastes with `ydotool`/`xdotool` if they are set up. The 0.3.0 Remote
+Desktop method (one "Share your screen" dialog, then an orange indicator
+while active) is still available as an opt-in:
+`"clipboard": {"paste_backend": "remote-desktop"}`, see
+[`docs/configuration.md`](docs/configuration.md#auto-paste-clipboard).
+
+The shortcut choice is remembered by GNOME, not asked again on every
+start. To change or revoke it later: **Settings → Keyboard → View and
+Customize Shortcuts**. From a terminal, `flatpak permission-reset
+org.fede.whisperaloud` clears every permission WhisperAloud was granted,
+so the dialogs reappear next time. See
 [`docs/flatpak.md`](docs/flatpak.md#first-run) for more detail on the
 Flatpak build specifically.
 
@@ -189,7 +194,7 @@ systemd user service
 org.fede.whisperaloud (daemon)
   - recorder + processing (gate -> AGC -> denoise -> limiter)
   - transcriber (faster-whisper / Parakeet / Nemotron streaming)
-  - clipboard (copy, and portal-based paste under Flatpak)
+  - clipboard (copy, then paste via the GNOME Shell extension)
   - persistence (SQLite + FTS5 history)
   - hotkeys (XDG Portal / libkeybinder3) + tray
         ^
