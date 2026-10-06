@@ -20,6 +20,7 @@ from ..clipboard import (  # noqa: F401 -- ClipboardManager/TestClipboardStub ke
     TestClipboardStub,      # actual construction always goes through build_clipboard_manager() below.
     WindowManager,
     build_clipboard_manager,
+    is_own_window,
 )
 from ..config import WhisperAloudConfig, detect_config_changes
 from ..exceptions import ModelNotAvailableError
@@ -947,6 +948,23 @@ class WhisperAloudService:
             extension_can_insert=bool(inserter is not None and inserter.can_insert),
         )
 
+    def _is_own_window_focused(self) -> bool:
+        """True when the window currently focused is WhisperAloud's own GUI
+        window -- a fresh read via ``window_manager.get_active_window()``,
+        never a cached/captured value (there is none at this call site: it
+        is only used on the "no captured window" auto-paste path). Any
+        failure to read it is treated as "don't know" (False), so a window
+        manager hiccup degrades to the pre-existing behavior (paste into
+        whatever is focused) rather than silently skipping every paste."""
+        if not self.window_manager:
+            return False
+        try:
+            current = self.window_manager.get_active_window()
+        except Exception as e:
+            logger.debug(f"Could not check focused window before auto-paste: {e}")
+            return False
+        return is_own_window(current)
+
     def _show_paste_notice(self, notice: Optional[str]) -> None:
         """Tell the user what happened to an auto-paste whose text is on the
         clipboard but was not inserted (a text_insertion.NOTICE_*)."""
@@ -1168,6 +1186,20 @@ class WhisperAloudService:
             if self.window_manager and self.config.clipboard.paste_to_captured_window:
                 try:
                     captured = self.window_manager.get_active_window()
+                    if captured and is_own_window(captured):
+                        # Field bug: StopRecording is most often called with
+                        # the GUI window itself focused (the user just
+                        # clicked its Stop button) -- capturing it here
+                        # would later re-activate (refocus) our own window
+                        # at completion, stealing focus back from whatever
+                        # app the user switched to while transcribing.
+                        logger.info(
+                            f"Not capturing WhisperAloud's own window for "
+                            f"job {job_id[:8]} (wm_class={captured.wm_class!r}); "
+                            "will insert into whatever window has focus "
+                            "when transcription completes"
+                        )
+                        captured = None
                     if captured:
                         self._captured_by_job[job_id] = captured
                         logger.info(
@@ -2144,6 +2176,12 @@ class WhisperAloudService:
         if self.window_manager and self.config.clipboard.paste_to_captured_window:
             try:
                 captured = self.window_manager.get_active_window()
+                if captured and is_own_window(captured):
+                    logger.info(
+                        f"Not capturing WhisperAloud's own window for "
+                        f"auto-stop job {job_id[:8]} (wm_class={captured.wm_class!r})"
+                    )
+                    captured = None
                 if captured:
                     self._captured_by_job[job_id] = captured
                     logger.info(
@@ -2639,6 +2677,21 @@ class WhisperAloudService:
                                     )
                                     if self.notifications:
                                         self.notifications.show_paste_skipped_focus_changed()
+                            elif self.window_manager and self._is_own_window_focused():
+                                # No window was captured at stop time (either
+                                # capture was disabled/unavailable, or it WAS
+                                # our own window and got filtered out in
+                                # StopRecording/_on_recorder_auto_stop above)
+                                # -- never type into our own GUI window just
+                                # because it happens to be focused again at
+                                # completion; the result is already visible
+                                # there and the text is still on the
+                                # clipboard. Quiet: no notification spam.
+                                logger.info(
+                                    "No captured window and WhisperAloud's "
+                                    "own window is currently focused; "
+                                    "skipping auto-paste"
+                                )
                             else:
                                 GLib.idle_add(_call_once_idle(_trigger_paste))
                                 logger.info("Auto-paste triggered")
