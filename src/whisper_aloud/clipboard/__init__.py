@@ -4,7 +4,7 @@ from .clipboard_manager import ClipboardManager, TestClipboardStub, build_clipbo
 from .paste_selection import build_paste_simulator
 from .paste_simulator import PasteSimulator
 from .portal_paste_simulator import PortalPasteSimulator
-from .window_manager import WindowInfo, WindowManager
+from .window_manager import WindowInfo, WindowManager, is_own_window
 
 __all__ = [
     "ClipboardManager",
@@ -15,4 +15,5 @@ __all__ = [
     "PortalPasteSimulator",
     "WindowInfo",
     "WindowManager",
+    "is_own_window",
 ]

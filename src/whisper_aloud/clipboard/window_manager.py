@@ -49,6 +49,61 @@ class WindowInfo:
     window_id: int
     title: str
     backend: str  # "gnome-extension", "xdotool", "none"
+    # The window manager's class/app-id hint, when the backend can report
+    # one (currently only "gnome-extension", via GetFocusedWindow's
+    # "wm_class" field -- Mutter's GetFocusedWindow reports the Wayland
+    # xdg-shell app_id or the X11 WM_CLASS). Empty string when unknown
+    # (xdotool never reports a class, and an older extension predating this
+    # field won't include it either). See `is_own_window()` below.
+    wm_class: str = ""
+
+
+# Field bug fix: stopping recording from the GUI window (as opposed to the
+# global hotkey) made the GUI's OWN window the "captured" target -- it was
+# the focused window at the moment Stop was clicked. If the user then
+# switched to a different app while transcription ran, completion
+# re-activated (refocused) the WhisperAloud window instead of leaving the
+# user in the app they had switched to. A WhisperAloud window must never be
+# treated as a capture/paste target, in either direction:
+#   * capture time (StopRecording/_on_recorder_auto_stop): never store it
+#     as `_captured_by_job[job_id]`.
+#   * completion time, when there was no captured window at all: never
+#     auto-type into it just because it happens to be focused again.
+#
+# "org.fede.whisperaloud" matches both the native GtkApplication id
+# (`org.fede.whisperaloud.Gui`, see ui/app.py) and the Flatpak app id
+# (`org.fede.whisperaloud`, see flatpak/org.fede.whisperaloud.yml) -- GTK4
+# uses the application id as both the Wayland xdg-shell app_id and the X11
+# WM_CLASS, so this one prefix covers native and sandboxed installs on
+# both display backends.
+_OWN_WM_CLASS_PREFIX = "org.fede.whisperaloud"
+# Fallback when wm_class is unavailable (xdotool backend, or an extension
+# older than the wm_class field): the GUI's window title is always
+# "WhisperAloud" or a dialog title starting with it (see
+# ui/main_window.py's set_title() calls).
+_OWN_WINDOW_TITLE_PREFIX = "whisperaloud"
+
+
+def is_own_window(info: Optional["WindowInfo"]) -> bool:
+    """True when ``info`` refers to a WhisperAloud GUI window itself.
+
+    Primary signal: ``wm_class`` (see the field's docstring above). Falls
+    back to the window title when ``wm_class`` is empty or not a real
+    string (an older extension, the xdotool backend, or a loosely-typed
+    test double) -- never raises, and never misidentifies an unrelated
+    window just because some attribute could not be read: anything that
+    isn't an actual, non-empty string is treated as "don't know", which
+    resolves to False (not our own window) rather than guessing.
+    """
+    if info is None:
+        return False
+    wm_class = getattr(info, "wm_class", "")
+    if isinstance(wm_class, str) and wm_class.strip():
+        return wm_class.strip().lower().startswith(_OWN_WM_CLASS_PREFIX)
+    title = getattr(info, "title", "")
+    if isinstance(title, str) and title.strip():
+        return title.strip().lower().startswith(_OWN_WINDOW_TITLE_PREFIX)
+    return False
 
 
 class WindowManager:
@@ -571,10 +626,12 @@ class WindowManager:
             if wid_v is None:
                 return None
             title_v = d.lookup_value("title", None)
+            wm_class_v = d.lookup_value("wm_class", None)
             return WindowInfo(
                 window_id=int(wid_v.unpack()),
                 title=title_v.unpack() if title_v else "",
                 backend="gnome-extension",
+                wm_class=wm_class_v.unpack() if wm_class_v else "",
             )
         except Exception as e:
             logger.warning(f"GNOME GetFocusedWindow failed: {e}")

@@ -1,7 +1,7 @@
 """Tests for WindowManager."""
 import logging
 from unittest.mock import patch, MagicMock
-from whisper_aloud.clipboard.window_manager import WindowManager, WindowInfo
+from whisper_aloud.clipboard.window_manager import WindowManager, WindowInfo, is_own_window
 
 
 class TestWindowInfo:
@@ -10,6 +10,134 @@ class TestWindowInfo:
         assert info.window_id == 12345
         assert info.title == "Terminal"
         assert info.backend == "xdotool"
+        assert info.wm_class == ""  # default when the backend can't report one
+
+    def test_wm_class_field(self):
+        info = WindowInfo(
+            window_id=1, title="x", backend="gnome-extension",
+            wm_class="org.gnome.Terminal",
+        )
+        assert info.wm_class == "org.gnome.Terminal"
+
+
+class TestIsOwnWindow:
+    """Field bug fix: a WhisperAloud window must never be captured/pasted
+    into as if it were an external app -- see window_manager.py's
+    docstring on `_OWN_WM_CLASS_PREFIX` for the full story."""
+
+    def test_none_is_not_own_window(self):
+        assert is_own_window(None) is False
+
+    def test_native_gtk_wm_class_is_own_window(self):
+        info = WindowInfo(
+            window_id=1, title="WhisperAloud", backend="gnome-extension",
+            wm_class="org.fede.whisperaloud.Gui",
+        )
+        assert is_own_window(info) is True
+
+    def test_flatpak_wm_class_is_own_window(self):
+        info = WindowInfo(
+            window_id=1, title="WhisperAloud", backend="gnome-extension",
+            wm_class="org.fede.whisperaloud",
+        )
+        assert is_own_window(info) is True
+
+    def test_wm_class_match_is_case_insensitive(self):
+        info = WindowInfo(
+            window_id=1, title="WhisperAloud", backend="gnome-extension",
+            wm_class="ORG.FEDE.WHISPERALOUD.GUI",
+        )
+        assert is_own_window(info) is True
+
+    def test_unrelated_wm_class_is_not_own_window(self):
+        info = WindowInfo(
+            window_id=2, title="Terminal", backend="gnome-extension",
+            wm_class="org.gnome.Terminal",
+        )
+        assert is_own_window(info) is False
+
+    def test_falls_back_to_title_when_wm_class_unavailable(self):
+        """xdotool never reports a class at all."""
+        info = WindowInfo(window_id=3, title="WhisperAloud", backend="xdotool")
+        assert is_own_window(info) is True
+
+    def test_title_fallback_is_case_insensitive_and_prefix_match(self):
+        info = WindowInfo(
+            window_id=3, title="WhisperAloud - Daemon Not Running", backend="xdotool",
+        )
+        assert is_own_window(info) is True
+
+    def test_unrelated_title_without_wm_class_is_not_own_window(self):
+        info = WindowInfo(window_id=4, title="My Terminal", backend="xdotool")
+        assert is_own_window(info) is False
+
+    def test_non_string_wm_class_and_title_degrade_to_false(self):
+        """A loosely-typed test double (e.g. a plain MagicMock standing in
+        for WindowInfo) must never be misidentified as our own window just
+        because attribute access on it never raises."""
+        fake = MagicMock()
+        fake.wm_class = MagicMock()
+        fake.title = MagicMock()
+        assert is_own_window(fake) is False
+
+
+class _FakeVariantDict:
+    """Stands in for the GLib.Variant `a{sv}` GetFocusedWindow returns --
+    just enough of `lookup_value()` for `_get_active_gnome()`."""
+
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def lookup_value(self, key, _type):
+        return self._mapping.get(key)
+
+
+class TestGnomeBackendReportsWmClass:
+    def test_get_active_gnome_includes_wm_class(self):
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            wm = WindowManager()
+        proxy = MagicMock()
+
+        def _call_sync(_method, *_args, **_kwargs):
+            res = MagicMock()
+            res.get_child_value.return_value = _FakeVariantDict({
+                "id": MagicMock(unpack=lambda: 777),
+                "title": MagicMock(unpack=lambda: "Terminal"),
+                "wm_class": MagicMock(unpack=lambda: "org.gnome.Terminal"),
+            })
+            return res
+
+        proxy.call_sync.side_effect = _call_sync
+        wm._gnome_proxy = proxy
+
+        info = wm.get_active_window()
+        assert info is not None
+        assert info.window_id == 777
+        assert info.title == "Terminal"
+        assert info.wm_class == "org.gnome.Terminal"
+
+    def test_get_active_gnome_defaults_wm_class_when_missing(self):
+        """An older extension predating the wm_class field: the "id" key
+        still answers, just without "wm_class" -- must default to ""
+        rather than raise."""
+        with patch.object(WindowManager, "_check_gnome_extension", return_value=True):
+            wm = WindowManager()
+        proxy = MagicMock()
+
+        def _call_sync(_method, *_args, **_kwargs):
+            res = MagicMock()
+            res.get_child_value.return_value = _FakeVariantDict({
+                "id": MagicMock(unpack=lambda: 777),
+                "title": MagicMock(unpack=lambda: "Terminal"),
+            })
+            return res
+
+        proxy.call_sync.side_effect = _call_sync
+        wm._gnome_proxy = proxy
+
+        info = wm.get_active_window()
+        assert info is not None
+        assert info.wm_class == ""
 
 
 class TestWindowManagerBackendDetection:
